@@ -45,6 +45,60 @@ class TestContainsScorer(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestContainsAllScorer(unittest.TestCase):
+    def test_all_present(self):
+        ok, _ = score_case(
+            _case({"type": "contains_all", "substrings": ["hello", "world"]}),
+            "hello world",
+        )
+        self.assertTrue(ok)
+
+    def test_one_missing_fails_and_names_it(self):
+        ok, detail = score_case(
+            _case({"type": "contains_all", "substrings": ["hello", "world"]}),
+            "hello there",
+        )
+        self.assertFalse(ok)
+        self.assertIn("world", detail)
+
+    def test_empty_list_passes(self):
+        ok, _ = score_case(
+            _case({"type": "contains_all", "substrings": []}), "anything"
+        )
+        self.assertTrue(ok)
+
+    def test_non_list_spec_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "contains_all", "substrings": "hello"}), "hello")
+
+
+class TestContainsAnyScorer(unittest.TestCase):
+    def test_one_present_passes(self):
+        ok, _ = score_case(
+            _case({"type": "contains_any", "substrings": ["hello", "hi"]}),
+            "say hi",
+        )
+        self.assertTrue(ok)
+
+    def test_none_present_fails(self):
+        ok, detail = score_case(
+            _case({"type": "contains_any", "substrings": ["hello", "hi"]}),
+            "goodbye",
+        )
+        self.assertFalse(ok)
+        self.assertIn("hello", detail)
+
+    def test_empty_list_fails(self):
+        ok, _ = score_case(
+            _case({"type": "contains_any", "substrings": []}), "anything"
+        )
+        self.assertFalse(ok)
+
+    def test_non_list_spec_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "contains_any", "substrings": "hello"}), "hello")
+
+
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
         ok, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")

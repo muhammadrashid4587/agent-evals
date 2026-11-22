@@ -12,8 +12,8 @@ JSON report.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Five deterministic scorers: exact match, substring, regex, JSON-schema
-  shape, numeric tolerance.
+- Seven deterministic scorers: exact match, substring, contains-all,
+  contains-any, regex, JSON-schema shape, numeric tolerance.
 - A CLI that runs a suite JSON file against an agent named as
   `module:attribute` and exits 0 only when every case passes.
 
@@ -72,6 +72,8 @@ detail; the run continues with the remaining cases.
 | --- | --- | --- |
 | `exact` | `{"expected": "19"}` | output equals the expected string (surrounding whitespace ignored) |
 | `contains` | `{"substring": "hello"}` | output contains the substring |
+| `contains_all` | `{"substrings": ["hello", "world"]}` | output contains every listed substring (empty list passes) |
+| `contains_any` | `{"substrings": ["hello", "hi"]}` | output contains at least one listed substring (empty list fails) |
 | `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
@@ -124,5 +126,5 @@ make demo    # run both example suites through the CLI
 
 - Per-case timeouts, so a hung agent fails the case instead of the run.
 - Weighted cases and partial credit.
-- A `contains_all` / `contains_any` scorer and a JSON-path scorer.
+- A JSON-path scorer.
 - Parallel case execution for slow agents.

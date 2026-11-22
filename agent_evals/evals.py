@@ -8,6 +8,8 @@ Design
 
       {"type": "exact", "expected": "19"}
       {"type": "contains", "substring": "hello"}
+      {"type": "contains_all", "substrings": ["hello", "world"]}
+      {"type": "contains_any", "substrings": ["hello", "hi"]}
       {"type": "regex", "pattern": "^\\d+$"}
       {"type": "json_schema", "schema": {"name": "str", "age": "int"}}
       {"type": "numeric", "expected": 3.14159, "tolerance": 0.001}
@@ -124,6 +126,40 @@ def score_contains(output: str, substring: str) -> tuple:
     return ok, detail
 
 
+def _as_substring_list(spec: dict, kind: str) -> list:
+    """Coerce a scorer spec's ``substrings`` value to a list of strings."""
+    substrings = spec.get("substrings")
+    if not isinstance(substrings, list):
+        raise ValueError(f"{kind} scorer requires a 'substrings' list")
+    return [str(s) for s in substrings]
+
+
+def score_contains_all(output: str, substrings: list) -> tuple:
+    """Pass when the output contains every listed substring.
+
+    An empty list passes: there is nothing required to be present.
+    """
+    missing = [s for s in substrings if s not in output]
+    if not missing:
+        return True, "all substrings found"
+    return False, f"missing substrings: {', '.join(repr(s) for s in missing)}"
+
+
+def score_contains_any(output: str, substrings: list) -> tuple:
+    """Pass when the output contains at least one listed substring.
+
+    An empty list fails: no listed substring can be present.
+    """
+    found = [s for s in substrings if s in output]
+    if found:
+        return True, f"found {found[0]!r}"
+    return (
+        False,
+        "none of the substrings found: "
+        + ", ".join(repr(s) for s in substrings),
+    )
+
+
 def score_regex(output: str, pattern: str) -> tuple:
     """Pass when the regex matches anywhere in the output."""
     try:
@@ -219,6 +255,10 @@ def score_case(case: Case, output: str) -> tuple:
         return score_exact(output, str(spec["expected"]))
     if kind == "contains":
         return score_contains(output, str(spec["substring"]))
+    if kind == "contains_all":
+        return score_contains_all(output, _as_substring_list(spec, kind))
+    if kind == "contains_any":
+        return score_contains_any(output, _as_substring_list(spec, kind))
     if kind == "regex":
         return score_regex(output, str(spec["pattern"]))
     if kind == "json_schema":
