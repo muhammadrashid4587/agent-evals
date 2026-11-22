@@ -17,6 +17,12 @@ Design
       {"type": "json_path", "path": "$.result.total", "expected": 42}
       {"type": "numeric", "expected": 3.14159, "tolerance": 0.001}
 
+* A case may carry a ``weight`` (default 1.0): how much of the suite's
+  total score it is worth. Scorers also return a score in [0, 1] — 1.0
+  on a pass, 0.0 on a fail — and ``contains_all`` earns partial credit
+  equal to the fraction of required substrings found. The report totals
+  ``earned_weight`` over ``total_weight`` as ``weighted_score``.
+
 * The agent under test is a plain callable ``agent(prompt) -> ...``. It may
   return:
     - a ``str`` (the agent's output; token count unknown),
@@ -73,12 +79,17 @@ class Case:
 
     ``timeout`` is an optional per-case limit in seconds: if the agent
     takes longer, the case fails as timed out and the run continues.
+    ``weight`` is how much of the suite's total score the case is worth
+    (default 1.0); a case earns ``score * weight`` points, where the
+    score is 1.0 on a pass and may be a fraction on a fail when the
+    scorer gives partial credit.
     """
 
     id: str
     prompt: str
     scorer: dict
     timeout: Optional[float] = None
+    weight: float = 1.0
 
     @classmethod
     def from_dict(cls, data: dict) -> "Case":
@@ -96,17 +107,33 @@ class Case:
                     f"case {data.get('id')!r}: timeout must be positive, "
                     f"got {timeout!r}"
                 )
+        weight = data.get("weight", 1.0)
+        try:
+            weight = float(weight)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"case {data.get('id')!r}: weight must be a number, "
+                f"got {weight!r}"
+            ) from exc
+        if weight <= 0:
+            raise ValueError(
+                f"case {data.get('id')!r}: weight must be positive, "
+                f"got {weight!r}"
+            )
         return cls(
             id=str(data["id"]),
             prompt=str(data["prompt"]),
             scorer=dict(data["scorer"]),
             timeout=timeout,
+            weight=weight,
         )
 
     def to_dict(self) -> dict:
         data = {"id": self.id, "prompt": self.prompt, "scorer": self.scorer}
         if self.timeout is not None:
             data["timeout"] = self.timeout
+        if self.weight != 1.0:
+            data["weight"] = self.weight
         return data
 
 
@@ -144,14 +171,14 @@ def score_exact(output: str, expected: str) -> tuple:
     surrounding whitespace on both sides)."""
     ok = output.strip() == expected.strip()
     detail = "exact match" if ok else f"expected {expected!r}, got {output!r}"
-    return ok, detail
+    return ok, detail, 1.0 if ok else 0.0
 
 
 def score_contains(output: str, substring: str) -> tuple:
     """Pass when the output contains the substring."""
     ok = substring in output
     detail = "substring found" if ok else f"{substring!r} not in output"
-    return ok, detail
+    return ok, detail, 1.0 if ok else 0.0
 
 
 def _as_substring_list(spec: dict, kind: str) -> list:
@@ -166,11 +193,22 @@ def score_contains_all(output: str, substrings: list) -> tuple:
     """Pass when the output contains every listed substring.
 
     An empty list passes: there is nothing required to be present.
+    Partial credit: the score is the fraction of listed substrings
+    found, so a case that gets most of the way there still earns most
+    of its weight. A case only counts as passed when every substring
+    is found (score 1.0).
     """
     missing = [s for s in substrings if s not in output]
+    if not substrings:
+        return True, "all substrings found", 1.0
+    score = (len(substrings) - len(missing)) / len(substrings)
     if not missing:
-        return True, "all substrings found"
-    return False, f"missing substrings: {', '.join(repr(s) for s in missing)}"
+        return True, "all substrings found", 1.0
+    return (
+        False,
+        f"missing substrings: {', '.join(repr(s) for s in missing)}",
+        score,
+    )
 
 
 def score_contains_any(output: str, substrings: list) -> tuple:
@@ -180,11 +218,12 @@ def score_contains_any(output: str, substrings: list) -> tuple:
     """
     found = [s for s in substrings if s in output]
     if found:
-        return True, f"found {found[0]!r}"
+        return True, f"found {found[0]!r}", 1.0
     return (
         False,
         "none of the substrings found: "
         + ", ".join(repr(s) for s in substrings),
+        0.0,
     )
 
 
@@ -196,7 +235,7 @@ def score_regex(output: str, pattern: str) -> tuple:
         raise ValueError(f"invalid regex {pattern!r}: {exc}") from exc
     ok = match is not None
     detail = "regex matched" if ok else f"pattern {pattern!r} did not match"
-    return ok, detail
+    return ok, detail, 1.0 if ok else 0.0
 
 
 def _check_shape(value: Any, schema: Any, path: str = "$") -> Optional[str]:
@@ -251,11 +290,11 @@ def score_json_schema(output: str, schema: Any) -> tuple:
     try:
         value = json.loads(output)
     except json.JSONDecodeError as exc:
-        return False, f"output is not valid JSON: {exc}"
+        return False, f"output is not valid JSON: {exc}", 0.0
     err = _check_shape(value, schema)
     if err is None:
-        return True, "JSON shape matches"
-    return False, err
+        return True, "JSON shape matches", 1.0
+    return False, err, 0.0
 
 
 def _parse_json_path(path: str) -> list:
@@ -332,14 +371,14 @@ def score_json_path(
     try:
         value = json.loads(output)
     except json.JSONDecodeError as exc:
-        return False, f"output is not valid JSON: {exc}"
+        return False, f"output is not valid JSON: {exc}", 0.0
     steps = _parse_json_path(path)
     found, extracted = _extract_json_path(value, steps, path)
     if not found:
-        return False, extracted
+        return False, extracted, 0.0
     if _values_equal(extracted, expected, float(tolerance)):
-        return True, f"{path} == {expected!r}"
-    return False, f"expected {path} == {expected!r}, got {extracted!r}"
+        return True, f"{path} == {expected!r}", 1.0
+    return False, f"expected {path} == {expected!r}, got {extracted!r}", 0.0
 
 
 def score_numeric(output: str, expected: float, tolerance: float = 0.0) -> tuple:
@@ -347,7 +386,7 @@ def score_numeric(output: str, expected: float, tolerance: float = 0.0) -> tuple
     ``expected``. The number may be embedded in surrounding text."""
     match = _NUMBER_RE.search(output)
     if match is None:
-        return False, "no number in output"
+        return False, "no number in output", 0.0
     got = float(match.group(0))
     diff = abs(got - float(expected))
     ok = diff <= float(tolerance)
@@ -356,11 +395,13 @@ def score_numeric(output: str, expected: float, tolerance: float = 0.0) -> tuple
         if ok
         else f"expected {expected} ± {tolerance}, got {got} (diff {diff})"
     )
-    return ok, detail
+    return ok, detail, 1.0 if ok else 0.0
 
 
 def score_case(case: Case, output: str) -> tuple:
-    """Score one case's output. Returns (passed, detail)."""
+    """Score one case's output. Returns (passed, detail, score) where
+    ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
+    when the scorer gives partial credit (see ``score_contains_all``)."""
     spec = case.scorer
     kind = spec.get("type")
     if kind == "exact":
@@ -398,7 +439,12 @@ def score_case(case: Case, output: str) -> tuple:
 
 @dataclass
 class Result:
-    """The outcome of running one case."""
+    """The outcome of running one case.
+
+    ``score`` is the fraction of the case's weight earned: 1.0 on a
+    pass, 0.0 on a fail, or a fraction when the scorer gives partial
+    credit. ``weight`` is the case's weight (default 1.0).
+    """
 
     case_id: str
     passed: bool
@@ -407,6 +453,8 @@ class Result:
     tokens: Optional[int] = None
     output: str = ""
     timed_out: bool = False
+    score: float = 0.0
+    weight: float = 1.0
 
     def to_dict(self) -> dict:
         return {
@@ -417,6 +465,8 @@ class Result:
             "tokens": self.tokens,
             "output": self.output,
             "timed_out": self.timed_out,
+            "score": round(self.score, 4),
+            "weight": self.weight,
         }
 
 
@@ -463,6 +513,18 @@ class RunReport:
         tokens = [r.tokens for r in self.results if r.tokens is not None]
         return sum(tokens) if tokens else None
 
+    @property
+    def total_weight(self) -> float:
+        return sum(r.weight for r in self.results)
+
+    @property
+    def earned_weight(self) -> float:
+        return sum(r.score * r.weight for r in self.results)
+
+    @property
+    def weighted_score(self) -> float:
+        return (self.earned_weight / self.total_weight) if self.total_weight else 0.0
+
     def to_dict(self) -> dict:
         return {
             "suite": self.suite,
@@ -471,6 +533,9 @@ class RunReport:
             "total": self.total,
             "passed": self.passed,
             "pass_rate": round(self.pass_rate, 4),
+            "total_weight": self.total_weight,
+            "earned_weight": round(self.earned_weight, 4),
+            "weighted_score": round(self.weighted_score, 4),
             "total_latency_ms": round(self.total_latency_ms, 3),
             "total_tokens": self.total_tokens,
             "results": [r.to_dict() for r in self.results],
@@ -548,6 +613,8 @@ def run_suite(
                     detail=f"timed out after {case.timeout:g} s",
                     latency_ms=latency,
                     timed_out=True,
+                    score=0.0,
+                    weight=case.weight,
                 )
             )
             continue
@@ -559,13 +626,15 @@ def run_suite(
                     detail=f"agent error: {type(exc).__name__}: {exc}",
                     latency_ms=latency,
                     output="",
+                    score=0.0,
+                    weight=case.weight,
                 )
             )
             continue
         try:
-            passed, detail = score_case(case, output)
+            passed, detail, score = score_case(case, output)
         except ValueError as exc:
-            passed, detail = False, f"scorer error: {exc}"
+            passed, detail, score = False, f"scorer error: {exc}", 0.0
         results.append(
             Result(
                 case_id=case.id,
@@ -574,6 +643,8 @@ def run_suite(
                 latency_ms=latency,
                 tokens=tokens,
                 output=output,
+                score=score,
+                weight=case.weight,
             )
         )
     ended = datetime.now(timezone.utc).isoformat()
@@ -592,14 +663,17 @@ def format_summary(report: RunReport) -> str:
             if report.total_tokens is not None
             else ""
         ),
+        f"Weighted score: {report.earned_weight:.2f}/{report.total_weight:g} "
+        f"({report.weighted_score * 100:.1f}%)",
         "",
-        f"{'case':<22} {'pass':<7} {'ms':>8} {'tokens':>7}  detail",
-        "-" * 79,
+        f"{'case':<22} {'pass':<7} {'score':>6} {'ms':>8} {'tokens':>7}  detail",
+        "-" * 86,
     ]
     for r in report.results:
         mark = "TIMEOUT" if r.timed_out else ("PASS" if r.passed else "FAIL")
         tokens = str(r.tokens) if r.tokens is not None else "-"
         lines.append(
-            f"{r.case_id:<22} {mark:<7} {r.latency_ms:>8.1f} {tokens:>7}  {r.detail}"
+            f"{r.case_id:<22} {mark:<7} {r.score:>6.2f} {r.latency_ms:>8.1f} "
+            f"{tokens:>7}  {r.detail}"
         )
     return "\n".join(lines)

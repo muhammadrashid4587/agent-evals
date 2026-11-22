@@ -8,7 +8,8 @@ runs against a user-supplied agent function, and a deterministic scorer
 judges the output. The runner records per-case pass/fail, latency, and token
 counts (when the agent reports them), prints a summary table, and writes a
 JSON report. A case may set a `timeout` in seconds, so a hung agent fails
-that case instead of the run.
+that case instead of the run. A case may also carry a `weight`, so some
+cases count more than others, and some scorers give partial credit.
 
 ## What it is
 
@@ -106,6 +107,23 @@ cannot be killed, so it keeps running in the background until it returns
 on its own. Non-positive or non-numeric timeouts are rejected when the
 suite loads.
 
+## Weights and partial credit
+
+A case may also carry an optional `weight`, a positive number that
+defaults to 1.0, e.g. `{"id": "core", ..., "weight": 2}`. The case is
+worth that many points out of the suite's total weight. Each case earns
+`score * weight` points, where `score` is in [0, 1]: 1.0 on a pass,
+0.0 on a fail. The `contains_all` scorer gives partial credit: a case
+that finds 3 of 4 required substrings earns a score of 0.75, so it
+still earns most of its weight even though it does not count as passed.
+Non-positive or non-numeric weights are rejected when the suite loads.
+
+The run summary reports the weighted score alongside the pass count,
+e.g. `Weighted score: 2.00/3 (66.7%)`, and the JSON report carries
+`total_weight`, `earned_weight`, and `weighted_score`, plus a `score`
+and `weight` per result. The CLI exit code is unchanged: 0 only when
+every case passes, even if the weighted score is high.
+
 ## Report format
 
 ```json
@@ -116,12 +134,15 @@ suite loads.
   "total": 8,
   "passed": 8,
   "pass_rate": 1.0,
+  "total_weight": 9,
+  "earned_weight": 9.0,
+  "weighted_score": 1.0,
   "total_latency_ms": 1.234,
   "total_tokens": null,
   "results": [
     {"case_id": "set-a", "passed": true, "detail": "exact match",
      "latency_ms": 0.123, "tokens": null, "output": "OK",
-     "timed_out": false}
+     "timed_out": false, "score": 1.0, "weight": 1.0}
   ]
 }
 ```
@@ -144,5 +165,5 @@ make demo    # run both example suites through the CLI
 ## Roadmap
 
 - ~~Per-case timeouts, so a hung agent fails the case instead of the run.~~ (done in v0.1.3)
-- Weighted cases and partial credit.
+- ~~Weighted cases and partial credit.~~ (done in v0.1.4)
 - Parallel case execution for slow agents.

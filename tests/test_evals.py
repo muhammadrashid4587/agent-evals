@@ -23,39 +23,39 @@ def _case(scorer, prompt="p"):
 
 class TestExactScorer(unittest.TestCase):
     def test_match(self):
-        ok, _ = score_case(_case({"type": "exact", "expected": "19"}), "19")
+        ok, _, _ = score_case(_case({"type": "exact", "expected": "19"}), "19")
         self.assertTrue(ok)
 
     def test_mismatch(self):
-        ok, detail = score_case(_case({"type": "exact", "expected": "19"}), "20")
+        ok, detail, _ = score_case(_case({"type": "exact", "expected": "19"}), "20")
         self.assertFalse(ok)
         self.assertIn("19", detail)
 
     def test_surrounding_whitespace_ignored(self):
-        ok, _ = score_case(_case({"type": "exact", "expected": "19"}), "  19\n")
+        ok, _, _ = score_case(_case({"type": "exact", "expected": "19"}), "  19\n")
         self.assertTrue(ok)
 
 
 class TestContainsScorer(unittest.TestCase):
     def test_found(self):
-        ok, _ = score_case(_case({"type": "contains", "substring": "hello"}), "say hello there")
+        ok, _, _ = score_case(_case({"type": "contains", "substring": "hello"}), "say hello there")
         self.assertTrue(ok)
 
     def test_missing(self):
-        ok, _ = score_case(_case({"type": "contains", "substring": "hello"}), "goodbye")
+        ok, _, _ = score_case(_case({"type": "contains", "substring": "hello"}), "goodbye")
         self.assertFalse(ok)
 
 
 class TestContainsAllScorer(unittest.TestCase):
     def test_all_present(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "contains_all", "substrings": ["hello", "world"]}),
             "hello world",
         )
         self.assertTrue(ok)
 
     def test_one_missing_fails_and_names_it(self):
-        ok, detail = score_case(
+        ok, detail, _ = score_case(
             _case({"type": "contains_all", "substrings": ["hello", "world"]}),
             "hello there",
         )
@@ -63,7 +63,7 @@ class TestContainsAllScorer(unittest.TestCase):
         self.assertIn("world", detail)
 
     def test_empty_list_passes(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "contains_all", "substrings": []}), "anything"
         )
         self.assertTrue(ok)
@@ -75,14 +75,14 @@ class TestContainsAllScorer(unittest.TestCase):
 
 class TestContainsAnyScorer(unittest.TestCase):
     def test_one_present_passes(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "contains_any", "substrings": ["hello", "hi"]}),
             "say hi",
         )
         self.assertTrue(ok)
 
     def test_none_present_fails(self):
-        ok, detail = score_case(
+        ok, detail, _ = score_case(
             _case({"type": "contains_any", "substrings": ["hello", "hi"]}),
             "goodbye",
         )
@@ -90,7 +90,7 @@ class TestContainsAnyScorer(unittest.TestCase):
         self.assertIn("hello", detail)
 
     def test_empty_list_fails(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "contains_any", "substrings": []}), "anything"
         )
         self.assertFalse(ok)
@@ -102,11 +102,11 @@ class TestContainsAnyScorer(unittest.TestCase):
 
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
-        ok, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")
+        ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")
         self.assertTrue(ok)
 
     def test_no_match(self):
-        ok, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "4x2")
+        ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "4x2")
         self.assertFalse(ok)
 
     def test_invalid_pattern_raises(self):
@@ -116,14 +116,14 @@ class TestRegexScorer(unittest.TestCase):
 
 class TestJsonSchemaScorer(unittest.TestCase):
     def test_matching_shape(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "json_schema", "schema": {"name": "str", "age": "int"}}),
             '{"name": "ada", "age": 36}',
         )
         self.assertTrue(ok)
 
     def test_wrong_field_type(self):
-        ok, detail = score_case(
+        ok, detail, _ = score_case(
             _case({"type": "json_schema", "schema": {"name": "str", "age": "int"}}),
             '{"name": "ada", "age": "thirty-six"}',
         )
@@ -131,7 +131,7 @@ class TestJsonSchemaScorer(unittest.TestCase):
         self.assertIn("age", detail)
 
     def test_missing_required_key(self):
-        ok, detail = score_case(
+        ok, detail, _ = score_case(
             _case({"type": "json_schema", "schema": {"name": "str", "age": "int"}}),
             '{"name": "ada"}',
         )
@@ -139,14 +139,14 @@ class TestJsonSchemaScorer(unittest.TestCase):
         self.assertIn("age", detail)
 
     def test_optional_field_may_be_absent(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "json_schema", "schema": {"name": "str", "nick?": "str"}}),
             '{"name": "ada"}',
         )
         self.assertTrue(ok)
 
     def test_nested_shape_and_array(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case(
                 {
                     "type": "json_schema",
@@ -158,14 +158,14 @@ class TestJsonSchemaScorer(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_invalid_json_fails(self):
-        ok, detail = score_case(
+        ok, detail, _ = score_case(
             _case({"type": "json_schema", "schema": {"a": "int"}}), "{not json"
         )
         self.assertFalse(ok)
         self.assertIn("not valid JSON", detail)
 
     def test_bool_is_not_int(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "json_schema", "schema": {"flag": "int"}}),
             '{"flag": true}',
         )
@@ -174,7 +174,7 @@ class TestJsonSchemaScorer(unittest.TestCase):
 
 class TestJsonPathScorer(unittest.TestCase):
     def test_nested_key_match(self):
-        ok, detail = score_case(
+        ok, detail, _ = score_case(
             _case({"type": "json_path", "path": "$.result.total", "expected": 42}),
             '{"result": {"total": 42}}',
         )
@@ -182,21 +182,21 @@ class TestJsonPathScorer(unittest.TestCase):
         self.assertIn("$.result.total", detail)
 
     def test_bare_path_without_dollar(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "json_path", "path": "result.total", "expected": 42}),
             '{"result": {"total": 42}}',
         )
         self.assertTrue(ok)
 
     def test_array_index(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "json_path", "path": "$.items[1].name", "expected": "b"}),
             '{"items": [{"name": "a"}, {"name": "b"}]}',
         )
         self.assertTrue(ok)
 
     def test_mismatch_names_expected_and_got(self):
-        ok, detail = score_case(
+        ok, detail, _ = score_case(
             _case({"type": "json_path", "path": "$.total", "expected": 42}),
             '{"total": 43}',
         )
@@ -205,7 +205,7 @@ class TestJsonPathScorer(unittest.TestCase):
         self.assertIn("43", detail)
 
     def test_missing_key_fails(self):
-        ok, detail = score_case(
+        ok, detail, _ = score_case(
             _case({"type": "json_path", "path": "$.missing", "expected": 1}),
             '{"total": 1}',
         )
@@ -213,7 +213,7 @@ class TestJsonPathScorer(unittest.TestCase):
         self.assertIn("missing", detail)
 
     def test_missing_index_fails(self):
-        ok, detail = score_case(
+        ok, detail, _ = score_case(
             _case({"type": "json_path", "path": "$.items[5]", "expected": 1}),
             '{"items": [1]}',
         )
@@ -221,14 +221,14 @@ class TestJsonPathScorer(unittest.TestCase):
         self.assertIn("5", detail)
 
     def test_invalid_json_fails(self):
-        ok, detail = score_case(
+        ok, detail, _ = score_case(
             _case({"type": "json_path", "path": "$.a", "expected": 1}), "{not json"
         )
         self.assertFalse(ok)
         self.assertIn("not valid JSON", detail)
 
     def test_numeric_tolerance(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case(
                 {
                     "type": "json_path",
@@ -242,19 +242,19 @@ class TestJsonPathScorer(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_bool_is_not_int(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "json_path", "path": "$.flag", "expected": 1}),
             '{"flag": true}',
         )
         self.assertFalse(ok)
 
     def test_string_and_null_values(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "json_path", "path": "$.name", "expected": "ada"}),
             '{"name": "ada"}',
         )
         self.assertTrue(ok)
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "json_path", "path": "$.note", "expected": None}),
             '{"note": null}',
         )
@@ -279,28 +279,28 @@ class TestJsonPathScorer(unittest.TestCase):
 
 class TestNumericScorer(unittest.TestCase):
     def test_within_tolerance(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "numeric", "expected": 3.333, "tolerance": 0.001}),
             "3.3333",
         )
         self.assertTrue(ok)
 
     def test_outside_tolerance(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "numeric", "expected": 3.333, "tolerance": 0.001}),
             "3.5",
         )
         self.assertFalse(ok)
 
     def test_number_embedded_in_text(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "numeric", "expected": 42, "tolerance": 0}),
             "The answer is 42.",
         )
         self.assertTrue(ok)
 
     def test_no_number_fails(self):
-        ok, _ = score_case(
+        ok, _, _ = score_case(
             _case({"type": "numeric", "expected": 42, "tolerance": 0}), "nope"
         )
         self.assertFalse(ok)
@@ -514,6 +514,148 @@ class TestLoadSuite(unittest.TestCase):
         self.assertEqual(suite.name, "s")
         self.assertEqual(len(suite.cases), 1)
         self.assertEqual(suite.cases[0].id, "c1")
+
+
+class TestWeightsAndPartialCredit(unittest.TestCase):
+    def test_weight_defaults_to_one_and_round_trips(self):
+        case = Case.from_dict(
+            {"id": "c", "prompt": "p", "scorer": {"type": "exact", "expected": "x"}}
+        )
+        self.assertEqual(case.weight, 1.0)
+        self.assertNotIn("weight", case.to_dict())
+
+    def test_weight_parsed_from_dict_and_round_trips(self):
+        case = Case.from_dict(
+            {
+                "id": "c",
+                "prompt": "p",
+                "scorer": {"type": "exact", "expected": "x"},
+                "weight": 2.5,
+            }
+        )
+        self.assertEqual(case.weight, 2.5)
+        self.assertEqual(case.to_dict()["weight"], 2.5)
+
+    def test_invalid_weight_rejected(self):
+        for bad in (0, -1, "heavy"):
+            with self.assertRaises(ValueError):
+                Case.from_dict(
+                    {
+                        "id": "c",
+                        "prompt": "p",
+                        "scorer": {"type": "exact", "expected": "x"},
+                        "weight": bad,
+                    }
+                )
+
+    def test_pass_scores_one_and_fail_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "exact", "expected": "19"}), "19"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "exact", "expected": "19"}), "20"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_contains_all_partial_credit_is_fraction_found(self):
+        ok, _, score = score_case(
+            _case(
+                {"type": "contains_all", "substrings": ["a", "b", "c", "d"]}
+            ),
+            "a c here",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.5)
+
+    def test_contains_all_none_found_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "contains_all", "substrings": ["a", "b"]}),
+            "nothing here",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_contains_all_all_found_scores_one(self):
+        ok, _, score = score_case(
+            _case({"type": "contains_all", "substrings": ["a", "b"]}),
+            "a and b",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_contains_all_empty_list_scores_one(self):
+        ok, _, score = score_case(
+            _case({"type": "contains_all", "substrings": []}), "anything"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_weighted_score_aggregates_by_weight(self):
+        suite = Suite(
+            "w",
+            [
+                Case("heavy", "q1", {"type": "exact", "expected": "yes"}, weight=2),
+                Case("light", "q2", {"type": "exact", "expected": "yes"}, weight=1),
+            ],
+        )
+        report = run_suite(suite, lambda prompt: "yes" if prompt == "q1" else "no")
+        self.assertEqual(report.total_weight, 3)
+        self.assertEqual(report.earned_weight, 2.0)
+        self.assertAlmostEqual(report.weighted_score, 2 / 3)
+        self.assertEqual(report.results[0].weight, 2)
+        self.assertEqual(report.results[0].score, 1.0)
+        self.assertEqual(report.results[1].score, 0.0)
+
+    def test_partial_credit_contributes_to_weighted_score(self):
+        suite = Suite(
+            "p",
+            [
+                Case(
+                    "multi",
+                    "q",
+                    {"type": "contains_all", "substrings": ["a", "b"]},
+                    weight=2,
+                ),
+            ],
+        )
+        report = run_suite(suite, lambda prompt: "a only")
+        self.assertFalse(report.results[0].passed)
+        self.assertEqual(report.results[0].score, 0.5)
+        self.assertEqual(report.earned_weight, 1.0)
+        self.assertEqual(report.weighted_score, 0.5)
+
+    def test_weighted_fields_in_json_report(self):
+        suite = Suite(
+            "w",
+            [Case("a", "q", {"type": "exact", "expected": "x"}, weight=3)],
+        )
+        report = run_suite(suite, lambda prompt: "x")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "report.json")
+            report.save(path)
+            loaded = load_report(path)
+        self.assertEqual(loaded["total_weight"], 3)
+        self.assertEqual(loaded["earned_weight"], 3.0)
+        self.assertEqual(loaded["weighted_score"], 1.0)
+        self.assertEqual(loaded["results"][0]["score"], 1.0)
+        self.assertEqual(loaded["results"][0]["weight"], 3)
+
+    def test_summary_reports_weighted_score(self):
+        suite = Suite(
+            "w",
+            [
+                Case("a", "q1", {"type": "exact", "expected": "x"}, weight=2),
+                Case("b", "q2", {"type": "exact", "expected": "x"}, weight=1),
+            ],
+        )
+        report = run_suite(suite, lambda prompt: "x" if prompt == "q1" else "y")
+        text = format_summary(report)
+        self.assertIn("Weighted score: 2.00/3 (66.7%)", text)
+        self.assertIn("1.00", text)
+        self.assertIn("0.00", text)
 
 
 if __name__ == "__main__":
