@@ -18,7 +18,9 @@ cases count more than others, and some scorers give partial credit.
   contains-any, regex, JSON-schema shape, JSON-path value, numeric
   tolerance.
 - A CLI that runs a suite JSON file against an agent named as
-  `module:attribute` and exits 0 only when every case passes.
+  `module:attribute` and exits 0 only when every case passes (a case
+  that passes its checks but exceeds its latency budget does not fail
+  the run unless `--fail-on-budget` is given).
 
 ## What it is not
 
@@ -124,6 +126,32 @@ e.g. `Weighted score: 2.00/3 (66.7%)`, and the JSON report carries
 and `weight` per result. The CLI exit code is unchanged: 0 only when
 every case passes, even if the weighted score is high.
 
+## Latency budgets
+
+A case may also carry an optional `max_latency_ms` budget, e.g.
+`{"id": "fast", ..., "max_latency_ms": 200}`. If the agent's answer
+passes its checks but took longer than the budget, the case is reported
+as a budget violation instead of a pass: `passed` is false,
+`budget_violated` is true, the score is 0, and the detail records the
+latency and the budget, e.g. `exact match; exceeded latency budget
+243.1 ms > 200 ms`. The JSON report carries the budget per result
+(`max_latency_ms`, `budget_violated`) and a `budget_violations` count
+for the run, and the summary marks such cases `BUDGET`. A case that
+fails its checks is never also a budget violation, and neither is a
+timed-out case. A case with no budget behaves exactly as before.
+
+By default a budget violation does not fail the CLI run — the answer
+was right, just slow — so the exit code stays 0 when every case
+passed its checks. Pass `--fail-on-budget` to make budget violations
+fail the run as well, e.g. to gate a CI step on latency:
+
+```bash
+python -m agent_evals.cli --suite examples/calculator.json \
+    --agent examples.calculator_agent:agent --fail-on-budget
+```
+
+Non-positive or non-numeric budgets are rejected when the suite loads.
+
 ## Parallel execution
 
 `run_suite(suite, agent, workers=N)` runs cases concurrently on a
@@ -188,12 +216,14 @@ fail the comparison — only a regression does.
   "total_weight": 9,
   "earned_weight": 9.0,
   "weighted_score": 1.0,
+  "budget_violations": 0,
   "total_latency_ms": 1.234,
   "total_tokens": null,
   "results": [
     {"case_id": "set-a", "passed": true, "detail": "exact match",
      "latency_ms": 0.123, "tokens": null, "output": "OK",
-     "timed_out": false, "score": 1.0, "weight": 1.0}
+     "timed_out": false, "score": 1.0, "weight": 1.0,
+     "max_latency_ms": null, "budget_violated": false}
   ]
 }
 ```
@@ -219,4 +249,4 @@ make demo    # run both example suites through the CLI
 - ~~Weighted cases and partial credit.~~ (done in v0.1.4)
 - ~~Parallel case execution for slow agents.~~ (done in v0.1.5)
 - ~~Comparing two run reports to catch regressions.~~ (done in v0.2.0)
-- Latency budgets per case, so a case that passes but gets too slow fails.
+- ~~Latency budgets per case, so a case that passes but gets too slow fails.~~ (done in v0.3.0)

@@ -811,5 +811,202 @@ class TestParallelExecution(unittest.TestCase):
             )
 
 
+class TestLatencyBudgets(unittest.TestCase):
+    def _budget_case(self, budget_ms, prompt="q"):
+        return Case(
+            "budget",
+            prompt,
+            {"type": "exact", "expected": "x"},
+            max_latency_ms=budget_ms,
+        )
+
+    def test_budget_parsed_from_dict_and_round_trips(self):
+        case = Case.from_dict(
+            {
+                "id": "c",
+                "prompt": "p",
+                "scorer": {"type": "exact", "expected": "x"},
+                "max_latency_ms": 250,
+            }
+        )
+        self.assertEqual(case.max_latency_ms, 250.0)
+        self.assertEqual(case.to_dict()["max_latency_ms"], 250.0)
+
+    def test_budget_absent_by_default(self):
+        case = Case.from_dict(
+            {"id": "c", "prompt": "p", "scorer": {"type": "exact", "expected": "x"}}
+        )
+        self.assertIsNone(case.max_latency_ms)
+        self.assertNotIn("max_latency_ms", case.to_dict())
+
+    def test_invalid_budget_rejected(self):
+        for bad in (0, -1, "fast"):
+            with self.assertRaises(ValueError):
+                Case.from_dict(
+                    {
+                        "id": "c",
+                        "prompt": "p",
+                        "scorer": {"type": "exact", "expected": "x"},
+                        "max_latency_ms": bad,
+                    }
+                )
+
+    def test_within_budget_passes(self):
+        suite = Suite("b", [self._budget_case(5000)])
+        report = run_suite(suite, lambda prompt: "x")
+        result = report.results[0]
+        self.assertTrue(result.passed)
+        self.assertFalse(result.budget_violated)
+        self.assertEqual(result.max_latency_ms, 5000.0)
+        self.assertEqual(report.budget_violations, 0)
+
+    def test_over_budget_is_flagged_not_passed(self):
+        suite = Suite("b", [self._budget_case(10)])
+
+        def agent(prompt):
+            time.sleep(0.1)
+            return "x"
+
+        report = run_suite(suite, agent)
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertTrue(result.budget_violated)
+        self.assertEqual(result.score, 0.0)
+        self.assertEqual(result.max_latency_ms, 10.0)
+        self.assertGreater(result.latency_ms, 10.0)
+        self.assertIn("latency budget", result.detail)
+        self.assertIn("10 ms", result.detail)
+        self.assertEqual(report.budget_violations, 1)
+        self.assertEqual(report.passed, 0)
+
+    def test_no_budget_leaves_slow_pass_unchanged(self):
+        suite = Suite(
+            "b", [Case("slow", "q", {"type": "exact", "expected": "x"})]
+        )
+
+        def agent(prompt):
+            time.sleep(0.1)
+            return "x"
+
+        report = run_suite(suite, agent)
+        result = report.results[0]
+        self.assertTrue(result.passed)
+        self.assertFalse(result.budget_violated)
+        self.assertIsNone(result.max_latency_ms)
+        self.assertEqual(report.budget_violations, 0)
+
+    def test_failing_case_is_not_a_budget_violation(self):
+        suite = Suite("b", [self._budget_case(10)])
+
+        def agent(prompt):
+            time.sleep(0.1)
+            return "wrong"
+
+        report = run_suite(suite, agent)
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertFalse(result.budget_violated)
+        self.assertNotIn("latency budget", result.detail)
+        self.assertEqual(report.budget_violations, 0)
+
+    def test_timed_out_case_is_not_a_budget_violation(self):
+        suite = Suite(
+            "b",
+            [
+                Case(
+                    "slow",
+                    "q",
+                    {"type": "exact", "expected": "x"},
+                    timeout=0.05,
+                    max_latency_ms=10,
+                )
+            ],
+        )
+
+        def agent(prompt):
+            time.sleep(0.5)
+            return "x"
+
+        report = run_suite(suite, agent)
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertTrue(result.timed_out)
+        self.assertFalse(result.budget_violated)
+        self.assertEqual(report.budget_violations, 0)
+
+    def test_budget_fields_in_json_report(self):
+        suite = Suite("b", [self._budget_case(10)])
+
+        def agent(prompt):
+            time.sleep(0.1)
+            return "x"
+
+        report = run_suite(suite, agent)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "report.json")
+            report.save(path)
+            loaded = load_report(path)
+        self.assertEqual(loaded["budget_violations"], 1)
+        result = loaded["results"][0]
+        self.assertFalse(result["passed"])
+        self.assertTrue(result["budget_violated"])
+        self.assertEqual(result["max_latency_ms"], 10.0)
+        self.assertIn("latency budget", result["detail"])
+
+    def test_summary_marks_budget_violation(self):
+        suite = Suite("b", [self._budget_case(10)])
+
+        def agent(prompt):
+            time.sleep(0.1)
+            return "x"
+
+        report = run_suite(suite, agent)
+        text = format_summary(report)
+        self.assertIn("BUDGET", text)
+        self.assertIn("Budget violations: 1", text)
+
+    def test_cli_fail_on_budget_flag(self):
+        from agent_evals.cli import main
+
+        data = {
+            "name": "cli-b",
+            "cases": [
+                {
+                    "id": "slow",
+                    "prompt": "2 + 3",
+                    "scorer": {"type": "exact", "expected": "5"},
+                    "max_latency_ms": 0.01,
+                }
+            ],
+        }
+        # The calculator agent answers correctly but takes far longer
+        # than 0.01 ms, so the case is a budget violation: reported as a
+        # failure, but the run only fails the CLI when --fail-on-budget
+        # is given.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            code = main(
+                [
+                    "--suite",
+                    path,
+                    "--agent",
+                    "examples.calculator_agent:agent",
+                ]
+            )
+            self.assertEqual(code, 0)
+            code = main(
+                [
+                    "--suite",
+                    path,
+                    "--agent",
+                    "examples.calculator_agent:agent",
+                    "--fail-on-budget",
+                ]
+            )
+            self.assertEqual(code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

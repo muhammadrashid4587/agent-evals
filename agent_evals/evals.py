@@ -23,6 +23,13 @@ Design
   equal to the fraction of required substrings found. The report totals
   ``earned_weight`` over ``total_weight`` as ``weighted_score``.
 
+* A case may carry a ``max_latency_ms`` budget: if the agent's answer
+  passes its checks but took longer than the budget, the case is
+  reported as a budget violation instead of a pass (``passed`` is
+  false, ``budget_violated`` is true, and the latency and the budget
+  are in the detail). A case that fails its checks is never also a
+  budget violation, and a timed-out case is not one either.
+
 * The agent under test is a plain callable ``agent(prompt) -> ...``. It may
   return:
     - a ``str`` (the agent's output; token count unknown),
@@ -84,6 +91,9 @@ class Case:
     (default 1.0); a case earns ``score * weight`` points, where the
     score is 1.0 on a pass and may be a fraction on a fail when the
     scorer gives partial credit.
+    ``max_latency_ms`` is an optional per-case latency budget in
+    milliseconds: a case that passes its checks but takes longer than
+    the budget is reported as a budget violation instead of a pass.
     """
 
     id: str
@@ -91,6 +101,7 @@ class Case:
     scorer: dict
     timeout: Optional[float] = None
     weight: float = 1.0
+    max_latency_ms: Optional[float] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "Case":
@@ -121,12 +132,27 @@ class Case:
                 f"case {data.get('id')!r}: weight must be positive, "
                 f"got {weight!r}"
             )
+        max_latency_ms = data.get("max_latency_ms")
+        if max_latency_ms is not None:
+            try:
+                max_latency_ms = float(max_latency_ms)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"case {data.get('id')!r}: max_latency_ms must be a "
+                    f"number of milliseconds, got {max_latency_ms!r}"
+                ) from exc
+            if max_latency_ms <= 0:
+                raise ValueError(
+                    f"case {data.get('id')!r}: max_latency_ms must be "
+                    f"positive, got {max_latency_ms!r}"
+                )
         return cls(
             id=str(data["id"]),
             prompt=str(data["prompt"]),
             scorer=dict(data["scorer"]),
             timeout=timeout,
             weight=weight,
+            max_latency_ms=max_latency_ms,
         )
 
     def to_dict(self) -> dict:
@@ -135,6 +161,8 @@ class Case:
             data["timeout"] = self.timeout
         if self.weight != 1.0:
             data["weight"] = self.weight
+        if self.max_latency_ms is not None:
+            data["max_latency_ms"] = self.max_latency_ms
         return data
 
 
@@ -445,6 +473,10 @@ class Result:
     ``score`` is the fraction of the case's weight earned: 1.0 on a
     pass, 0.0 on a fail, or a fraction when the scorer gives partial
     credit. ``weight`` is the case's weight (default 1.0).
+    ``budget_violated`` is true when the case passed its checks but
+    took longer than its ``max_latency_ms`` budget; such a case is not
+    a pass (``passed`` is false, ``score`` is 0.0) and the latency and
+    the budget are in the detail.
     """
 
     case_id: str
@@ -456,6 +488,8 @@ class Result:
     timed_out: bool = False
     score: float = 0.0
     weight: float = 1.0
+    max_latency_ms: Optional[float] = None
+    budget_violated: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -468,6 +502,8 @@ class Result:
             "timed_out": self.timed_out,
             "score": round(self.score, 4),
             "weight": self.weight,
+            "max_latency_ms": self.max_latency_ms,
+            "budget_violated": self.budget_violated,
         }
 
 
@@ -526,6 +562,10 @@ class RunReport:
     def weighted_score(self) -> float:
         return (self.earned_weight / self.total_weight) if self.total_weight else 0.0
 
+    @property
+    def budget_violations(self) -> int:
+        return sum(1 for r in self.results if r.budget_violated)
+
     def to_dict(self) -> dict:
         return {
             "suite": self.suite,
@@ -537,6 +577,7 @@ class RunReport:
             "total_weight": self.total_weight,
             "earned_weight": round(self.earned_weight, 4),
             "weighted_score": round(self.weighted_score, 4),
+            "budget_violations": self.budget_violations,
             "total_latency_ms": round(self.total_latency_ms, 3),
             "total_tokens": self.total_tokens,
             "results": [r.to_dict() for r in self.results],
@@ -624,6 +665,20 @@ def _run_case(case: Case, agent: Callable[[str], Any]) -> Result:
         passed, detail, score = score_case(case, output)
     except ValueError as exc:
         passed, detail, score = False, f"scorer error: {exc}", 0.0
+    budget_violated = False
+    if (
+        passed
+        and case.max_latency_ms is not None
+        and latency > case.max_latency_ms
+    ):
+        # The answer was right but too slow: a budget violation, not a pass.
+        budget_violated = True
+        passed = False
+        score = 0.0
+        detail = (
+            f"{detail}; exceeded latency budget "
+            f"{latency:.1f} ms > {case.max_latency_ms:g} ms"
+        )
     return Result(
         case_id=case.id,
         passed=passed,
@@ -633,6 +688,8 @@ def _run_case(case: Case, agent: Callable[[str], Any]) -> Result:
         output=output,
         score=score,
         weight=case.weight,
+        max_latency_ms=case.max_latency_ms,
+        budget_violated=budget_violated,
     )
 
 
@@ -688,12 +745,21 @@ def format_summary(report: RunReport) -> str:
         ),
         f"Weighted score: {report.earned_weight:.2f}/{report.total_weight:g} "
         f"({report.weighted_score * 100:.1f}%)",
+    ]
+    if report.budget_violations:
+        lines.append(f"Budget violations: {report.budget_violations}")
+    lines += [
         "",
         f"{'case':<22} {'pass':<7} {'score':>6} {'ms':>8} {'tokens':>7}  detail",
         "-" * 86,
     ]
     for r in report.results:
-        mark = "TIMEOUT" if r.timed_out else ("PASS" if r.passed else "FAIL")
+        if r.budget_violated:
+            mark = "BUDGET"
+        elif r.timed_out:
+            mark = "TIMEOUT"
+        else:
+            mark = "PASS" if r.passed else "FAIL"
         tokens = str(r.tokens) if r.tokens is not None else "-"
         lines.append(
             f"{r.case_id:<22} {mark:<7} {r.score:>6.2f} {r.latency_ms:>8.1f} "

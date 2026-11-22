@@ -7,9 +7,12 @@ Usage:
         --agent examples.kv_agent:agent --report reports/kv.json
 
 The agent is named as ``module:attribute`` and must be a callable taking a
-prompt string. Exit code is 0 when every case passes, 1 otherwise.
-``--workers N`` runs cases concurrently on a thread pool (default 1);
-the agent must be thread-safe for more than 1.
+prompt string. Exit code is 0 when every case passes, 1 otherwise. A case
+that passes its checks but exceeds its ``max_latency_ms`` budget is
+reported as a budget violation, not a pass, but does not fail the run
+unless ``--fail-on-budget`` is given. ``--workers N`` runs cases
+concurrently on a thread pool (default 1); the agent must be
+thread-safe for more than 1.
 """
 
 from __future__ import annotations
@@ -56,6 +59,13 @@ def main(argv=None) -> int:
         help="cases to run at once (default 1, sequential); the agent "
         "must be thread-safe for more than 1",
     )
+    parser.add_argument(
+        "--fail-on-budget",
+        action="store_true",
+        help="exit 1 when a case passes its checks but exceeds its "
+        "max_latency_ms budget (by default a budget violation is "
+        "reported but does not fail the run)",
+    )
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be a positive integer")
@@ -67,7 +77,14 @@ def main(argv=None) -> int:
     if args.report:
         report.save(args.report)
         print(f"\nReport written to {args.report}")
-    return 0 if report.passed == report.total else 1
+    if args.fail_on_budget:
+        return 0 if report.passed == report.total else 1
+    # Without --fail-on-budget, only genuine check failures fail the run;
+    # budget violations are reported but do not fail it.
+    genuine_failures = [
+        r for r in report.results if not r.passed and not r.budget_violated
+    ]
+    return 0 if not genuine_failures else 1
 
 
 if __name__ == "__main__":
