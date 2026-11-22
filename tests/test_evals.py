@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 
 from agent_evals.evals import (
@@ -380,6 +381,106 @@ class TestRunner(unittest.TestCase):
         text = format_summary(report)
         self.assertIn("3/3", text)
         self.assertIn("PASS", text)
+
+
+class TestTimeouts(unittest.TestCase):
+    def _timeout_case(self, timeout, prompt="q"):
+        return Case(
+            "slow", prompt, {"type": "exact", "expected": "x"}, timeout=timeout
+        )
+
+    def test_timeout_parsed_from_dict_and_round_trips(self):
+        case = Case.from_dict(
+            {
+                "id": "c",
+                "prompt": "p",
+                "scorer": {"type": "exact", "expected": "x"},
+                "timeout": 2,
+            }
+        )
+        self.assertEqual(case.timeout, 2.0)
+        self.assertEqual(case.to_dict()["timeout"], 2.0)
+
+    def test_timeout_absent_by_default(self):
+        case = Case.from_dict(
+            {"id": "c", "prompt": "p", "scorer": {"type": "exact", "expected": "x"}}
+        )
+        self.assertIsNone(case.timeout)
+        self.assertNotIn("timeout", case.to_dict())
+
+    def test_invalid_timeout_rejected(self):
+        for bad in (0, -1, "soon"):
+            with self.assertRaises(ValueError):
+                Case.from_dict(
+                    {
+                        "id": "c",
+                        "prompt": "p",
+                        "scorer": {"type": "exact", "expected": "x"},
+                        "timeout": bad,
+                    }
+                )
+
+    def test_slow_agent_times_out_and_run_continues(self):
+        suite = Suite(
+            "t",
+            [
+                self._timeout_case(0.05, prompt="q1"),
+                Case("fast", "q2", {"type": "exact", "expected": "y"}),
+            ],
+        )
+
+        def agent(prompt):
+            if prompt == "q1":
+                time.sleep(0.5)
+                return "x"
+            return "y"
+
+        report = run_suite(suite, agent)
+        self.assertEqual(report.total, 2)
+        self.assertEqual(report.passed, 1)
+        slow = report.results[0]
+        self.assertFalse(slow.passed)
+        self.assertTrue(slow.timed_out)
+        self.assertIn("timed out", slow.detail)
+        self.assertIn("0.05", slow.detail)
+        # Failed at the timeout, not after the agent's 0.5 s sleep.
+        self.assertGreaterEqual(slow.latency_ms, 40)
+        self.assertLess(slow.latency_ms, 400)
+        self.assertFalse(report.results[1].timed_out)
+        self.assertTrue(report.results[1].passed)
+
+    def test_fast_agent_within_timeout_passes(self):
+        suite = Suite("t", [self._timeout_case(5)])
+        report = run_suite(suite, lambda prompt: "x")
+        self.assertEqual(report.passed, 1)
+        self.assertFalse(report.results[0].timed_out)
+
+    def test_timeout_reported_in_json_report(self):
+        suite = Suite("t", [self._timeout_case(0.05)])
+
+        def agent(prompt):
+            time.sleep(0.5)
+            return "x"
+
+        report = run_suite(suite, agent)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "report.json")
+            report.save(path)
+            loaded = load_report(path)
+        result = loaded["results"][0]
+        self.assertFalse(result["passed"])
+        self.assertTrue(result["timed_out"])
+        self.assertIn("timed out", result["detail"])
+
+    def test_summary_marks_timeout(self):
+        suite = Suite("t", [self._timeout_case(0.05)])
+
+        def agent(prompt):
+            time.sleep(0.5)
+            return "x"
+
+        report = run_suite(suite, agent)
+        self.assertIn("TIMEOUT", format_summary(report))
 
 
 class TestReportRoundTrip(unittest.TestCase):

@@ -3,7 +3,9 @@
 Design
 ------
 * A ``Suite`` is a name plus a list of ``Case`` objects. A case is one
-  prompt plus one scorer spec.
+  prompt plus one scorer spec. A case may also carry an optional
+  ``timeout`` in seconds: if the agent takes longer, the case fails as
+  timed out and the run moves on to the next case.
 * A scorer spec is a plain dict, so suites can live in JSON files::
 
       {"type": "exact", "expected": "19"}
@@ -27,7 +29,9 @@ Design
 from __future__ import annotations
 
 import json
+import queue
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -65,22 +69,45 @@ _TYPE_NAMES = {
 
 @dataclass
 class Case:
-    """One eval case: a prompt and the scorer that judges the answer."""
+    """One eval case: a prompt and the scorer that judges the answer.
+
+    ``timeout`` is an optional per-case limit in seconds: if the agent
+    takes longer, the case fails as timed out and the run continues.
+    """
 
     id: str
     prompt: str
     scorer: dict
+    timeout: Optional[float] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "Case":
+        timeout = data.get("timeout")
+        if timeout is not None:
+            try:
+                timeout = float(timeout)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"case {data.get('id')!r}: timeout must be a number of "
+                    f"seconds, got {timeout!r}"
+                ) from exc
+            if timeout <= 0:
+                raise ValueError(
+                    f"case {data.get('id')!r}: timeout must be positive, "
+                    f"got {timeout!r}"
+                )
         return cls(
             id=str(data["id"]),
             prompt=str(data["prompt"]),
             scorer=dict(data["scorer"]),
+            timeout=timeout,
         )
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "prompt": self.prompt, "scorer": self.scorer}
+        data = {"id": self.id, "prompt": self.prompt, "scorer": self.scorer}
+        if self.timeout is not None:
+            data["timeout"] = self.timeout
+        return data
 
 
 @dataclass
@@ -379,6 +406,7 @@ class Result:
     latency_ms: float
     tokens: Optional[int] = None
     output: str = ""
+    timed_out: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -388,6 +416,7 @@ class Result:
             "latency_ms": round(self.latency_ms, 3),
             "tokens": self.tokens,
             "output": self.output,
+            "timed_out": self.timed_out,
         }
 
 
@@ -459,22 +488,70 @@ def load_report(path: str) -> dict:
         return json.load(f)
 
 
+def _run_agent(
+    agent: Callable[[str], Any], prompt: str, timeout: Optional[float]
+) -> tuple:
+    """Call the agent, enforcing ``timeout`` seconds when set.
+
+    Returns ``(status, output, tokens, error)`` where status is ``"ok"``,
+    ``"error"`` (the agent raised), or ``"timeout"``. With a timeout the
+    agent runs on a daemon thread: on expiry the case is failed and the
+    run moves on, and the abandoned thread cannot hang the process. A
+    Python thread cannot be killed, so a hung agent keeps running in the
+    background until it returns on its own.
+    """
+    if timeout is None:
+        try:
+            output, tokens = _split_agent_result(agent(prompt))
+        except Exception as exc:  # noqa: BLE001 - a crashing agent fails the case
+            return "error", "", None, exc
+        return "ok", output, tokens, None
+    results: queue.Queue = queue.Queue()
+
+    def _target() -> None:
+        try:
+            output, tokens = _split_agent_result(agent(prompt))
+        except Exception as exc:  # noqa: BLE001 - a crashing agent fails the case
+            results.put(("error", "", None, exc))
+        else:
+            results.put(("ok", output, tokens, None))
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    try:
+        return results.get(timeout=timeout)
+    except queue.Empty:
+        return "timeout", "", None, None
+
+
 def run_suite(
     suite: Suite, agent: Callable[[str], Any]
 ) -> RunReport:
     """Run every case in ``suite`` against ``agent`` and return a report.
 
     An agent that raises is recorded as a failed case with the exception in
-    the detail; the run continues with the remaining cases.
+    the detail; the run continues with the remaining cases. A case with a
+    ``timeout`` that the agent exceeds is recorded as failed and timed out,
+    and the run continues as well.
     """
     started = datetime.now(timezone.utc).isoformat()
     results = []
     for case in suite.cases:
         t0 = time.perf_counter()
-        try:
-            output, tokens = _split_agent_result(agent(case.prompt))
-        except Exception as exc:  # noqa: BLE001 - a crashing agent fails the case
-            latency = (time.perf_counter() - t0) * 1000
+        status, output, tokens, exc = _run_agent(agent, case.prompt, case.timeout)
+        latency = (time.perf_counter() - t0) * 1000
+        if status == "timeout":
+            results.append(
+                Result(
+                    case_id=case.id,
+                    passed=False,
+                    detail=f"timed out after {case.timeout:g} s",
+                    latency_ms=latency,
+                    timed_out=True,
+                )
+            )
+            continue
+        if status == "error":
             results.append(
                 Result(
                     case_id=case.id,
@@ -485,7 +562,6 @@ def run_suite(
                 )
             )
             continue
-        latency = (time.perf_counter() - t0) * 1000
         try:
             passed, detail = score_case(case, output)
         except ValueError as exc:
@@ -517,13 +593,13 @@ def format_summary(report: RunReport) -> str:
             else ""
         ),
         "",
-        f"{'case':<22} {'pass':<6} {'ms':>8} {'tokens':>7}  detail",
-        "-" * 78,
+        f"{'case':<22} {'pass':<7} {'ms':>8} {'tokens':>7}  detail",
+        "-" * 79,
     ]
     for r in report.results:
-        mark = "PASS" if r.passed else "FAIL"
+        mark = "TIMEOUT" if r.timed_out else ("PASS" if r.passed else "FAIL")
         tokens = str(r.tokens) if r.tokens is not None else "-"
         lines.append(
-            f"{r.case_id:<22} {mark:<6} {r.latency_ms:>8.1f} {tokens:>7}  {r.detail}"
+            f"{r.case_id:<22} {mark:<7} {r.latency_ms:>8.1f} {tokens:>7}  {r.detail}"
         )
     return "\n".join(lines)
