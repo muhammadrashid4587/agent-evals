@@ -1,0 +1,260 @@
+"""Tests for agent-evals: scorers, runner aggregation, report round-trip."""
+
+import json
+import os
+import tempfile
+import unittest
+
+from agent_evals.evals import (
+    Case,
+    Suite,
+    format_summary,
+    load_report,
+    load_suite,
+    run_suite,
+    score_case,
+)
+
+
+def _case(scorer, prompt="p"):
+    return Case(id="c1", prompt=prompt, scorer=scorer)
+
+
+class TestExactScorer(unittest.TestCase):
+    def test_match(self):
+        ok, _ = score_case(_case({"type": "exact", "expected": "19"}), "19")
+        self.assertTrue(ok)
+
+    def test_mismatch(self):
+        ok, detail = score_case(_case({"type": "exact", "expected": "19"}), "20")
+        self.assertFalse(ok)
+        self.assertIn("19", detail)
+
+    def test_surrounding_whitespace_ignored(self):
+        ok, _ = score_case(_case({"type": "exact", "expected": "19"}), "  19\n")
+        self.assertTrue(ok)
+
+
+class TestContainsScorer(unittest.TestCase):
+    def test_found(self):
+        ok, _ = score_case(_case({"type": "contains", "substring": "hello"}), "say hello there")
+        self.assertTrue(ok)
+
+    def test_missing(self):
+        ok, _ = score_case(_case({"type": "contains", "substring": "hello"}), "goodbye")
+        self.assertFalse(ok)
+
+
+class TestRegexScorer(unittest.TestCase):
+    def test_match(self):
+        ok, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")
+        self.assertTrue(ok)
+
+    def test_no_match(self):
+        ok, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "4x2")
+        self.assertFalse(ok)
+
+    def test_invalid_pattern_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "regex", "pattern": "("}), "x")
+
+
+class TestJsonSchemaScorer(unittest.TestCase):
+    def test_matching_shape(self):
+        ok, _ = score_case(
+            _case({"type": "json_schema", "schema": {"name": "str", "age": "int"}}),
+            '{"name": "ada", "age": 36}',
+        )
+        self.assertTrue(ok)
+
+    def test_wrong_field_type(self):
+        ok, detail = score_case(
+            _case({"type": "json_schema", "schema": {"name": "str", "age": "int"}}),
+            '{"name": "ada", "age": "thirty-six"}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("age", detail)
+
+    def test_missing_required_key(self):
+        ok, detail = score_case(
+            _case({"type": "json_schema", "schema": {"name": "str", "age": "int"}}),
+            '{"name": "ada"}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("age", detail)
+
+    def test_optional_field_may_be_absent(self):
+        ok, _ = score_case(
+            _case({"type": "json_schema", "schema": {"name": "str", "nick?": "str"}}),
+            '{"name": "ada"}',
+        )
+        self.assertTrue(ok)
+
+    def test_nested_shape_and_array(self):
+        ok, _ = score_case(
+            _case(
+                {
+                    "type": "json_schema",
+                    "schema": {"user": {"id": "int"}, "tags": ["str"]},
+                }
+            ),
+            '{"user": {"id": 7}, "tags": ["a", "b"]}',
+        )
+        self.assertTrue(ok)
+
+    def test_invalid_json_fails(self):
+        ok, detail = score_case(
+            _case({"type": "json_schema", "schema": {"a": "int"}}), "{not json"
+        )
+        self.assertFalse(ok)
+        self.assertIn("not valid JSON", detail)
+
+    def test_bool_is_not_int(self):
+        ok, _ = score_case(
+            _case({"type": "json_schema", "schema": {"flag": "int"}}),
+            '{"flag": true}',
+        )
+        self.assertFalse(ok)
+
+
+class TestNumericScorer(unittest.TestCase):
+    def test_within_tolerance(self):
+        ok, _ = score_case(
+            _case({"type": "numeric", "expected": 3.333, "tolerance": 0.001}),
+            "3.3333",
+        )
+        self.assertTrue(ok)
+
+    def test_outside_tolerance(self):
+        ok, _ = score_case(
+            _case({"type": "numeric", "expected": 3.333, "tolerance": 0.001}),
+            "3.5",
+        )
+        self.assertFalse(ok)
+
+    def test_number_embedded_in_text(self):
+        ok, _ = score_case(
+            _case({"type": "numeric", "expected": 42, "tolerance": 0}),
+            "The answer is 42.",
+        )
+        self.assertTrue(ok)
+
+    def test_no_number_fails(self):
+        ok, _ = score_case(
+            _case({"type": "numeric", "expected": 42, "tolerance": 0}), "nope"
+        )
+        self.assertFalse(ok)
+
+
+class TestUnknownScorer(unittest.TestCase):
+    def test_unknown_type_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "vibes"}), "x")
+
+
+class TestRunner(unittest.TestCase):
+    def _suite(self):
+        return Suite(
+            name="demo",
+            cases=[
+                Case("ok-1", "q1", {"type": "exact", "expected": "yes"}),
+                Case("ok-2", "q2", {"type": "exact", "expected": "yes"}),
+                Case("bad-1", "q3", {"type": "exact", "expected": "yes"}),
+            ],
+        )
+
+    def test_aggregates_pass_rate(self):
+        def agent(prompt):
+            return "yes" if prompt in ("q1", "q2") else "no"
+
+        report = run_suite(self._suite(), agent)
+        self.assertEqual(report.total, 3)
+        self.assertEqual(report.passed, 2)
+        self.assertAlmostEqual(report.pass_rate, 2 / 3)
+        self.assertEqual([r.case_id for r in report.results if r.passed],
+                         ["ok-1", "ok-2"])
+
+    def test_latency_recorded(self):
+        report = run_suite(self._suite(), lambda prompt: "yes")
+        for r in report.results:
+            self.assertGreaterEqual(r.latency_ms, 0.0)
+
+    def test_tokens_recorded_when_agent_reports_them(self):
+        def agent(prompt):
+            return ("yes", 17)
+
+        report = run_suite(self._suite(), agent)
+        self.assertEqual(report.total_tokens, 51)
+        self.assertTrue(all(r.tokens == 17 for r in report.results))
+
+    def test_tokens_none_when_agent_returns_plain_string(self):
+        report = run_suite(self._suite(), lambda prompt: "yes")
+        self.assertIsNone(report.total_tokens)
+
+    def test_failing_agent_reported_as_failing(self):
+        report = run_suite(self._suite(), lambda prompt: "wrong answer")
+        self.assertEqual(report.passed, 0)
+        self.assertTrue(all(not r.passed for r in report.results))
+
+    def test_crashing_agent_fails_the_case_and_run_continues(self):
+        def agent(prompt):
+            if prompt == "q2":
+                raise RuntimeError("boom")
+            return "yes"
+
+        report = run_suite(self._suite(), agent)
+        self.assertEqual(report.passed, 2)
+        failed = [r for r in report.results if not r.passed]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0].case_id, "ok-2")
+        self.assertIn("RuntimeError", failed[0].detail)
+
+    def test_dict_return_with_tokens(self):
+        def agent(prompt):
+            return {"output": "yes", "tokens": 5}
+
+        report = run_suite(self._suite(), agent)
+        self.assertEqual(report.total_tokens, 15)
+
+    def test_summary_table_mentions_pass_and_fail(self):
+        report = run_suite(self._suite(), lambda prompt: "yes")
+        text = format_summary(report)
+        self.assertIn("3/3", text)
+        self.assertIn("PASS", text)
+
+
+class TestReportRoundTrip(unittest.TestCase):
+    def test_json_report_round_trips(self):
+        suite = Suite("rt", [Case("a", "q", {"type": "exact", "expected": "x"})])
+        report = run_suite(suite, lambda prompt: "x")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "report.json")
+            report.save(path)
+            loaded = load_report(path)
+        self.assertEqual(loaded["suite"], "rt")
+        self.assertEqual(loaded["total"], 1)
+        self.assertEqual(loaded["passed"], 1)
+        self.assertEqual(loaded["results"][0]["case_id"], "a")
+        self.assertTrue(loaded["results"][0]["passed"])
+
+
+class TestLoadSuite(unittest.TestCase):
+    def test_loads_json_suite(self):
+        data = {
+            "name": "s",
+            "cases": [
+                {"id": "c1", "prompt": "p", "scorer": {"type": "exact", "expected": "e"}}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            suite = load_suite(path)
+        self.assertEqual(suite.name, "s")
+        self.assertEqual(len(suite.cases), 1)
+        self.assertEqual(suite.cases[0].id, "c1")
+
+
+if __name__ == "__main__":
+    unittest.main()
