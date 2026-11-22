@@ -138,6 +138,43 @@ a GET in a later one, like the `kv_store` example) can give different
 verdicts when cases run at the same time, so leave `workers` at 1 for
 those suites.
 
+## Comparing two runs
+
+Save a baseline report, change the agent, run again, and compare:
+
+```bash
+python -m agent_evals.cli --suite examples/calculator.json \
+    --agent examples.calculator_agent:agent --report reports/baseline.json
+# ... change the agent ...
+python -m agent_evals.cli --suite examples/calculator.json \
+    --agent examples.calculator_agent:agent --report reports/current.json
+python -m agent_evals.compare --baseline reports/baseline.json \
+    --current reports/current.json
+```
+
+Or from Python:
+
+```python
+from agent_evals import compare_reports, format_comparison, load_report
+
+comp = compare_reports(load_report("reports/baseline.json"),
+                       load_report("reports/current.json"))
+print(format_comparison(comp))
+```
+
+The comparison classifies every case by how it moved: **regression**
+(passed, now failed — including a pass that became a timeout),
+**fix** (failed, now passed), **score change** (failed in both runs
+but earned a different partial score), **new**, **removed**, or
+unchanged. It also reports the pass-rate delta, the weighted-score
+delta, and the total latency delta, plus a per-case latency change,
+so a run that passes everything but got much slower is visible too.
+Cases are matched by `case_id`; a suite-name mismatch is noted but
+does not stop the comparison. The CLI exits 1 when at least one case
+regressed, 0 otherwise, so it can gate a CI step. `--json` writes the
+comparison as JSON. Fixes, new cases, and score improvements never
+fail the comparison — only a regression does.
+
 ## Report format
 
 ```json
@@ -181,3 +218,5 @@ make demo    # run both example suites through the CLI
 - ~~Per-case timeouts, so a hung agent fails the case instead of the run.~~ (done in v0.1.3)
 - ~~Weighted cases and partial credit.~~ (done in v0.1.4)
 - ~~Parallel case execution for slow agents.~~ (done in v0.1.5)
+- ~~Comparing two run reports to catch regressions.~~ (done in v0.2.0)
+- Latency budgets per case, so a case that passes but gets too slow fails.
