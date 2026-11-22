@@ -4,7 +4,7 @@ Pure Python 3 standard library. No model calls, no API keys, no network.
 The agent under test is a plain Python callable.
 """
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 from .evals import (
     Case,

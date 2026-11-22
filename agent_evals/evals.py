@@ -34,6 +34,7 @@ Design
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import queue
 import re
@@ -589,64 +590,86 @@ def _run_agent(
         return "timeout", "", None, None
 
 
+def _run_case(case: Case, agent: Callable[[str], Any]) -> Result:
+    """Run one case against the agent and return its Result.
+
+    An agent that raises is recorded as a failed case with the exception
+    in the detail. A case with a ``timeout`` that the agent exceeds is
+    recorded as failed and timed out.
+    """
+    t0 = time.perf_counter()
+    status, output, tokens, exc = _run_agent(agent, case.prompt, case.timeout)
+    latency = (time.perf_counter() - t0) * 1000
+    if status == "timeout":
+        return Result(
+            case_id=case.id,
+            passed=False,
+            detail=f"timed out after {case.timeout:g} s",
+            latency_ms=latency,
+            timed_out=True,
+            score=0.0,
+            weight=case.weight,
+        )
+    if status == "error":
+        return Result(
+            case_id=case.id,
+            passed=False,
+            detail=f"agent error: {type(exc).__name__}: {exc}",
+            latency_ms=latency,
+            output="",
+            score=0.0,
+            weight=case.weight,
+        )
+    try:
+        passed, detail, score = score_case(case, output)
+    except ValueError as exc:
+        passed, detail, score = False, f"scorer error: {exc}", 0.0
+    return Result(
+        case_id=case.id,
+        passed=passed,
+        detail=detail,
+        latency_ms=latency,
+        tokens=tokens,
+        output=output,
+        score=score,
+        weight=case.weight,
+    )
+
+
 def run_suite(
-    suite: Suite, agent: Callable[[str], Any]
+    suite: Suite, agent: Callable[[str], Any], workers: int = 1
 ) -> RunReport:
     """Run every case in ``suite`` against ``agent`` and return a report.
 
-    An agent that raises is recorded as a failed case with the exception in
-    the detail; the run continues with the remaining cases. A case with a
-    ``timeout`` that the agent exceeds is recorded as failed and timed out,
-    and the run continues as well.
+    An agent that raises is recorded as a failed case with the exception
+    in the detail; the run continues with the remaining cases. A case
+    with a ``timeout`` that the agent exceeds is recorded as failed and
+    timed out, and the run continues as well.
+
+    ``workers`` is the size of the thread pool running cases: 1 runs
+    them one at a time, in suite order. With more workers, cases run
+    concurrently, so a slow agent finishes a suite in roughly the time
+    of its slowest case instead of the sum of all of them. Results are
+    always reported in suite order, whatever order the cases finished
+    in, and per-case timeouts are still enforced per case. Parallel
+    mode needs a thread-safe agent: a stateful agent whose cases
+    depend on each other's order (for example a SET in one case and a
+    GET in a later one) can give different verdicts when cases run at
+    the same time, so leave ``workers`` at 1 for those suites.
     """
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        raise ValueError(f"workers must be a positive integer, got {workers!r}")
     started = datetime.now(timezone.utc).isoformat()
-    results = []
-    for case in suite.cases:
-        t0 = time.perf_counter()
-        status, output, tokens, exc = _run_agent(agent, case.prompt, case.timeout)
-        latency = (time.perf_counter() - t0) * 1000
-        if status == "timeout":
-            results.append(
-                Result(
-                    case_id=case.id,
-                    passed=False,
-                    detail=f"timed out after {case.timeout:g} s",
-                    latency_ms=latency,
-                    timed_out=True,
-                    score=0.0,
-                    weight=case.weight,
-                )
+    if workers == 1:
+        results = [_run_case(case, agent) for case in suite.cases]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers
+        ) as executor:
+            # map() yields results in suite order, not finish order.
+            results = list(
+                executor.map(lambda case: _run_case(case, agent), suite.cases)
             )
-            continue
-        if status == "error":
-            results.append(
-                Result(
-                    case_id=case.id,
-                    passed=False,
-                    detail=f"agent error: {type(exc).__name__}: {exc}",
-                    latency_ms=latency,
-                    output="",
-                    score=0.0,
-                    weight=case.weight,
-                )
-            )
-            continue
-        try:
-            passed, detail, score = score_case(case, output)
-        except ValueError as exc:
-            passed, detail, score = False, f"scorer error: {exc}", 0.0
-        results.append(
-            Result(
-                case_id=case.id,
-                passed=passed,
-                detail=detail,
-                latency_ms=latency,
-                tokens=tokens,
-                output=output,
-                score=score,
-                weight=case.weight,
-            )
-        )
     ended = datetime.now(timezone.utc).isoformat()
     return RunReport(suite=suite.name, started_at=started, ended_at=ended, results=results)
 

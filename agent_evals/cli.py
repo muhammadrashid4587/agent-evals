@@ -8,6 +8,8 @@ Usage:
 
 The agent is named as ``module:attribute`` and must be a callable taking a
 prompt string. Exit code is 0 when every case passes, 1 otherwise.
+``--workers N`` runs cases concurrently on a thread pool (default 1);
+the agent must be thread-safe for more than 1.
 """
 
 from __future__ import annotations
@@ -47,11 +49,20 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--report", help="optional path to write the JSON report to"
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="cases to run at once (default 1, sequential); the agent "
+        "must be thread-safe for more than 1",
+    )
     args = parser.parse_args(argv)
+    if args.workers < 1:
+        parser.error("--workers must be a positive integer")
 
     suite = load_suite(args.suite)
     agent = load_agent(args.agent)
-    report = run_suite(suite, agent)
+    report = run_suite(suite, agent, workers=args.workers)
     print(format_summary(report))
     if args.report:
         report.save(args.report)

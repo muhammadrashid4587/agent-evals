@@ -658,5 +658,158 @@ class TestWeightsAndPartialCredit(unittest.TestCase):
         self.assertIn("0.00", text)
 
 
+class TestParallelExecution(unittest.TestCase):
+    def _suite(self, n=4, delay=0.3):
+        return Suite(
+            "p",
+            [
+                Case(f"c{i}", f"q{i}", {"type": "exact", "expected": "yes"})
+                for i in range(n)
+            ],
+        )
+
+    def _sleepy_agent(self, delay=0.3):
+        def agent(prompt):
+            time.sleep(delay)
+            return "yes"
+
+        return agent
+
+    def test_parallel_matches_sequential_verdicts_and_order(self):
+        suite = self._suite()
+        agent = self._sleepy_agent(0.05)
+        seq = run_suite(suite, agent)
+        par = run_suite(suite, agent, workers=4)
+        self.assertEqual(
+            [r.case_id for r in par.results],
+            [r.case_id for r in seq.results],
+        )
+        self.assertEqual(
+            [r.passed for r in par.results],
+            [r.passed for r in seq.results],
+        )
+        self.assertEqual(par.passed, 4)
+
+    def test_parallel_is_actually_faster(self):
+        suite = self._suite(n=4, delay=0.3)
+        t0 = time.perf_counter()
+        report = run_suite(suite, self._sleepy_agent(0.3), workers=4)
+        wall = time.perf_counter() - t0
+        self.assertEqual(report.passed, 4)
+        # Sequential would take ~1.2 s; parallel should take ~0.3 s.
+        self.assertLess(wall, 0.9)
+
+    def test_workers_one_matches_default(self):
+        suite = self._suite()
+        agent = self._sleepy_agent(0.01)
+        default = run_suite(suite, agent)
+        one = run_suite(suite, agent, workers=1)
+        self.assertEqual(
+            [r.case_id for r in one.results],
+            [r.case_id for r in default.results],
+        )
+        self.assertEqual(one.passed, default.passed)
+
+    def test_hung_case_times_out_while_others_complete_in_parallel(self):
+        suite = Suite(
+            "p",
+            [
+                Case("slow", "q1", {"type": "exact", "expected": "x"}, timeout=0.05),
+                Case("fast-1", "q2", {"type": "exact", "expected": "y"}),
+                Case("fast-2", "q3", {"type": "exact", "expected": "y"}),
+            ],
+        )
+
+        def agent(prompt):
+            if prompt == "q1":
+                time.sleep(0.5)
+                return "x"
+            return "y"
+
+        t0 = time.perf_counter()
+        report = run_suite(suite, agent, workers=3)
+        wall = time.perf_counter() - t0
+        self.assertEqual(report.total, 3)
+        self.assertEqual(report.passed, 2)
+        slow = report.results[0]
+        self.assertFalse(slow.passed)
+        self.assertTrue(slow.timed_out)
+        self.assertTrue(report.results[1].passed)
+        self.assertTrue(report.results[2].passed)
+        # The hung case must not stall the run past its own timeout.
+        self.assertLess(wall, 0.4)
+
+    def test_results_stay_in_suite_order_when_later_case_finishes_first(self):
+        suite = Suite(
+            "p",
+            [
+                Case("slow", "q1", {"type": "exact", "expected": "x"}),
+                Case("fast", "q2", {"type": "exact", "expected": "y"}),
+            ],
+        )
+
+        def agent(prompt):
+            if prompt == "q1":
+                time.sleep(0.2)
+                return "x"
+            return "y"
+
+        report = run_suite(suite, agent, workers=2)
+        self.assertEqual(
+            [r.case_id for r in report.results], ["slow", "fast"]
+        )
+        self.assertEqual(report.passed, 2)
+
+    def test_invalid_workers_rejected(self):
+        suite = self._suite()
+        for bad in (0, -1, "two", 2.5, True):
+            with self.assertRaises(ValueError):
+                run_suite(suite, lambda prompt: "yes", workers=bad)
+
+    def test_cli_workers_flag_runs_suite(self):
+        from agent_evals.cli import main
+
+        data = {
+            "name": "cli-p",
+            "cases": [
+                {
+                    "id": "add",
+                    "prompt": "2 + 3",
+                    "scorer": {"type": "exact", "expected": "5"},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            code = main(
+                [
+                    "--suite",
+                    path,
+                    "--agent",
+                    "examples.calculator_agent:agent",
+                    "--workers",
+                    "2",
+                ]
+            )
+        self.assertEqual(code, 0)
+
+    def test_cli_rejects_non_positive_workers(self):
+        from agent_evals.cli import main
+
+        with self.assertRaises(SystemExit):
+            main(
+                [
+                    "--suite",
+                    "examples/calculator.json",
+                    "--agent",
+                    "examples.calculator_agent:agent",
+                    "--workers",
+                    "0",
+                ]
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -124,6 +124,20 @@ e.g. `Weighted score: 2.00/3 (66.7%)`, and the JSON report carries
 and `weight` per result. The CLI exit code is unchanged: 0 only when
 every case passes, even if the weighted score is high.
 
+## Parallel execution
+
+`run_suite(suite, agent, workers=N)` runs cases concurrently on a
+thread pool of N workers, and the CLI takes `--workers N`. Results are
+always reported in suite order, whatever order the cases finished in,
+and per-case timeouts are still enforced per case — a hung case fails
+on its own timeout while the other workers carry on. A suite of slow
+cases finishes in roughly the time of its slowest case instead of the
+sum of all of them. Parallel mode needs a thread-safe agent: a stateful
+agent whose cases depend on each other's order (a SET in one case and
+a GET in a later one, like the `kv_store` example) can give different
+verdicts when cases run at the same time, so leave `workers` at 1 for
+those suites.
+
 ## Report format
 
 ```json
@@ -166,4 +180,4 @@ make demo    # run both example suites through the CLI
 
 - ~~Per-case timeouts, so a hung agent fails the case instead of the run.~~ (done in v0.1.3)
 - ~~Weighted cases and partial credit.~~ (done in v0.1.4)
-- Parallel case execution for slow agents.
+- ~~Parallel case execution for slow agents.~~ (done in v0.1.5)
