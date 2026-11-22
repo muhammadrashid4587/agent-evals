@@ -12,8 +12,9 @@ JSON report.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Seven deterministic scorers: exact match, substring, contains-all,
-  contains-any, regex, JSON-schema shape, numeric tolerance.
+- Eight deterministic scorers: exact match, substring, contains-all,
+  contains-any, regex, JSON-schema shape, JSON-path value, numeric
+  tolerance.
 - A CLI that runs a suite JSON file against an agent named as
   `module:attribute` and exits 0 only when every case passes.
 
@@ -76,12 +77,18 @@ detail; the run continues with the remaining cases.
 | `contains_any` | `{"substrings": ["hello", "hi"]}` | output contains at least one listed substring (empty list fails) |
 | `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
+| `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
 
 The JSON-schema shape language: a type name (`str`, `int`, `float`,
 `bool`, `list`, `dict`, `number`), a dict of `field -> subschema` for
 objects (a field name ending in `?` is optional), or a one-element list
 `[subschema]` for arrays. `bool` is never accepted as `int`.
+
+The JSON-path language: an optional leading `$`, dot-separated keys, and
+`[n]` array indices, e.g. `$.result.total` or `items[0].name`. A missing
+key or index fails the case; a malformed path is a scorer error. Numbers
+compare with an optional `tolerance`; `bool` is never accepted as `int`.
 
 ## Suite files
 
@@ -126,5 +133,4 @@ make demo    # run both example suites through the CLI
 
 - Per-case timeouts, so a hung agent fails the case instead of the run.
 - Weighted cases and partial credit.
-- A JSON-path scorer.
 - Parallel case execution for slow agents.

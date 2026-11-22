@@ -171,6 +171,111 @@ class TestJsonSchemaScorer(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestJsonPathScorer(unittest.TestCase):
+    def test_nested_key_match(self):
+        ok, detail = score_case(
+            _case({"type": "json_path", "path": "$.result.total", "expected": 42}),
+            '{"result": {"total": 42}}',
+        )
+        self.assertTrue(ok)
+        self.assertIn("$.result.total", detail)
+
+    def test_bare_path_without_dollar(self):
+        ok, _ = score_case(
+            _case({"type": "json_path", "path": "result.total", "expected": 42}),
+            '{"result": {"total": 42}}',
+        )
+        self.assertTrue(ok)
+
+    def test_array_index(self):
+        ok, _ = score_case(
+            _case({"type": "json_path", "path": "$.items[1].name", "expected": "b"}),
+            '{"items": [{"name": "a"}, {"name": "b"}]}',
+        )
+        self.assertTrue(ok)
+
+    def test_mismatch_names_expected_and_got(self):
+        ok, detail = score_case(
+            _case({"type": "json_path", "path": "$.total", "expected": 42}),
+            '{"total": 43}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("42", detail)
+        self.assertIn("43", detail)
+
+    def test_missing_key_fails(self):
+        ok, detail = score_case(
+            _case({"type": "json_path", "path": "$.missing", "expected": 1}),
+            '{"total": 1}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("missing", detail)
+
+    def test_missing_index_fails(self):
+        ok, detail = score_case(
+            _case({"type": "json_path", "path": "$.items[5]", "expected": 1}),
+            '{"items": [1]}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("5", detail)
+
+    def test_invalid_json_fails(self):
+        ok, detail = score_case(
+            _case({"type": "json_path", "path": "$.a", "expected": 1}), "{not json"
+        )
+        self.assertFalse(ok)
+        self.assertIn("not valid JSON", detail)
+
+    def test_numeric_tolerance(self):
+        ok, _ = score_case(
+            _case(
+                {
+                    "type": "json_path",
+                    "path": "$.pi",
+                    "expected": 3.14,
+                    "tolerance": 0.01,
+                }
+            ),
+            '{"pi": 3.14159}',
+        )
+        self.assertTrue(ok)
+
+    def test_bool_is_not_int(self):
+        ok, _ = score_case(
+            _case({"type": "json_path", "path": "$.flag", "expected": 1}),
+            '{"flag": true}',
+        )
+        self.assertFalse(ok)
+
+    def test_string_and_null_values(self):
+        ok, _ = score_case(
+            _case({"type": "json_path", "path": "$.name", "expected": "ada"}),
+            '{"name": "ada"}',
+        )
+        self.assertTrue(ok)
+        ok, _ = score_case(
+            _case({"type": "json_path", "path": "$.note", "expected": None}),
+            '{"note": null}',
+        )
+        self.assertTrue(ok)
+
+    def test_malformed_path_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "json_path", "path": "$.a..b", "expected": 1}),
+                '{"a": {}}',
+            )
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "json_path", "path": "$.a[x]", "expected": 1}),
+                '{"a": [1]}',
+            )
+
+    def test_missing_expected_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "json_path", "path": "$.a"}), '{"a": 1}')
+
+
 class TestNumericScorer(unittest.TestCase):
     def test_within_tolerance(self):
         ok, _ = score_case(

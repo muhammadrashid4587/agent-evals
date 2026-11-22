@@ -12,6 +12,7 @@ Design
       {"type": "contains_any", "substrings": ["hello", "hi"]}
       {"type": "regex", "pattern": "^\\d+$"}
       {"type": "json_schema", "schema": {"name": "str", "age": "int"}}
+      {"type": "json_path", "path": "$.result.total", "expected": 42}
       {"type": "numeric", "expected": 3.14159, "tolerance": 0.001}
 
 * The agent under test is a plain callable ``agent(prompt) -> ...``. It may
@@ -230,6 +231,90 @@ def score_json_schema(output: str, schema: Any) -> tuple:
     return False, err
 
 
+def _parse_json_path(path: str) -> list:
+    """Parse a JSON path into steps: dict keys (str) and indices (int).
+
+    Accepts an optional leading ``$`` (``$.a.b`` or ``$a.b``) or a bare
+    dotted path (``a.b``). Array indices use bracket syntax: ``a[0].b``.
+    """
+    if not isinstance(path, str) or not path:
+        raise ValueError("json_path scorer requires a non-empty 'path' string")
+    rest = path[1:] if path.startswith("$") else path
+    if rest.startswith("."):
+        rest = rest[1:]
+    if not rest:
+        return []
+    steps: list = []
+    for segment in rest.split("."):
+        if not segment:
+            raise ValueError(f"invalid JSON path {path!r}: empty segment")
+        key, _, brackets = segment.partition("[")
+        if key:
+            steps.append(key)
+        while brackets:
+            index, sep, brackets = brackets.partition("]")
+            if not sep or not index.isdigit():
+                raise ValueError(f"invalid JSON path {path!r}: bad index")
+            steps.append(int(index))
+            if brackets and not brackets.startswith("["):
+                raise ValueError(f"invalid JSON path {path!r}: bad index")
+            brackets = brackets[1:] if brackets.startswith("[") else brackets
+    return steps
+
+
+def _extract_json_path(value: Any, steps: list, path: str) -> tuple:
+    """Walk ``steps`` through ``value``; return (found, extracted)."""
+    current = value
+    walked = "$"
+    for step in steps:
+        if isinstance(step, str):
+            walked += f".{step}"
+            if not isinstance(current, dict) or step not in current:
+                return False, f"path {path!r}: no key {step!r} at {walked}"
+            current = current[step]
+        else:
+            walked += f"[{step}]"
+            if not isinstance(current, list) or step >= len(current):
+                return False, f"path {path!r}: no index {step} at {walked}"
+            current = current[step]
+    return True, current
+
+
+def _values_equal(got: Any, expected: Any, tolerance: float) -> bool:
+    """Equality for a json_path comparison, with bool/int kept distinct.
+
+    Numbers compare within ``tolerance`` when it is nonzero; everything
+    else compares with plain equality.
+    """
+    if isinstance(got, bool) or isinstance(expected, bool):
+        return got is expected
+    if isinstance(got, (int, float)) and isinstance(expected, (int, float)):
+        return abs(float(got) - float(expected)) <= tolerance
+    return got == expected
+
+
+def score_json_path(
+    output: str, path: str, expected: Any, tolerance: float = 0.0
+) -> tuple:
+    """Pass when the value at ``path`` in the output JSON equals ``expected``.
+
+    ``path`` is a dotted JSON path with optional ``$`` prefix and ``[n]``
+    array indices, e.g. ``$.result.total`` or ``items[0].name``. A missing
+    key or index fails the case; a malformed path raises ``ValueError``.
+    """
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError as exc:
+        return False, f"output is not valid JSON: {exc}"
+    steps = _parse_json_path(path)
+    found, extracted = _extract_json_path(value, steps, path)
+    if not found:
+        return False, extracted
+    if _values_equal(extracted, expected, float(tolerance)):
+        return True, f"{path} == {expected!r}"
+    return False, f"expected {path} == {expected!r}, got {extracted!r}"
+
+
 def score_numeric(output: str, expected: float, tolerance: float = 0.0) -> tuple:
     """Pass when the first number in the output is within ``tolerance`` of
     ``expected``. The number may be embedded in surrounding text."""
@@ -263,6 +348,15 @@ def score_case(case: Case, output: str) -> tuple:
         return score_regex(output, str(spec["pattern"]))
     if kind == "json_schema":
         return score_json_schema(output, spec["schema"])
+    if kind == "json_path":
+        if "expected" not in spec:
+            raise ValueError("json_path scorer requires an 'expected' value")
+        return score_json_path(
+            output,
+            str(spec["path"]),
+            spec["expected"],
+            float(spec.get("tolerance", 0.0)),
+        )
     if kind == "numeric":
         return score_numeric(
             output, float(spec["expected"]), float(spec.get("tolerance", 0.0))
