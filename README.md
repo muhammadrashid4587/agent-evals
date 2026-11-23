@@ -505,6 +505,73 @@ which cases are getting slower and by how much. From Python,
 cases worst first, and `latency_gate_passed(threshold)` is the
 boolean form.
 
+### Per-case token-cost trends
+
+Latency says whether the agent is getting slower; token counts say
+whether it is getting more expensive. The same trend machinery
+applies to the token counts agents report: the trend report carries
+a token-cost history per case and summarises it:
+
+- **first / last / mean / min / max** tokens per run, plus the
+  first-to-last change in tokens and as a percent;
+- a **least-squares slope** in tokens per run, fitted against run
+  index (so a case absent from a run — or a run where the agent
+  reported no tokens — keeps its spacing);
+- a **trend label** — `rising`, `falling`, or `flat` — from the
+  slope relative to the case's mean token count: a slope bigger than
+  10% of the mean per run counts as rising (or falling, when
+  negative).
+
+The trend lists the **most expensive cases** — ranked by mean token
+count, so the cases that dominate the bill are visible at a glance —
+and the **costliest growing** cases — the ones trending more
+expensive, ranked by slope relative to their mean — so a case that
+keeps passing but creeps from 100 tokens to 300 shows up before it
+starts tripping its token budget. The per-run table carries each
+run's total token count, and the per-case table shows each case's
+first-to-last token count alongside its pass rate and latency. The
+JSON trend carries the full token history per case, plus
+`most_expensive` and `costliest_growing`.
+
+Token trends only cover cases whose agent reported a token count:
+an agent that returns a plain string reports no tokens, so its
+cases have no token history and never appear in the cost sections —
+a run with no token counts at all shows `-` in the tokens column.
+A case with fewer than two token samples has no slope and no trend.
+
+### Token-cost trend CI gate
+
+Two flags turn the token slope into a gate, mirroring the latency
+gate:
+
+```bash
+# Fail when any case's token slope exceeds +10 tokens per run
+python -m agent_evals.trends --reports-dir reports/ --fail-on-cost-trend 10
+
+# Fail when any case is labelled "rising" at all
+python -m agent_evals.trends --reports-dir reports/ --fail-on-rising-cost
+```
+
+`--fail-on-cost-trend N` fails (exit 1) when any case's
+least-squares token slope exceeds N tokens per run. The comparison
+is strict — a slope exactly at the threshold passes — so the
+threshold is a budget, not a tripwire, and a case with fewer than
+two token samples has no slope and never trips the gate.
+`--fail-on-rising-cost` fails when any case carries the `rising`
+label (slope bigger than 10% of its mean token count per run),
+which catches cost creep on cheap cases whose absolute slope is too
+small for `--fail-on-cost-trend` to notice. Either flag combines
+with the existing newly-failing, latency-gate, and slowing rules:
+the exit code is 1 when any of them trips, and 0 otherwise. The
+text report names the cases that tripped the gate with their slope
+and mean token count, and the JSON output carries
+`cost_gate_threshold_tokens_per_run`, `cost_gate_failures`, and
+`cost_gate_passed` (plus `rising_cost_cases` with
+`--fail-on-rising-cost`). From Python,
+`TrendReport.cost_gate_failures(threshold)` returns the tripping
+cases worst first, and `cost_gate_passed(threshold)` is the boolean
+form.
+
 ## JUnit XML export
 
 Most CI systems understand JUnit XML even though they know nothing
@@ -800,3 +867,12 @@ make demo    # run both example suites through the CLI
   token spend can gate CI the same way latency budgets do. The
   budget only applies when the agent reports a token count.~~
   (done in v0.18.0)
+- ~~Cost-aware trend reports: per-case token-cost trends across a
+  reports directory — first/last/mean/min/max tokens, a
+  least-squares token slope per run, and a rising/falling/flat
+  label — plus a most-expensive ranking and a costliest-growing
+  list, with `--fail-on-cost-trend N` and `--fail-on-rising-cost`
+  CI gates, so a case that keeps passing but gets steadily more
+  expensive is visible before it trips its token budget. Token
+  trends only cover cases whose agent reports a token count.~~
+  (done in v0.19.0)

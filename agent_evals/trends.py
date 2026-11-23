@@ -16,6 +16,10 @@ returned by ``load_report``), ordered oldest first, and builds a
   change, and a least-squares slope per run, so a case that keeps
   passing but gets steadily slower shows up before it blows its
   latency budget;
+* per-case token-cost trends — the same machinery applied to the
+  token counts agents report, so a case that keeps passing but
+  gets steadily more expensive shows up before it blows its token
+  budget, plus a cheapest/most-expensive ranking per case;
 * newly failing / newly passing cases — what moved in the latest run
   compared with the previous run that contained the case;
 * worst regressions across the history — cases that passed at least
@@ -42,7 +46,13 @@ the same gating rule as the two-run comparison. ``--fail-on-trend
 N`` additionally fails the run when any case's latency slope exceeds
 N ms per run, and ``--fail-on-slowing`` fails it when any case is
 labelled ``"slowing"`` — so the trend report can gate a CI step on
-latency creep, not just on failures.
+latency creep, not just on failures. ``--fail-on-cost-trend N`` and
+``--fail-on-rising-cost`` do the same for token cost: they fail the
+run when a case's token slope exceeds N tokens per run, or when any
+case is labelled ``"rising"`` on tokens. Token trends only cover
+cases whose agent reported a token count; an agent that returns a
+plain string reports no tokens, so its cases have no token history
+at all.
 """
 
 from __future__ import annotations
@@ -75,16 +85,19 @@ __all__ = [
 class CaseTrend:
     """How one case behaved across the whole report history.
 
-    ``passed_history`` / ``score_history`` / ``latency_history`` are
-    aligned with the reports list: one entry per report, ``None``
-    when the case was absent from that run (a case added or removed
-    mid-history).
+    ``passed_history`` / ``score_history`` / ``latency_history`` /
+    ``tokens_history`` are aligned with the reports list: one entry
+    per report, ``None`` when the case was absent from that run (a
+    case added or removed mid-history). A token entry is also
+    ``None`` when the agent reported no token count for that run —
+    an agent that returns a plain string has no token history.
     """
 
     case_id: str
     passed_history: list = field(default_factory=list)
     score_history: list = field(default_factory=list)
     latency_history: list = field(default_factory=list)
+    tokens_history: list = field(default_factory=list)
 
     @property
     def runs_present(self) -> int:
@@ -302,6 +315,115 @@ class CaseTrend:
             return "improving"
         return "flat"
 
+    # -- token-cost trends ------------------------------------------------
+
+    @property
+    def tokens(self) -> list:
+        """Token counts for the runs that contained the case and
+        where the agent reported a count, skipping the rest."""
+        return [t for t in self.tokens_history if t is not None]
+
+    @property
+    def first_tokens(self) -> Optional[int]:
+        for tokens in self.tokens_history:
+            if tokens is not None:
+                return int(tokens)
+        return None
+
+    @property
+    def last_tokens(self) -> Optional[int]:
+        for tokens in reversed(self.tokens_history):
+            if tokens is not None:
+                return int(tokens)
+        return None
+
+    @property
+    def mean_tokens(self) -> Optional[float]:
+        tokens = self.tokens
+        if not tokens:
+            return None
+        return round(sum(tokens) / len(tokens), 1)
+
+    @property
+    def min_tokens(self) -> Optional[int]:
+        tokens = self.tokens
+        if not tokens:
+            return None
+        return int(min(tokens))
+
+    @property
+    def max_tokens(self) -> Optional[int]:
+        tokens = self.tokens
+        if not tokens:
+            return None
+        return int(max(tokens))
+
+    @property
+    def tokens_delta(self) -> Optional[int]:
+        """Last token count minus first (positive = more expensive)."""
+        if self.first_tokens is None or self.last_tokens is None:
+            return None
+        return self.last_tokens - self.first_tokens
+
+    @property
+    def tokens_delta_pct(self) -> Optional[float]:
+        """Last token count minus first, as a percent of the first
+        (None when there are no samples, or the first count was 0)."""
+        if self.first_tokens in (None, 0) or self.last_tokens is None:
+            return None
+        return round(
+            (self.last_tokens - self.first_tokens)
+            / self.first_tokens
+            * 100,
+            1,
+        )
+
+    @property
+    def tokens_slope_per_run(self) -> Optional[float]:
+        """Least-squares slope of the token count against run index,
+        in tokens per run (positive = getting more expensive run
+        over run). Uses the run index, not the compacted sample
+        position, so a case absent from a run — or a run where the
+        agent reported no tokens — keeps its spacing. None with
+        fewer than two samples."""
+        points = [
+            (i, tokens)
+            for i, tokens in enumerate(self.tokens_history)
+            if tokens is not None
+        ]
+        if len(points) < 2:
+            return None
+        n = len(points)
+        mean_x = sum(x for x, _ in points) / n
+        mean_y = sum(y for _, y in points) / n
+        denom = sum((x - mean_x) ** 2 for x, _ in points)
+        if denom == 0:
+            return 0.0
+        slope = (
+            sum((x - mean_x) * (y - mean_y) for x, y in points) / denom
+        )
+        return round(slope, 3)
+
+    @property
+    def tokens_trend(self) -> Optional[str]:
+        """``"rising"``, ``"falling"``, or ``"flat"`` from the token
+        slope relative to the case's mean token count: a slope
+        bigger than 10% of the mean per run counts as rising (or
+        falling, when negative). A case with fewer than two token
+        samples, or a mean of zero, has no trend (None). Token
+        counts are noisy too — an agent's verbosity drifts — so
+        this is a signal to look at the case, not a verdict."""
+        slope = self.tokens_slope_per_run
+        mean = self.mean_tokens
+        if slope is None or not mean:
+            return None
+        relative = slope / mean
+        if relative > 0.10:
+            return "rising"
+        if relative < -0.10:
+            return "falling"
+        return "flat"
+
     def to_dict(self) -> dict:
         return {
             "case_id": self.case_id,
@@ -328,6 +450,16 @@ class CaseTrend:
             "latency_delta_pct": self.latency_delta_pct,
             "latency_slope_ms_per_run": self.latency_slope_ms_per_run,
             "latency_trend": self.latency_trend,
+            "tokens_history": self.tokens_history,
+            "first_tokens": self.first_tokens,
+            "last_tokens": self.last_tokens,
+            "mean_tokens": self.mean_tokens,
+            "min_tokens": self.min_tokens,
+            "max_tokens": self.max_tokens,
+            "tokens_delta": self.tokens_delta,
+            "tokens_delta_pct": self.tokens_delta_pct,
+            "tokens_slope_per_run": self.tokens_slope_per_run,
+            "tokens_trend": self.tokens_trend,
         }
 
 
@@ -348,6 +480,7 @@ class RunSummary:
     pass_rate: float
     weighted_score: float
     total_latency_ms: float
+    total_tokens: Optional[int] = None
 
     def to_dict(self) -> dict:
         return {
@@ -359,6 +492,7 @@ class RunSummary:
             "pass_rate": round(self.pass_rate, 4),
             "weighted_score": round(self.weighted_score, 4),
             "total_latency_ms": round(self.total_latency_ms, 3),
+            "total_tokens": self.total_tokens,
         }
 
 
@@ -440,6 +574,81 @@ class TrendReport:
         return self.slowest_growing
 
     @property
+    def most_expensive(self) -> list:
+        """Cases ranked by mean token count, most expensive first;
+        ties break on the latest token count, then case_id. A case
+        whose agent never reported a token count has no mean and
+        never appears here."""
+        expensive = [c for c in self.cases if c.mean_tokens is not None]
+        return sorted(
+            expensive,
+            key=lambda c: (
+                -c.mean_tokens,
+                -(c.last_tokens or 0),
+                c.case_id,
+            ),
+        )
+
+    @property
+    def costliest_growing(self) -> list:
+        """Cases whose token count is trending up, worst first:
+        ranked by the token slope relative to the case's mean token
+        count (a case growing 20 tokens per run on a 100-token mean
+        outranks one growing 20 tokens per run on a 1000-token
+        mean); ties break on the first-to-last percent change, then
+        case_id. A case with fewer than two token samples has no
+        slope and never appears here."""
+        growing = [c for c in self.cases if c.tokens_trend == "rising"]
+
+        def _relative_slope(case: CaseTrend) -> float:
+            mean = case.mean_tokens
+            slope = case.tokens_slope_per_run
+            if not mean or slope is None:
+                return 0.0
+            return slope / mean
+
+        return sorted(
+            growing,
+            key=lambda c: (
+                -_relative_slope(c),
+                -(c.tokens_delta_pct or 0.0),
+                c.case_id,
+            ),
+        )
+
+    @property
+    def rising_cost_cases(self) -> list:
+        """Cases labelled ``"rising"`` on tokens — slope bigger
+        than 10% of the case's mean token count per run — worst
+        first, same ranking as :attr:`costliest_growing`."""
+        return self.costliest_growing
+
+    def cost_gate_failures(self, threshold_tokens_per_run: float) -> list:
+        """Cases whose token slope exceeds ``threshold_tokens_per_run``
+        (tokens per run), worst first: ranked by slope descending,
+        ties break on case_id. A case with fewer than two token
+        samples has no slope and never trips the gate; a flat or
+        falling case has a slope at or below zero and never trips
+        it either, so the gate only fires on real, sustained cost
+        growth. The comparison is strict — a slope exactly at the
+        threshold passes, so the threshold is a budget, not a
+        tripwire."""
+        failures = [
+            c
+            for c in self.cases
+            if c.tokens_slope_per_run is not None
+            and c.tokens_slope_per_run > threshold_tokens_per_run
+        ]
+        return sorted(
+            failures,
+            key=lambda c: (-c.tokens_slope_per_run, c.case_id),
+        )
+
+    def cost_gate_passed(self, threshold_tokens_per_run: float) -> bool:
+        """True when no case's token slope exceeds the threshold."""
+        return not self.cost_gate_failures(threshold_tokens_per_run)
+
+    @property
     def slowest_growing(self) -> list:
         """Cases whose latency is trending up, worst first: ranked
         by the latency slope relative to the case's mean latency
@@ -489,6 +698,8 @@ class TrendReport:
         self,
         latency_gate_threshold_ms_per_run: Optional[float] = None,
         fail_on_slowing: bool = False,
+        cost_gate_threshold_tokens_per_run: Optional[float] = None,
+        fail_on_rising_cost: bool = False,
     ) -> dict:
         data = {
             "n_reports": self.n_reports,
@@ -499,6 +710,10 @@ class TrendReport:
             "worst_regressions": [c.case_id for c in self.worst_regressions],
             "flaky": [c.case_id for c in self.flaky_cases],
             "slowest_growing": [c.case_id for c in self.slowest_growing],
+            "most_expensive": [c.case_id for c in self.most_expensive],
+            "costliest_growing": [
+                c.case_id for c in self.costliest_growing
+            ],
             "runs": [r.to_dict() for r in self.runs],
             "cases": [c.to_dict() for c in self.cases],
         }
@@ -514,6 +729,19 @@ class TrendReport:
         if fail_on_slowing:
             data["slowing_cases"] = [
                 c.case_id for c in self.slowing_cases
+            ]
+        if cost_gate_threshold_tokens_per_run is not None:
+            failures = self.cost_gate_failures(
+                cost_gate_threshold_tokens_per_run
+            )
+            data["cost_gate_threshold_tokens_per_run"] = (
+                cost_gate_threshold_tokens_per_run
+            )
+            data["cost_gate_failures"] = [c.case_id for c in failures]
+            data["cost_gate_passed"] = not failures
+        if fail_on_rising_cost:
+            data["rising_cost_cases"] = [
+                c.case_id for c in self.rising_cost_cases
             ]
         return data
 
@@ -554,6 +782,11 @@ def compare_history(reports: list) -> TrendReport:
                 pass_rate=(passed / total) if total else 0.0,
                 weighted_score=float(report.get("weighted_score", 0.0)),
                 total_latency_ms=float(report.get("total_latency_ms", 0.0)),
+                total_tokens=(
+                    int(report["total_tokens"])
+                    if report.get("total_tokens") is not None
+                    else None
+                ),
             )
         )
         for case_id, trend in by_case.items():
@@ -567,6 +800,9 @@ def compare_history(reports: list) -> TrendReport:
             trend.latency_history.append(
                 result.get("latency_ms") if result else None
             )
+            trend.tokens_history.append(
+                result.get("tokens") if result else None
+            )
         for case_id, result in results.items():
             if case_id not in by_case:
                 # Backfill None for the earlier runs this case was
@@ -576,11 +812,13 @@ def compare_history(reports: list) -> TrendReport:
                     passed_history=[None] * (len(runs) - 1),
                     score_history=[None] * (len(runs) - 1),
                     latency_history=[None] * (len(runs) - 1),
+                    tokens_history=[None] * (len(runs) - 1),
                 )
                 by_case[case_id] = trend
                 trend.passed_history.append(bool(result["passed"]))
                 trend.score_history.append(result.get("score"))
                 trend.latency_history.append(result.get("latency_ms"))
+                trend.tokens_history.append(result.get("tokens"))
     # Cases first seen in an early run were appended to on every later
     # run; cases first seen later got backfilled. Order the trend by
     # first appearance.
@@ -634,13 +872,16 @@ def format_trend(
     trend: TrendReport,
     latency_gate_threshold_ms_per_run: Optional[float] = None,
     fail_on_slowing: bool = False,
+    cost_gate_threshold_tokens_per_run: Optional[float] = None,
+    fail_on_rising_cost: bool = False,
 ) -> str:
     """Render a trend report as a plain-text summary.
 
     When ``latency_gate_threshold_ms_per_run`` is given, a section
     lists the cases whose slope tripped the gate (or says the gate
     passed); when ``fail_on_slowing`` is given, the slowing cases
-    are called out the same way."""
+    are called out the same way. ``cost_gate_threshold_tokens_per_run``
+    and ``fail_on_rising_cost`` do the same for token cost."""
     lines = [f"Reports: {trend.n_reports}"]
     if trend.runs:
         first = trend.runs[0]
@@ -665,14 +906,19 @@ def format_trend(
     lines.append("")
     lines.append(
         f"{'run':<28} {'passed':>10} {'pass rate':>10} "
-        f"{'weighted':>9} {'latency':>9}"
+        f"{'weighted':>9} {'latency':>9} {'tokens':>7}"
     )
-    lines.append("-" * 72)
+    lines.append("-" * 81)
     for run in trend.runs:
+        tokens = (
+            f"{run.total_tokens}"
+            if run.total_tokens is not None
+            else "-"
+        )
         lines.append(
             f"{run.path:<28} {run.passed}/{run.total:<8} "
             f"{run.pass_rate * 100:>9.1f}% {run.weighted_score:>9.4f} "
-            f"{run.total_latency_ms:>8.1f} ms"
+            f"{run.total_latency_ms:>8.1f} ms {tokens:>7}"
         )
     lines.append("")
 
@@ -730,6 +976,29 @@ def format_trend(
             f"mean {c.mean_latency_ms:.1f} ms)"
         ),
     )
+    _section(
+        "Most expensive cases",
+        trend.most_expensive,
+        lambda c: (
+            f"{c.case_id} (mean {c.mean_tokens:.0f} tokens, "
+            f"{c.first_tokens} -> {c.last_tokens} tokens, "
+            f"{c.tokens_delta_pct:+.1f}%)"
+            if c.tokens_delta_pct is not None
+            else f"{c.case_id} (mean {c.mean_tokens:.0f} tokens, "
+            f"{c.first_tokens} -> {c.last_tokens} tokens)"
+        ),
+    )
+    _section(
+        "Costliest growing",
+        trend.costliest_growing,
+        lambda c: (
+            f"{c.case_id} ({c.first_tokens} -> "
+            f"{c.last_tokens} tokens, "
+            f"{c.tokens_delta_pct:+.1f}%, "
+            f"+{c.tokens_slope_per_run:.2f} tokens/run, "
+            f"mean {c.mean_tokens:.0f} tokens)"
+        ),
+    )
     if latency_gate_threshold_ms_per_run is not None:
         failures = trend.latency_gate_failures(
             latency_gate_threshold_ms_per_run
@@ -772,12 +1041,55 @@ def format_trend(
         else:
             lines.append("Slowing cases (0): none labelled slowing")
             lines.append("")
+    if cost_gate_threshold_tokens_per_run is not None:
+        failures = trend.cost_gate_failures(
+            cost_gate_threshold_tokens_per_run
+        )
+        if failures:
+            lines.append(
+                f"Cost gate FAILED "
+                f"(threshold +{cost_gate_threshold_tokens_per_run:.2f} "
+                f"tokens/run, {len(failures)} case(s) over):"
+            )
+            for case in failures:
+                lines.append(
+                    f"  {case.case_id} "
+                    f"(+{case.tokens_slope_per_run:.2f} tokens/run, "
+                    f"mean {case.mean_tokens:.0f} tokens, "
+                    f"trend {case.tokens_trend})"
+                )
+            lines.append("")
+        else:
+            lines.append(
+                f"Cost gate passed "
+                f"(no case over +{cost_gate_threshold_tokens_per_run:.2f} "
+                f"tokens/run)"
+            )
+            lines.append("")
+    if fail_on_rising_cost:
+        rising = trend.rising_cost_cases
+        if rising:
+            lines.append(
+                f"Rising cost cases ({len(rising)}): "
+                f"the gate fails on any case labelled rising:"
+            )
+            for case in rising:
+                lines.append(
+                    f"  {case.case_id} "
+                    f"(+{case.tokens_slope_per_run:.2f} tokens/run, "
+                    f"mean {case.mean_tokens:.0f} tokens)"
+                )
+            lines.append("")
+        else:
+            lines.append("Rising cost cases (0): none labelled rising")
+            lines.append("")
     lines.append("Per-case trend:")
     lines.append(
         f"{'case':<22} {'runs':>4} {'pass rate':>10} "
-        f"{'score':>13} {'worst drop':>10}  {'latency':>20}  latest"
+        f"{'score':>13} {'worst drop':>10}  {'latency':>20}  "
+        f"{'tokens':>15}  latest"
     )
-    lines.append("-" * 92)
+    lines.append("-" * 109)
     for case in trend.cases:
         first = case.first_score
         last = case.last_score
@@ -799,10 +1111,19 @@ def format_trend(
             )
         else:
             latency = "-"
+        if case.first_tokens is not None and case.last_tokens is not None:
+            pct = case.tokens_delta_pct
+            pct_text = f" ({pct:+.0f}%)" if pct is not None else ""
+            tokens = (
+                f"{case.first_tokens} -> {case.last_tokens}{pct_text}"
+            )
+        else:
+            tokens = "-"
         lines.append(
             f"{case.case_id:<22} {case.runs_present:>4} "
             f"{case.pass_rate * 100:>9.1f}% {score:>13} "
-            f"{case.worst_drop:>10.2f}  {latency:>20}  {latest}"
+            f"{case.worst_drop:>10.2f}  {latency:>20}  {tokens:>15}  "
+            f"{latest}"
         )
     return "\n".join(lines).rstrip("\n")
 
@@ -840,9 +1161,30 @@ def main(argv=None) -> int:
         "run); catches slow creep on fast cases whose absolute "
         "slope is too small for --fail-on-trend to notice",
     )
+    parser.add_argument(
+        "--fail-on-cost-trend",
+        type=float,
+        default=None,
+        metavar="TOKENS_PER_RUN",
+        help="fail (exit 1) when any case's token slope exceeds "
+        "this many tokens per run — a CI gate on cost creep, so a "
+        "case that keeps passing but gets steadily more expensive "
+        "fails the build before it trips its token budget",
+    )
+    parser.add_argument(
+        "--fail-on-rising-cost",
+        action="store_true",
+        help="fail (exit 1) when any case is labelled \"rising\" "
+        "on tokens (slope bigger than 10% of the case's mean "
+        "token count per run); catches cost creep on cheap cases "
+        "whose absolute slope is too small for "
+        "--fail-on-cost-trend to notice",
+    )
     args = parser.parse_args(argv)
     if args.fail_on_trend is not None and args.fail_on_trend < 0:
         parser.error("--fail-on-trend must not be negative")
+    if args.fail_on_cost_trend is not None and args.fail_on_cost_trend < 0:
+        parser.error("--fail-on-cost-trend must not be negative")
 
     try:
         reports = load_reports_dir(args.reports_dir)
@@ -861,11 +1203,19 @@ def main(argv=None) -> int:
         else []
     )
     slowing = trend.slowing_cases if args.fail_on_slowing else []
+    cost_gate_failures = (
+        trend.cost_gate_failures(args.fail_on_cost_trend)
+        if args.fail_on_cost_trend is not None
+        else []
+    )
+    rising = trend.rising_cost_cases if args.fail_on_rising_cost else []
     print(
         format_trend(
             trend,
             latency_gate_threshold_ms_per_run=args.fail_on_trend,
             fail_on_slowing=args.fail_on_slowing,
+            cost_gate_threshold_tokens_per_run=args.fail_on_cost_trend,
+            fail_on_rising_cost=args.fail_on_rising_cost,
         )
     )
     if args.json:
@@ -874,6 +1224,10 @@ def main(argv=None) -> int:
                 trend.to_dict(
                     latency_gate_threshold_ms_per_run=args.fail_on_trend,
                     fail_on_slowing=args.fail_on_slowing,
+                    cost_gate_threshold_tokens_per_run=(
+                        args.fail_on_cost_trend
+                    ),
+                    fail_on_rising_cost=args.fail_on_rising_cost,
                 ),
                 f,
                 indent=2,
@@ -893,7 +1247,30 @@ def main(argv=None) -> int:
             f"slowing: " + ", ".join(c.case_id for c in slowing),
             file=sys.stderr,
         )
-    return 1 if (trend.has_new_failure or gate_failures or slowing) else 0
+    if cost_gate_failures:
+        print(
+            f"\nCost gate FAILED: {len(cost_gate_failures)} case(s) over "
+            f"+{args.fail_on_cost_trend:.2f} tokens/run: "
+            + ", ".join(c.case_id for c in cost_gate_failures),
+            file=sys.stderr,
+        )
+    if rising:
+        print(
+            f"\nRising cost gate FAILED: {len(rising)} case(s) labelled "
+            f"rising: " + ", ".join(c.case_id for c in rising),
+            file=sys.stderr,
+        )
+    return (
+        1
+        if (
+            trend.has_new_failure
+            or gate_failures
+            or slowing
+            or cost_gate_failures
+            or rising
+        )
+        else 0
+    )
 
 
 if __name__ == "__main__":

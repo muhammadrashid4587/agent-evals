@@ -27,12 +27,17 @@ def _report(started_at, results, suite="calc", weighted_score=1.0):
         "pass_rate": round(passed / len(results), 4) if results else 0.0,
         "weighted_score": weighted_score,
         "total_latency_ms": sum(r.get("latency_ms", 0.0) for r in results),
+        "total_tokens": (
+            sum(r["tokens"] for r in results if r.get("tokens") is not None)
+            or None
+        ),
         "results": [
             {
                 "case_id": r["case_id"],
                 "passed": r["passed"],
                 "score": r.get("score", 1.0 if r["passed"] else 0.0),
                 "latency_ms": r.get("latency_ms", 1.0),
+                "tokens": r.get("tokens"),
             }
             for r in results
         ],
@@ -343,6 +348,355 @@ class TestLatencyGate(unittest.TestCase):
         )
         self.assertIn("Latency gate passed", passing)
         self.assertNotIn("Latency gate FAILED", passing)
+
+
+def _cost_history():
+    """Four runs with explicit per-case token counts: one case
+    getting steadily more expensive, one getting cheaper, one flat,
+    one with a gap and a missing token report, one whose agent never
+    reports tokens, and one with a single sample."""
+    return [
+        _report(
+            "2026-11-21T10:00:00+00:00",
+            [
+                {"case_id": "pricey", "passed": True, "tokens": 100},
+                {"case_id": "cheap", "passed": True, "tokens": 50},
+                {"case_id": "steady", "passed": True, "tokens": 80},
+                {"case_id": "gappy", "passed": True, "tokens": 60},
+                {"case_id": "silent", "passed": True},
+            ],
+        ),
+        _report(
+            "2026-11-21T11:00:00+00:00",
+            [
+                {"case_id": "pricey", "passed": True, "tokens": 150},
+                {"case_id": "cheap", "passed": True, "tokens": 45},
+                {"case_id": "steady", "passed": True, "tokens": 80},
+                {"case_id": "silent", "passed": True},
+            ],
+        ),
+        _report(
+            "2026-11-21T12:00:00+00:00",
+            [
+                {"case_id": "pricey", "passed": True, "tokens": 200},
+                {"case_id": "cheap", "passed": True, "tokens": 40},
+                {"case_id": "steady", "passed": True, "tokens": 80},
+                {"case_id": "gappy", "passed": True, "tokens": 70},
+                {"case_id": "silent", "passed": True},
+            ],
+        ),
+        _report(
+            "2026-11-21T13:00:00+00:00",
+            [
+                {"case_id": "pricey", "passed": True, "tokens": 300},
+                {"case_id": "cheap", "passed": True, "tokens": 35},
+                {"case_id": "steady", "passed": True, "tokens": 80},
+                {"case_id": "gappy", "passed": True, "tokens": 70},
+                {"case_id": "silent", "passed": True},
+                {"case_id": "single", "passed": True, "tokens": 42},
+            ],
+        ),
+    ]
+
+
+class TestCostTrends(unittest.TestCase):
+    def setUp(self):
+        self.trend = compare_history(_cost_history())
+        self.by_id = {c.case_id: c for c in self.trend.cases}
+
+    def test_first_last_mean_min_max_tokens(self):
+        pricey = self.by_id["pricey"]
+        self.assertEqual(pricey.first_tokens, 100)
+        self.assertEqual(pricey.last_tokens, 300)
+        self.assertEqual(pricey.mean_tokens, 187.5)
+        self.assertEqual(pricey.min_tokens, 100)
+        self.assertEqual(pricey.max_tokens, 300)
+
+    def test_tokens_delta_and_pct(self):
+        pricey = self.by_id["pricey"]
+        self.assertEqual(pricey.tokens_delta, 200)
+        self.assertEqual(pricey.tokens_delta_pct, 200.0)
+        cheap = self.by_id["cheap"]
+        self.assertEqual(cheap.tokens_delta, -15)
+        self.assertEqual(cheap.tokens_delta_pct, -30.0)
+        self.assertEqual(self.by_id["steady"].tokens_delta_pct, 0.0)
+
+    def test_tokens_slope_uses_run_index(self):
+        # pricey: 100, 150, 200, 300 over runs 0..3 -> 65 tokens/run.
+        self.assertAlmostEqual(
+            self.by_id["pricey"].tokens_slope_per_run, 65.0, places=3
+        )
+        # cheap: 50, 45, 40, 35 -> -5 tokens/run.
+        self.assertAlmostEqual(
+            self.by_id["cheap"].tokens_slope_per_run, -5.0, places=3
+        )
+        self.assertEqual(self.by_id["steady"].tokens_slope_per_run, 0.0)
+        # gappy: 60 at run 0, no tokens at run 1, 70 at runs 2 and 3.
+        # The gap keeps its spacing: slope over x = 0, 2, 3 is 25/7.
+        self.assertAlmostEqual(
+            self.by_id["gappy"].tokens_slope_per_run, 25 / 7, places=3
+        )
+
+    def test_tokens_trend_labels(self):
+        self.assertEqual(self.by_id["pricey"].tokens_trend, "rising")
+        self.assertEqual(self.by_id["cheap"].tokens_trend, "falling")
+        self.assertEqual(self.by_id["steady"].tokens_trend, "flat")
+        # A case whose agent never reports tokens has no trend.
+        self.assertIsNone(self.by_id["silent"].tokens_slope_per_run)
+        self.assertIsNone(self.by_id["silent"].tokens_trend)
+        self.assertIsNone(self.by_id["silent"].mean_tokens)
+        # A single sample has no slope and no trend.
+        self.assertIsNone(self.by_id["single"].tokens_slope_per_run)
+        self.assertIsNone(self.by_id["single"].tokens_trend)
+        self.assertEqual(self.by_id["single"].tokens_delta_pct, 0.0)
+
+    def test_tokens_history_skips_absent_and_unreported_runs(self):
+        self.assertEqual(
+            self.by_id["gappy"].tokens_history, [60, None, 70, 70]
+        )
+        self.assertEqual(self.by_id["gappy"].tokens, [60, 70, 70])
+        self.assertEqual(
+            self.by_id["silent"].tokens_history, [None, None, None, None]
+        )
+        self.assertEqual(self.by_id["silent"].tokens, [])
+
+    def test_most_expensive_ranks_by_mean_tokens(self):
+        # Means: pricey 187.5, steady 80, gappy 66.7, cheap 42.5,
+        # single 42.0; silent never reported tokens, so it is absent.
+        self.assertEqual(
+            [c.case_id for c in self.trend.most_expensive],
+            ["pricey", "steady", "gappy", "cheap", "single"],
+        )
+        self.assertNotIn(
+            "silent", [c.case_id for c in self.trend.most_expensive]
+        )
+
+    def test_costliest_growing_ranks_by_relative_slope(self):
+        # Only "pricey" trends as rising; "gappy" grows too but its
+        # slope is small relative to its mean, so it is flat.
+        self.assertEqual(
+            [c.case_id for c in self.trend.costliest_growing], ["pricey"]
+        )
+        self.assertEqual(self.by_id["gappy"].tokens_trend, "flat")
+
+    def test_tokens_fields_in_dict(self):
+        data = self.by_id["pricey"].to_dict()
+        self.assertEqual(data["first_tokens"], 100)
+        self.assertEqual(data["last_tokens"], 300)
+        self.assertEqual(data["mean_tokens"], 187.5)
+        self.assertEqual(data["tokens_delta_pct"], 200.0)
+        self.assertAlmostEqual(data["tokens_slope_per_run"], 65.0, places=3)
+        self.assertEqual(data["tokens_trend"], "rising")
+        self.assertEqual(data["tokens_history"], [100, 150, 200, 300])
+        self.assertEqual(
+            self.trend.to_dict()["most_expensive"],
+            ["pricey", "steady", "gappy", "cheap", "single"],
+        )
+        self.assertEqual(
+            self.trend.to_dict()["costliest_growing"], ["pricey"]
+        )
+
+    def test_run_summaries_carry_total_tokens(self):
+        # Run totals: 290, 275, 390, 527 (silent never reports).
+        self.assertEqual(
+            [r.total_tokens for r in self.trend.runs],
+            [290, 275, 390, 527],
+        )
+        self.assertEqual(
+            [r.to_dict()["total_tokens"] for r in self.trend.runs],
+            [290, 275, 390, 527],
+        )
+
+    def test_format_shows_cost_sections_and_tokens_column(self):
+        text = format_trend(self.trend)
+        self.assertIn("Most expensive cases (5):", text)
+        self.assertIn(
+            "pricey (mean 188 tokens, 100 -> 300 tokens, +200.0%)", text
+        )
+        self.assertIn("Costliest growing (1):", text)
+        self.assertIn(
+            "pricey (100 -> 300 tokens, +200.0%, +65.00 tokens/run, "
+            "mean 188 tokens)",
+            text,
+        )
+        self.assertIn("100 -> 300 (+200%)", text)
+        self.assertIn("tokens", text)
+
+    def test_format_single_report_has_no_costliest_growing(self):
+        # One run has no token slopes, so nothing can be rising —
+        # but the most-expensive ranking is still meaningful for a
+        # single run, so it stays.
+        text = format_trend(compare_history(_cost_history()[:1]))
+        self.assertNotIn("Costliest growing", text)
+        self.assertIn("Most expensive cases (4):", text)
+
+
+class TestCostGate(unittest.TestCase):
+    def setUp(self):
+        self.trend = compare_history(_cost_history())
+        self.by_id = {c.case_id: c for c in self.trend.cases}
+
+    def test_gate_passes_on_flat_and_falling_trends(self):
+        # Slopes: pricey +65, cheap -5, steady 0, gappy ~3.57
+        # tokens/run. A 100 threshold lets every case through.
+        self.assertEqual(self.trend.cost_gate_failures(100.0), [])
+        self.assertTrue(self.trend.cost_gate_passed(100.0))
+
+    def test_gate_fails_on_steep_rising_slope(self):
+        # A 50 threshold catches only the pricey case (+65).
+        failures = self.trend.cost_gate_failures(50.0)
+        self.assertEqual([c.case_id for c in failures], ["pricey"])
+        self.assertFalse(self.trend.cost_gate_passed(50.0))
+
+    def test_threshold_is_strict_and_respected(self):
+        # A slope exactly at the threshold passes: the threshold is
+        # a budget, not a tripwire.
+        self.assertEqual(self.trend.cost_gate_failures(65.0), [])
+        # Just below it, the same case trips the gate.
+        self.assertEqual(
+            [c.case_id for c in self.trend.cost_gate_failures(64.99)],
+            ["pricey"],
+        )
+
+    def test_gate_ranks_failures_by_slope(self):
+        # With a 0.0 threshold both growing cases trip, worst first.
+        failures = self.trend.cost_gate_failures(0.0)
+        self.assertEqual(
+            [c.case_id for c in failures], ["pricey", "gappy"]
+        )
+
+    def test_cases_without_token_samples_never_trip_gate(self):
+        # "silent" never reported tokens and "single" has one sample,
+        # so neither has a slope at all.
+        self.assertIsNone(self.by_id["silent"].tokens_slope_per_run)
+        self.assertIsNone(self.by_id["single"].tokens_slope_per_run)
+        tripped = [c.case_id for c in self.trend.cost_gate_failures(0.0)]
+        self.assertNotIn("silent", tripped)
+        self.assertNotIn("single", tripped)
+
+    def test_rising_cost_cases_property(self):
+        self.assertEqual(
+            [c.case_id for c in self.trend.rising_cost_cases], ["pricey"]
+        )
+
+    def test_gate_fields_in_dict(self):
+        data = self.trend.to_dict(cost_gate_threshold_tokens_per_run=50.0)
+        self.assertEqual(data["cost_gate_threshold_tokens_per_run"], 50.0)
+        self.assertEqual(data["cost_gate_failures"], ["pricey"])
+        self.assertFalse(data["cost_gate_passed"])
+        # Without a threshold, the gate keys are absent.
+        plain = self.trend.to_dict()
+        self.assertNotIn("cost_gate_failures", plain)
+        self.assertNotIn("cost_gate_passed", plain)
+
+    def test_format_shows_cost_gate_section(self):
+        text = format_trend(
+            self.trend, cost_gate_threshold_tokens_per_run=50.0
+        )
+        self.assertIn("Cost gate FAILED", text)
+        self.assertIn("pricey (+65.00 tokens/run", text)
+        passing = format_trend(
+            self.trend, cost_gate_threshold_tokens_per_run=100.0
+        )
+        self.assertIn("Cost gate passed", passing)
+        self.assertNotIn("Cost gate FAILED", passing)
+
+
+class TestCostGateCli(unittest.TestCase):
+    def _write_reports(self, tmp, reports):
+        for i, report in enumerate(reports):
+            with open(os.path.join(tmp, f"run-{i}.json"), "w") as f:
+                json.dump(report, f)
+
+    def _run_cli(self, tmp, *extra):
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agent_evals.trends",
+                "--reports-dir",
+                tmp,
+                *extra,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=os.path.join(os.path.dirname(__file__), ".."),
+        )
+
+    def test_cli_fail_on_cost_trend_trips_on_steep_slope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _cost_history())
+            proc = self._run_cli(tmp, "--fail-on-cost-trend", "50")
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("Cost gate FAILED", proc.stdout)
+            self.assertIn("pricey", proc.stdout)
+
+    def test_cli_fail_on_cost_trend_passes_below_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # All cases pass every run, so with a generous threshold
+            # the trend gates clean.
+            self._write_reports(tmp, _cost_history())
+            proc = self._run_cli(tmp, "--fail-on-cost-trend", "100")
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn("Cost gate passed", proc.stdout)
+
+    def test_cli_fail_on_rising_cost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _cost_history())
+            proc = self._run_cli(tmp, "--fail-on-rising-cost")
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("Rising cost gate FAILED", proc.stderr)
+            self.assertIn("pricey", proc.stderr)
+
+    def test_cli_fail_on_rising_cost_passes_when_nothing_rising(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Flat and falling cases only: no case is rising.
+            flat = [
+                _report(
+                    "2026-11-21T10:00:00+00:00",
+                    [
+                        {"case_id": "steady", "passed": True, "tokens": 80},
+                        {"case_id": "cheap", "passed": True, "tokens": 50},
+                    ],
+                ),
+                _report(
+                    "2026-11-21T11:00:00+00:00",
+                    [
+                        {"case_id": "steady", "passed": True, "tokens": 80},
+                        {"case_id": "cheap", "passed": True, "tokens": 35},
+                    ],
+                ),
+            ]
+            self._write_reports(tmp, flat)
+            proc = self._run_cli(tmp, "--fail-on-rising-cost")
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn("Rising cost cases (0)", proc.stdout)
+
+    def test_cli_json_carries_cost_gate_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _cost_history())
+            out = os.path.join(tmp, "trend.json")
+            proc = self._run_cli(
+                tmp, "--fail-on-cost-trend", "50", "--json", out
+            )
+            self.assertEqual(proc.returncode, 1)
+            with open(out) as f:
+                data = json.load(f)
+            self.assertEqual(data["cost_gate_failures"], ["pricey"])
+            self.assertFalse(data["cost_gate_passed"])
+            self.assertEqual(
+                data["most_expensive"],
+                ["pricey", "steady", "gappy", "cheap", "single"],
+            )
+
+    def test_cli_rejects_negative_cost_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _cost_history())
+            proc = self._run_cli(tmp, "--fail-on-cost-trend", "-1")
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn(
+                "--fail-on-cost-trend must not be negative", proc.stderr
+            )
 
 
 class TestLatencyGateCli(unittest.TestCase):
