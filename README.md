@@ -411,6 +411,37 @@ carry no fingerprints: the diff falls back to comparing version
 labels for the set, and reports per-case change as unknown rather
 than guessing.
 
+## Comparing models on one suite
+
+A two-run diff compares one agent against its own past. To compare
+several agents (or several models) against each other, run the same
+suite against each of them and get one comparison view:
+
+```bash
+python -m agent_evals.model_compare --suite examples/calculator.json \
+    --agent fast=examples.calculator_agent:agent \
+    --agent slow=my_agents:slow_calc
+```
+
+Or from Python:
+
+```python
+from agent_evals import compare_models, format_model_comparison
+
+comp = compare_models(suite, {"fast": fast_agent, "slow": slow_agent})
+print(format_model_comparison(comp))
+```
+
+The view shows an overall ranking (weighted score, then pass rate,
+then lowest total latency), per-case and aggregate scores, latency,
+and token totals side by side, a winner per case (highest score,
+ties broken by lowest latency — a case every agent failed has no
+winner), and a case-wins count per agent. `--json` writes the
+comparison as JSON. At least two `--agent name=module:attribute`
+specs are required. The comparison always exits 0: it reports which
+agent won, it does not gate CI — use the two-run compare to gate on
+regressions.
+
 ## Comparing across a reports directory
 
 A two-run diff says what changed between yesterday and today. A
@@ -876,3 +907,10 @@ make demo    # run both example suites through the CLI
   expensive is visible before it trips its token budget. Token
   trends only cover cases whose agent reports a token count.~~
   (done in v0.19.0)
+- ~~Per-model comparison view: run the same suite against several
+  agents (or models) and get one comparison view — per-case and
+  aggregate scores, latency, and token/cost totals side by side,
+  with a winner per case and an overall ranking — as a CLI entry
+  (`python -m agent_evals.model_compare --agent name=module:attr
+  ...`) and from Python (`compare_models` /
+  `format_model_comparison`).~~ (done in v0.20.0)

@@ -5,7 +5,7 @@ unless you register a judge that calls one (see ``agent_evals.judge``).
 The agent under test is a plain Python callable.
 """
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
 
 from .evals import (
     Case,
@@ -36,12 +36,14 @@ from .stability import (
 
 __all__ = [
     "Case",
+    "CaseComparison",
     "CaseFlakyHistory",
     "CaseStability",
     "CaseTrend",
     "DEFAULT_JUDGES",
     "FlakyHistoryReport",
     "JudgeVerdict",
+    "ModelComparison",
     "ReportComparison",
     "Result",
     "RunReport",
@@ -53,9 +55,11 @@ __all__ = [
     "coerce_verdict",
     "compare_flaky_history",
     "compare_history",
+    "compare_models",
     "compare_reports",
     "format_comparison",
     "format_flaky_history",
+    "format_model_comparison",
     "format_stability",
     "format_summary",
     "format_trend",
@@ -114,6 +118,25 @@ def __getattr__(name):
             "compare_history": compare_history,
             "format_trend": format_trend,
             "load_reports_dir": load_reports_dir,
+        }[name]
+    if name in {
+        "CaseComparison",
+        "ModelComparison",
+        "compare_models",
+        "format_model_comparison",
+    }:
+        from .model_compare import (
+            CaseComparison,
+            ModelComparison,
+            compare_models,
+            format_model_comparison,
+        )
+
+        return {
+            "CaseComparison": CaseComparison,
+            "ModelComparison": ModelComparison,
+            "compare_models": compare_models,
+            "format_model_comparison": format_model_comparison,
         }[name]
     if name in {
         "CaseFlakyHistory",

@@ -1,0 +1,396 @@
+"""Compare several agents (or models) on the same eval suite.
+
+``compare_reports`` (see :mod:`agent_evals.compare`) compares two runs of
+one agent over time. This module answers the other question: given the
+same suite, which agent is best? ``compare_models`` runs the suite
+against every named agent and produces one comparison view: per-case
+and aggregate scores, latency, and token/cost totals side by side,
+with a winner per case and an overall ranking.
+
+The per-case winner is the agent with the highest score on that case;
+a tie is broken by the lowest latency, then by name, so the winner is
+deterministic. A case where every agent scored 0 has no winner — there
+is nothing to win. The overall ranking sorts by weighted score, then
+pass rate, then total latency (lowest first), then name.
+
+Usage:
+    python -m agent_evals.model_compare --suite examples/calculator.json \\
+        --agent fast=examples.calculator_agent:agent \\
+        --agent slow=my_agents:slow_calc
+    python -m agent_evals.model_compare --suite examples/kv_store.json \\
+        --agent a=examples.kv_agent:agent \\
+        --agent b=examples.kv_agent:agent --json reports/compare.json
+
+An agent spec is ``name=module:attribute``; the name is what the
+comparison view shows. Two specs may not share a name, and at least
+two agents are required — comparing one agent against itself is a
+single run, not a comparison.
+
+Exit code is always 0: a comparison view reports which agent won, it
+does not gate CI. Use ``agent-evals-compare`` to gate on regressions
+between two runs of the same agent.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+from .cli import load_agent
+from .evals import RunReport, load_suite, run_suite
+
+__all__ = [
+    "CaseComparison",
+    "ModelComparison",
+    "compare_models",
+    "format_model_comparison",
+]
+
+
+@dataclass
+class CaseComparison:
+    """One case's outcome across every agent.
+
+    ``results`` maps agent name -> the case's ``Result`` in that
+    agent's run. ``winner`` is the name of the agent that won the
+    case — the highest score, breaking ties by lowest latency, then
+    by name — or None when every agent scored 0 on the case and
+    there is nothing to win.
+    """
+
+    case_id: str
+    results: dict
+    winner: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "case_id": self.case_id,
+            "winner": self.winner,
+            "agents": {
+                name: {
+                    "passed": result.passed,
+                    "score": round(result.score, 4),
+                    "latency_ms": round(result.latency_ms, 3),
+                    "tokens": result.tokens,
+                    "timed_out": result.timed_out,
+                }
+                for name, result in self.results.items()
+            },
+        }
+
+
+@dataclass
+class ModelComparison:
+    """The result of running one suite against several agents.
+
+    ``reports`` maps agent name -> that agent's :class:`RunReport`.
+    ``ranking`` lists the agent names best first (weighted score,
+    then pass rate, then lowest total latency, then name). ``winner``
+    is the first name in the ranking, or None when there are no
+    agents (``compare_models`` always requires at least two, so a
+    comparison built by hand with no agents has no winner).
+    """
+
+    suite: str
+    reports: dict = field(default_factory=dict)
+    cases: list = field(default_factory=list)
+    suite_version: Optional[str] = None
+    suite_fingerprint: Optional[str] = None
+
+    @property
+    def agent_names(self) -> list:
+        """Agent names in the order they were given."""
+        return list(self.reports)
+
+    @property
+    def ranking(self) -> list:
+        """Agent names best first: weighted score, then pass rate,
+        then lowest total latency, then name."""
+        return sorted(
+            self.reports,
+            key=lambda name: (
+                -self.reports[name].weighted_score,
+                -self.reports[name].pass_rate,
+                self.reports[name].total_latency_ms,
+                name,
+            ),
+        )
+
+    @property
+    def winner(self) -> Optional[str]:
+        """The best agent overall, or None when there are no agents."""
+        ranked = self.ranking
+        return ranked[0] if ranked else None
+
+    def to_dict(self) -> dict:
+        return {
+            "suite": self.suite,
+            "suite_version": self.suite_version,
+            "suite_fingerprint": self.suite_fingerprint,
+            "agents": {
+                name: {
+                    "passed": report.passed,
+                    "total": report.total,
+                    "pass_rate": round(report.pass_rate, 4),
+                    "weighted_score": round(report.weighted_score, 4),
+                    "total_latency_ms": round(report.total_latency_ms, 3),
+                    "total_tokens": report.total_tokens,
+                }
+                for name, report in self.reports.items()
+            },
+            "ranking": self.ranking,
+            "winner": self.winner,
+            "cases": [case.to_dict() for case in self.cases],
+        }
+
+
+def _case_winner(case_id: str, results: dict) -> Optional[str]:
+    """The agent that won one case, or None when every agent scored 0.
+
+    Highest score wins; a tie is broken by the lowest latency, then
+    by name, so the winner is deterministic. A case where the best
+    score is 0 has no winner: every agent failed it, so none of them
+    beat the others.
+    """
+    best_score = max((r.score for r in results.values()), default=0.0)
+    if best_score <= 0.0:
+        return None
+    contenders = [n for n, r in results.items() if r.score == best_score]
+    return min(contenders, key=lambda n: (results[n].latency_ms, n))
+
+
+def compare_models(
+    suite,
+    agents: dict,
+    workers: int = 1,
+    judges: Optional[dict] = None,
+) -> ModelComparison:
+    """Run ``suite`` against every agent in ``agents`` (name -> callable)
+    and return the comparison view.
+
+    At least two agents are required — one agent is a single run, not
+    a comparison. Every agent runs the same suite in the same order,
+    so each case is directly comparable across agents. ``workers`` is
+    passed through to :func:`run_suite` per agent; a stateful agent
+    whose cases depend on each other's order needs ``workers`` at 1,
+    the same as a single run.
+    """
+    if len(agents) < 2:
+        raise ValueError(
+            "comparing models needs at least two agents, "
+            f"got {len(agents)}"
+        )
+    reports = {
+        name: run_suite(suite, agent, workers=workers, judges=judges)
+        for name, agent in agents.items()
+    }
+    cases = []
+    for case in suite.cases:
+        results = {}
+        for name, report in reports.items():
+            # Every report ran the same suite, so every case is in
+            # every report; index by case_id rather than position.
+            match = next(
+                (r for r in report.results if r.case_id == case.id), None
+            )
+            if match is not None:
+                results[name] = match
+        cases.append(
+            CaseComparison(
+                case_id=case.id,
+                results=results,
+                winner=_case_winner(case.id, results),
+            )
+        )
+    return ModelComparison(
+        suite=suite.name,
+        reports=reports,
+        cases=cases,
+        suite_version=suite.version,
+        suite_fingerprint=suite.fingerprint(),
+    )
+
+
+def _agent_line(rank: int, name: str, report: RunReport, is_winner: bool) -> str:
+    """One ranking row: rank, name, pass count, weighted score,
+    latency, and tokens when the agent reported any."""
+    tokens = (
+        f"  tokens {report.total_tokens}"
+        if report.total_tokens is not None
+        else ""
+    )
+    mark = "  <-- winner" if is_winner else ""
+    return (
+        f"  {rank}. {name}  {report.passed}/{report.total} passed  "
+        f"weighted {report.weighted_score:.4f}  "
+        f"{report.total_latency_ms:.1f} ms{tokens}{mark}"
+    )
+
+
+def format_model_comparison(comp: ModelComparison) -> str:
+    """Render a model comparison as a plain-text summary."""
+    lines = [f"Suite: {comp.suite}"]
+    if comp.suite_version is not None:
+        lines.append(f"Eval set: v{comp.suite_version}")
+    lines.append("")
+    lines.append("Ranking:")
+    for i, name in enumerate(comp.ranking, start=1):
+        lines.append(
+            _agent_line(i, name, comp.reports[name], name == comp.winner)
+        )
+    lines.append("")
+    if not comp.cases:
+        lines.append("No cases in the suite.")
+        return "\n".join(lines)
+    names = comp.agent_names
+    # Per-case table: one column per agent, one for the winner.
+    # A cell is "PASS 1.00  12.3ms" (or FAIL / TIMEOUT / BUDGET / COST).
+    id_width = max(len(c.case_id) for c in comp.cases)
+    id_width = max(id_width, len("case"))
+    cells = {}
+    col_widths = {}
+    for name in names:
+        col_widths[name] = len(name)
+    for case in comp.cases:
+        for name in names:
+            result = case.results.get(name)
+            if result is None:
+                cell = "-"
+            else:
+                if result.budget_violated:
+                    mark = "BUDGET"
+                elif result.cost_violated:
+                    mark = "COST"
+                elif result.timed_out:
+                    mark = "TIMEOUT"
+                else:
+                    mark = "PASS" if result.passed else "FAIL"
+                cell = (
+                    f"{mark} {result.score:.2f}  {result.latency_ms:.1f} ms"
+                )
+            cells[(case.case_id, name)] = cell
+            col_widths[name] = max(col_widths[name], len(cell))
+    winner_width = max(
+        len(c.winner) if c.winner else 1 for c in comp.cases
+    )
+    winner_width = max(winner_width, len("winner"))
+    header = (
+        f"{'case':<{id_width}}  "
+        + "  ".join(f"{name:<{col_widths[name]}}" for name in names)
+        + f"  {'winner':<{winner_width}}"
+    )
+    lines.append("Per-case:")
+    lines.append(header)
+    lines.append("-" * len(header))
+    for case in comp.cases:
+        row = (
+            f"{case.case_id:<{id_width}}  "
+            + "  ".join(
+                f"{cells[(case.case_id, name)]:<{col_widths[name]}}"
+                for name in names
+            )
+            + f"  {(case.winner or '-'): <{winner_width}}"
+        )
+        lines.append(row.rstrip())
+    # Wins per agent: how many cases each agent won outright.
+    wins = {name: 0 for name in names}
+    for case in comp.cases:
+        if case.winner is not None:
+            wins[case.winner] += 1
+    lines.append("")
+    lines.append(
+        "Case wins: "
+        + ", ".join(f"{name} {wins[name]}" for name in names)
+    )
+    return "\n".join(lines)
+
+
+def _parse_agent_spec(spec: str) -> tuple:
+    """Split a ``name=module:attribute`` spec into (name, spec)."""
+    if "=" not in spec:
+        raise ValueError(
+            f"agent must be given as name=module:attribute, got {spec!r}"
+        )
+    name, _, agent_spec = spec.partition("=")
+    if not name.strip():
+        raise ValueError(f"agent name must not be empty, got {spec!r}")
+    return name, agent_spec
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="agent-evals-compare-models",
+        description="Run a suite against several agents and compare them.",
+    )
+    parser.add_argument("--suite", required=True, help="path to a suite JSON file")
+    parser.add_argument(
+        "--agent",
+        action="append",
+        default=[],
+        metavar="NAME=MODULE:ATTR",
+        help="an agent to compare, as name=module:attribute "
+        "(e.g. fast=examples.calculator_agent:agent); repeatable, "
+        "at least two required",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="cases to run at once per agent (default 1, sequential); "
+        "the agents must be thread-safe for more than 1",
+    )
+    parser.add_argument(
+        "--judge",
+        help="judge callable for 'judge' scorers, as "
+        "module:attribute; registered under the name \"custom\"",
+    )
+    parser.add_argument(
+        "--judge-url",
+        help="HTTP endpoint for 'judge' scorers; registered under "
+        "the name \"http\"",
+    )
+    parser.add_argument(
+        "--json", help="optional path to write the comparison as JSON"
+    )
+    args = parser.parse_args(argv)
+    if len(args.agent) < 2:
+        parser.error("at least two --agent specs are required")
+    if args.workers < 1:
+        parser.error("--workers must be a positive integer")
+    agents = {}
+    for spec in args.agent:
+        name, agent_spec = _parse_agent_spec(spec)
+        if name in agents:
+            parser.error(f"duplicate agent name {name!r}")
+        try:
+            agents[name] = load_agent(agent_spec)
+        except (ImportError, AttributeError, ValueError) as exc:
+            parser.error(f"cannot load agent {spec!r}: {exc}")
+    from .judge import DEFAULT_JUDGES, make_http_judge
+
+    judges = dict(DEFAULT_JUDGES)
+    if args.judge:
+        from .cli import load_callable
+
+        try:
+            judges["custom"] = load_callable(args.judge, "judge")
+        except (ImportError, AttributeError, ValueError) as exc:
+            parser.error(f"cannot load judge {args.judge!r}: {exc}")
+    if args.judge_url:
+        judges["http"] = make_http_judge(args.judge_url)
+    suite = load_suite(args.suite)
+    comp = compare_models(suite, agents, workers=args.workers, judges=judges)
+    print(format_model_comparison(comp))
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump(comp.to_dict(), f, indent=2)
+            f.write("\n")
+        print(f"\nComparison written to {args.json}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
