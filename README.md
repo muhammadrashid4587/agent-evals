@@ -572,6 +572,14 @@ says which subset of the suite it covers. From Python,
 `repeat_suite(suite, agent, 5, tags=["smoke"])` is the same run,
 with `tag_mode="all"` and `exclude_tags=["slow"]` available.
 
+The stability report also carries a per-tag pass-rate breakdown,
+the same shape as a single run's `tag_breakdown` but aggregated
+over repetitions: `tag_breakdown` in JSON maps each tag to its case
+count, total passes, total case-runs, pass rate, mean score, and
+how many cases under the tag were flaky, and the text summary ends
+with a `Per-tag pass rates:` section. A case carrying several tags
+counts under each of them; untagged cases appear under no tag.
+
 ## Report format
 
 ```json
@@ -682,3 +690,8 @@ make demo    # run both example suites through the CLI
   (`tag_filter` in JSON, a `Tags: ...` line in the text summary),
   so a stability report says which subset of the suite it covers.~~
   (done in v0.15.0)
+- ~~Per-tag pass-rate breakdowns in `--repeat` stability reports:
+  the stability report carries a `tag_breakdown` (JSON) and a
+  `Per-tag pass rates:` section (text summary), aggregated over
+  repetitions with a flaky count per tag, so a tag that keeps
+  failing or flipping is visible at a glance.~~ (done in v0.16.0)

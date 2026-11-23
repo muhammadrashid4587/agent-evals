@@ -24,7 +24,11 @@ Or from the CLI: ``python -m agent_evals.cli --suite ... --agent ...
 --repeat 5``. Tag filters (``--tag`` / ``--exclude-tag``) apply to
 repeated runs too: the suite is scoped first, then repeated, and the
 stability report records which tag filter was applied, so a report
-says which subset of the suite it covers.
+says which subset of the suite it covers. The report also carries a
+per-tag pass-rate breakdown (``tag_breakdown`` in JSON, a
+``Per-tag pass rates:`` section in the text summary), reusing the
+same shape as a single run's breakdown, so a tag that is flaky
+across repetitions is visible at a glance.
 """
 
 from __future__ import annotations
@@ -52,6 +56,8 @@ class CaseStability:
     passed at least once and failed at least once: 0 < pass_rate < 1.
     ``mean_latency_ms`` and ``mean_score`` are the averages across
     the runs; ``timeouts`` counts the runs in which the case timed out.
+    ``tags`` is the case's tag list, carried so the stability report
+    can break pass rates down per tag.
     """
 
     case_id: str
@@ -60,6 +66,7 @@ class CaseStability:
     mean_latency_ms: float
     mean_score: float
     timeouts: int = 0
+    tags: list = field(default_factory=list)
 
     @property
     def pass_rate(self) -> float:
@@ -79,6 +86,7 @@ class CaseStability:
             "mean_latency_ms": round(self.mean_latency_ms, 3),
             "mean_score": round(self.mean_score, 4),
             "timeouts": self.timeouts,
+            "tags": list(self.tags),
         }
 
 
@@ -111,6 +119,58 @@ class StabilityReport:
     def always_failing(self) -> list:
         return [c for c in self.cases if c.passes == 0 and c.runs]
 
+    @property
+    def tag_breakdown(self) -> dict:
+        """Per-tag pass rates across the repetitions: tag ->
+        ``{"cases", "passes", "runs", "pass_rate", "mean_score",
+        "flaky"}``.
+
+        The same shape as a single run's ``tag_breakdown``
+        (``RunReport.tag_breakdown``), aggregated over repetitions:
+        ``passes`` is the total passes across all case-runs under
+        the tag and ``runs`` is ``cases * repetitions``, so the pass
+        rate is the tag's pass rate over every repetition. A case
+        carrying several tags counts under each of them; untagged
+        cases appear under no tag. ``mean_score`` is the mean of the
+        cases' mean scores, and ``flaky`` counts how many cases
+        under the tag were flaky, so a tag that is unstable across
+        repetitions stands out. An empty dict means no case in the
+        report carried a tag.
+        """
+        stats: dict = {}
+        for c in self.cases:
+            for tag in c.tags:
+                entry = stats.setdefault(
+                    tag,
+                    {
+                        "cases": 0,
+                        "passes": 0,
+                        "score": 0.0,
+                        "flaky": 0,
+                    },
+                )
+                entry["cases"] += 1
+                entry["passes"] += c.passes
+                entry["score"] += c.mean_score
+                entry["flaky"] += 1 if c.flaky else 0
+        return {
+            tag: {
+                "cases": entry["cases"],
+                "passes": entry["passes"],
+                "runs": entry["cases"] * self.repetitions,
+                "pass_rate": (
+                    entry["passes"] / (entry["cases"] * self.repetitions)
+                    if entry["cases"] and self.repetitions
+                    else 0.0
+                ),
+                "mean_score": (
+                    entry["score"] / entry["cases"] if entry["cases"] else 0.0
+                ),
+                "flaky": entry["flaky"],
+            }
+            for tag, entry in sorted(stats.items())
+        }
+
     def to_dict(self) -> dict:
         return {
             "suite": self.suite,
@@ -121,6 +181,17 @@ class StabilityReport:
             "flaky": [c.case_id for c in self.flaky_cases],
             "always_passing": [c.case_id for c in self.always_passing],
             "always_failing": [c.case_id for c in self.always_failing],
+            "tag_breakdown": {
+                tag: {
+                    "cases": entry["cases"],
+                    "passes": entry["passes"],
+                    "runs": entry["runs"],
+                    "pass_rate": round(entry["pass_rate"], 4),
+                    "mean_score": round(entry["mean_score"], 4),
+                    "flaky": entry["flaky"],
+                }
+                for tag, entry in self.tag_breakdown.items()
+            },
             "cases": [c.to_dict() for c in self.cases],
         }
 
@@ -179,9 +250,11 @@ def repeat_suite(
     # Accumulate per case_id, in suite order.
     aggregate: dict = {}
     order: list = []
+    by_id: dict = {}
     for case in suite.cases:
         aggregate[case.id] = {"passes": 0, "latency": 0.0, "score": 0.0, "timeouts": 0}
         order.append(case.id)
+        by_id[case.id] = case
     for _ in range(repetitions):
         report = run_suite(suite, agent, workers=workers, judges=judges)
         for result in report.results:
@@ -199,6 +272,7 @@ def repeat_suite(
             mean_latency_ms=aggregate[case_id]["latency"] / repetitions,
             mean_score=aggregate[case_id]["score"] / repetitions,
             timeouts=aggregate[case_id]["timeouts"],
+            tags=list(by_id[case_id].tags),
         )
         for case_id in order
     ]
@@ -260,4 +334,19 @@ def format_stability(report: StabilityReport) -> str:
             "the verdict is not reproducible. Check the agent for "
             "nondeterminism or the case for a brittle scorer.",
         ]
+    breakdown = report.tag_breakdown
+    if breakdown:
+        # A tag that keeps failing — or keeps flipping — is visible at
+        # a glance, without digging through the per-case rows.
+        lines.append("")
+        lines.append("Per-tag pass rates:")
+        width = max(len(tag) for tag in breakdown)
+        for tag, stats in breakdown.items():
+            line = (
+                f"  {tag:<{width}}  {stats['passes']}/{stats['runs']} "
+                f"({stats['pass_rate'] * 100:.1f}%)"
+            )
+            if stats["flaky"]:
+                line += f"  {stats['flaky']} flaky"
+            lines.append(line)
     return "\n".join(lines)

@@ -206,5 +206,120 @@ class TestStabilityTagFilter(unittest.TestCase):
             )
 
 
+class TestStabilityTagBreakdown(unittest.TestCase):
+    def _tagged_suite(self):
+        def case(case_id, prompt, expected, tags=None):
+            data = {"id": case_id, "prompt": prompt,
+                    "scorer": {"type": "exact", "expected": expected}}
+            if tags is not None:
+                data["tags"] = tags
+            return Case.from_dict(data)
+
+        return Suite(
+            name="tagged",
+            cases=[
+                case("smoke-pass", "p", "19", ["smoke"]),
+                # Flips every call, so 2 of 4 repetitions pass.
+                case("smoke-flaky", "flip", "19", ["fast", "smoke"]),
+                case("fast-fail", "p", "nope", ["fast"]),
+                case("untagged", "p", "19"),
+            ],
+        )
+
+    def test_breakdown_values(self):
+        report = repeat_suite(
+            self._tagged_suite(), _alternating_agent(), repetitions=4
+        )
+        self.assertEqual(
+            report.tag_breakdown,
+            {
+                "fast": {"cases": 2, "passes": 2, "runs": 8,
+                         "pass_rate": 0.25, "mean_score": 0.25,
+                         "flaky": 1},
+                "smoke": {"cases": 2, "passes": 6, "runs": 8,
+                          "pass_rate": 0.75, "mean_score": 0.75,
+                          "flaky": 1},
+            },
+        )
+
+    def test_multi_tag_case_counts_under_each_tag(self):
+        report = repeat_suite(
+            self._tagged_suite(), _alternating_agent(), repetitions=4
+        )
+        # smoke-flaky passes 2 of 4 under both of its tags.
+        self.assertEqual(report.tag_breakdown["fast"]["passes"], 2)
+        self.assertEqual(report.tag_breakdown["smoke"]["passes"], 6)
+
+    def test_untagged_cases_appear_under_no_tag(self):
+        report = repeat_suite(
+            self._tagged_suite(), _alternating_agent(), repetitions=4
+        )
+        self.assertEqual(
+            sorted(report.tag_breakdown), ["fast", "smoke"]
+        )
+
+    def test_no_tags_means_empty_breakdown(self):
+        report = repeat_suite(_suite(), lambda prompt: "19", repetitions=2)
+        self.assertEqual(report.tag_breakdown, {})
+        self.assertEqual(report.to_dict()["tag_breakdown"], {})
+
+    def test_tags_carried_per_case_in_dict(self):
+        report = repeat_suite(
+            self._tagged_suite(), _alternating_agent(), repetitions=2
+        )
+        by_id = {c["case_id"]: c for c in report.to_dict()["cases"]}
+        self.assertEqual(by_id["smoke-flaky"]["tags"], ["fast", "smoke"])
+        self.assertEqual(by_id["untagged"]["tags"], [])
+
+    def test_breakdown_in_dict(self):
+        report = repeat_suite(
+            self._tagged_suite(), _alternating_agent(), repetitions=4
+        )
+        self.assertEqual(
+            report.to_dict()["tag_breakdown"]["smoke"],
+            {"cases": 2, "passes": 6, "runs": 8,
+             "pass_rate": 0.75, "mean_score": 0.75, "flaky": 1},
+        )
+
+    def test_format_stability_shows_per_tag_section(self):
+        report = repeat_suite(
+            self._tagged_suite(), _alternating_agent(), repetitions=4
+        )
+        text = format_stability(report)
+        self.assertIn("Per-tag pass rates:", text)
+        self.assertIn("smoke", text)
+        self.assertIn("6/8 (75.0%)", text)
+        self.assertIn("fast", text)
+        self.assertIn("2/8 (25.0%)", text)
+        self.assertIn("1 flaky", text)
+
+    def test_format_stability_omits_section_without_tags(self):
+        report = repeat_suite(_suite(), lambda prompt: "19", repetitions=2)
+        self.assertNotIn("Per-tag", format_stability(report))
+
+    def test_cli_repeat_writes_tag_breakdown(self):
+        from agent_evals.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = os.path.join(tmp, "stability.json")
+            code = main([
+                "--suite", "examples/calculator.json",
+                "--agent", "examples.calculator_agent:agent",
+                "--repeat", "2",
+                "--report", report_path,
+            ])
+            self.assertEqual(code, 0)
+            with open(report_path, encoding="utf-8") as f:
+                stability = json.load(f)
+            breakdown = stability["tag_breakdown"]
+            # Calculator cases are deterministic, so every tag is 100%.
+            for tag, entry in breakdown.items():
+                self.assertEqual(entry["pass_rate"], 1.0)
+                self.assertEqual(entry["flaky"], 0)
+                self.assertEqual(entry["passes"], entry["runs"])
+            self.assertIn("smoke", breakdown)
+            self.assertIn("arithmetic", breakdown)
+
+
 if __name__ == "__main__":
     unittest.main()
