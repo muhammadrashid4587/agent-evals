@@ -19,7 +19,10 @@ only passes when every case passed every time. Cases with a ``judge``
 scorer use the built-in deterministic ``stub`` judge unless a judge is
 registered: ``--judge module:attribute`` registers a judge callable
 under the name ``"custom"``, and ``--judge-url URL`` registers an HTTP
-judge under the name ``"http"``.
+judge under the name ``"http"``. ``--tag TAG`` (repeatable) runs only
+the cases carrying that tag, so a smoke run is ``--tag smoke``;
+``--tag-mode all`` requires a case to carry every given tag instead
+of any one of them.
 """
 
 from __future__ import annotations
@@ -106,6 +109,23 @@ def main(argv=None) -> int:
         "the name \"http\" (POSTs {prompt, output, rubric}, expects "
         "{passed, score, rationale})",
     )
+    parser.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        metavar="TAG",
+        help="run only cases carrying this tag; repeatable, e.g. "
+        "--tag smoke --tag fast (see --tag-mode for how multiple "
+        "tags combine)",
+    )
+    parser.add_argument(
+        "--tag-mode",
+        choices=["any", "all"],
+        default="any",
+        help="how multiple --tag values combine: 'any' runs a case "
+        "carrying at least one of them (default), 'all' runs only a "
+        "case carrying every one of them",
+    )
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be a positive integer")
@@ -113,6 +133,15 @@ def main(argv=None) -> int:
         parser.error("--repeat must be a positive integer")
 
     suite = load_suite(args.suite)
+    if args.tag:
+        suite = suite.select(args.tag, match=args.tag_mode)
+        if not suite.cases:
+            print(
+                f"no cases match tag(s) {', '.join(args.tag)} "
+                f"(mode {args.tag_mode}) in {args.suite}",
+                file=sys.stderr,
+            )
+            return 2
     agent = load_agent(args.agent)
     judges = dict(DEFAULT_JUDGES)
     if args.judge:

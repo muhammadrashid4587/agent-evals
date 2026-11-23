@@ -10,6 +10,7 @@ counts (when the agent reports them), prints a summary table, and writes a
 JSON report. A case may set a `timeout` in seconds, so a hung agent fails
 that case instead of the run. A case may also carry a `weight`, so some
 cases count more than others, and some scorers give partial credit.
+Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 
 ## What it is
 
@@ -225,6 +226,38 @@ python -m agent_evals.cli --suite examples/calculator.json \
 ```
 
 Non-positive or non-numeric budgets are rejected when the suite loads.
+
+## Case tags
+
+A case may also carry an optional `tags` list, e.g.
+`{"id": "add", ..., "tags": ["arithmetic", "smoke"]}`. Tags are labels
+for selecting cases: run only the smoke cases with `--tag smoke`, or
+only the cases carrying both tags with `--tag smoke --tag fast
+--tag-mode all`:
+
+```bash
+# OR: any case carrying at least one of the tags (the default)
+python -m agent_evals.cli --suite examples/calculator.json \
+    --agent examples.calculator_agent:agent --tag smoke --tag fast
+# AND: only a case carrying every tag
+python -m agent_evals.cli --suite examples/calculator.json \
+    --agent examples.calculator_agent:agent --tag smoke --tag fast --tag-mode all
+```
+
+Or from Python: `suite.select(["smoke"])` returns a new suite with
+only the matching cases (the original is unchanged), and
+`suite.select(["smoke", "fast"], match="all")` is the AND form. An
+empty tag list selects the whole suite. A tag filter that matches
+no cases exits 2 with a message naming the tags and the mode, so a
+typo fails loudly instead of silently passing an empty run. Tags
+also work with `--repeat` and `--workers`.
+
+Tags are recorded per result in the JSON report (`"tags"`) and shown
+in the summary after the detail, e.g. `exact match  [arithmetic,
+smoke]`. Tags are part of a case's fingerprint, so retagging a case
+changes it — but only the set of tags matters, not their order, and
+duplicates are dropped when the suite loads. A non-list `tags`, or a
+tag that is not a non-empty string, is rejected when the suite loads.
 
 ## Parallel execution
 
@@ -522,7 +555,8 @@ as JSON. `repetitions` must be a positive integer.
      "latency_ms": 0.123, "tokens": null, "output": "OK",
      "timed_out": false, "score": 1.0, "weight": 1.0,
      "max_latency_ms": null, "budget_violated": false,
-     "case_fingerprint": "a1b2c3d4e5f6", "diff": null}
+     "case_fingerprint": "a1b2c3d4e5f6", "diff": null,
+     "tags": ["smoke"]}
   ]
 }
 ```
@@ -583,3 +617,7 @@ make demo    # run both example suites through the CLI
   and scorer errors as `<error>`, budget violations as
   `<failure>` — so CI systems can ingest eval results.~~ (done in
   v0.11.0)
+- ~~Case tags with `--tag` filtering: cases carry a `tags` list, and
+  `--tag smoke` runs only the matching cases (`--tag-mode all`
+  requires every tag), with tags recorded per result in the JSON
+  report and shown in the summary.~~ (done in v0.12.0)

@@ -31,6 +31,12 @@ Design
   are in the detail). A case that fails its checks is never also a
   budget violation, and a timed-out case is not one either.
 
+* A case may carry ``tags``, a list of labels such as ``"smoke"`` or
+  ``"slow"``. Tags are recorded per result in the report and shown in
+  the summary, and a suite can be filtered to the cases carrying a
+  tag (see :meth:`Suite.select`) — so a quick smoke run or a
+  slow-only run is one flag away.
+
 * When an ``exact`` case fails, the result carries a unified diff of
   the expected output vs the actual output (``Result.diff``, also in
   the JSON report and under the row in the text summary), so a
@@ -135,6 +141,8 @@ class Case:
     ``max_latency_ms`` is an optional per-case latency budget in
     milliseconds: a case that passes its checks but takes longer than
     the budget is reported as a budget violation instead of a pass.
+    ``tags`` is an optional list of labels (e.g. ``["smoke"]``) used
+    to select cases for a run; it defaults to no tags.
     """
 
     id: str
@@ -143,6 +151,7 @@ class Case:
     timeout: Optional[float] = None
     weight: float = 1.0
     max_latency_ms: Optional[float] = None
+    tags: list = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Case":
@@ -187,6 +196,26 @@ class Case:
                     f"case {data.get('id')!r}: max_latency_ms must be "
                     f"positive, got {max_latency_ms!r}"
                 )
+        tags = data.get("tags", [])
+        if not isinstance(tags, list):
+            raise ValueError(
+                f"case {data.get('id')!r}: tags must be a list of strings, "
+                f"got {tags!r}"
+            )
+        seen: set = set()
+        clean_tags = []
+        for tag in tags:
+            if not isinstance(tag, str) or not tag.strip():
+                raise ValueError(
+                    f"case {data.get('id')!r}: tags must be non-empty "
+                    f"strings, got {tag!r}"
+                )
+            if tag not in seen:
+                seen.add(tag)
+                clean_tags.append(tag)
+        # Canonical order: the tag set is what identifies the case, so
+        # the order tags are listed in must not change its fingerprint.
+        clean_tags.sort()
         return cls(
             id=str(data["id"]),
             prompt=str(data["prompt"]),
@@ -194,6 +223,7 @@ class Case:
             timeout=timeout,
             weight=weight,
             max_latency_ms=max_latency_ms,
+            tags=clean_tags,
         )
 
     def to_dict(self) -> dict:
@@ -204,12 +234,14 @@ class Case:
             data["weight"] = self.weight
         if self.max_latency_ms is not None:
             data["max_latency_ms"] = self.max_latency_ms
+        if self.tags:
+            data["tags"] = list(self.tags)
         return data
 
     def fingerprint(self) -> str:
         """A short content hash of this case: its id, prompt, scorer,
-        timeout, weight, and latency budget. Two cases with the same
-        fingerprint are the same case; a changed prompt or scorer
+        timeout, weight, latency budget, and tags. Two cases with the
+        same fingerprint are the same case; a changed prompt or scorer
         changes the fingerprint, so a run diff can tell a case that
         changed from an agent that changed."""
         return _fingerprint(self.to_dict())
@@ -250,6 +282,28 @@ class Suite:
         if self.version is not None:
             data["version"] = self.version
         return data
+
+    def select(self, tags: list, match: str = "any") -> "Suite":
+        """Return a new suite with only the cases carrying ``tags``.
+
+        ``match`` is ``"any"`` (default) or ``"all"``: ``"any"`` keeps
+        a case carrying at least one of the tags (OR), ``"all"`` keeps
+        only a case carrying every one of them (AND). An empty tag
+        list returns the whole suite unchanged. The original suite is
+        not modified, and the version label carries over, so a
+        filtered run still records which eval set it was measured
+        against (its fingerprint differs, because the cases differ).
+        """
+        if match not in ("any", "all"):
+            raise ValueError(f"match must be 'any' or 'all', got {match!r}")
+        wanted = [str(t) for t in tags]
+        if not wanted:
+            return Suite(name=self.name, cases=list(self.cases), version=self.version)
+        if match == "any":
+            kept = [c for c in self.cases if any(t in c.tags for t in wanted)]
+        else:
+            kept = [c for c in self.cases if all(t in c.tags for t in wanted)]
+        return Suite(name=self.name, cases=kept, version=self.version)
 
     def fingerprint(self) -> str:
         """A short content hash of this eval set: its name and every
@@ -641,6 +695,8 @@ class Result:
     output, present only when an ``exact`` case failed — a failing
     answer is visible at a glance instead of requiring the reader to
     compare two blobs by eye.
+    ``tags`` is the case's tag list, carried into the report so a
+    filtered run still says which cases it ran.
     """
 
     case_id: str
@@ -656,6 +712,7 @@ class Result:
     budget_violated: bool = False
     case_fingerprint: Optional[str] = None
     diff: Optional[str] = None
+    tags: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -672,6 +729,7 @@ class Result:
             "budget_violated": self.budget_violated,
             "case_fingerprint": self.case_fingerprint,
             "diff": self.diff,
+            "tags": list(self.tags),
         }
 
 
@@ -842,6 +900,7 @@ def _run_case(
             score=0.0,
             weight=case.weight,
             case_fingerprint=case.fingerprint(),
+            tags=list(case.tags),
         )
     if status == "error":
         return Result(
@@ -853,6 +912,7 @@ def _run_case(
             score=0.0,
             weight=case.weight,
             case_fingerprint=case.fingerprint(),
+            tags=list(case.tags),
         )
     try:
         passed, detail, score = score_case(case, output, judges)
@@ -893,6 +953,7 @@ def _run_case(
         budget_violated=budget_violated,
         case_fingerprint=case.fingerprint(),
         diff=diff,
+        tags=list(case.tags),
     )
 
 
@@ -981,9 +1042,12 @@ def format_summary(report: RunReport) -> str:
         else:
             mark = "PASS" if r.passed else "FAIL"
         tokens = str(r.tokens) if r.tokens is not None else "-"
+        detail = r.detail
+        if r.tags:
+            detail += f"  [{', '.join(r.tags)}]"
         lines.append(
             f"{r.case_id:<22} {mark:<7} {r.score:>6.2f} {r.latency_ms:>8.1f} "
-            f"{tokens:>7}  {r.detail}"
+            f"{tokens:>7}  {detail}"
         )
         if r.diff is not None:
             # The diff shows what changed; cap it so one huge answer
