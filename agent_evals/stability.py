@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from .evals import Suite, run_suite
 
@@ -124,6 +124,7 @@ def repeat_suite(
     agent: Callable[[str], Any],
     repetitions: int,
     workers: int = 1,
+    judges: Optional[dict] = None,
 ) -> StabilityReport:
     """Run ``suite`` against ``agent`` ``repetitions`` times and
     aggregate per-case pass rates.
@@ -131,8 +132,9 @@ def repeat_suite(
     ``repetitions`` must be a positive integer; a single repetition is
     just one run and flags nothing as flaky. ``workers`` is passed
     through to ``run_suite`` for each repetition (see its docstring:
-    parallel mode needs a thread-safe agent). Cases are reported in
-    suite order.
+    parallel mode needs a thread-safe agent). ``judges`` is passed
+    through to ``run_suite`` as well, so ``judge`` scorers work in
+    repeated runs. Cases are reported in suite order.
     """
     if (
         isinstance(repetitions, bool)
@@ -150,7 +152,7 @@ def repeat_suite(
         aggregate[case.id] = {"passes": 0, "latency": 0.0, "score": 0.0, "timeouts": 0}
         order.append(case.id)
     for _ in range(repetitions):
-        report = run_suite(suite, agent, workers=workers)
+        report = run_suite(suite, agent, workers=workers, judges=judges)
         for result in report.results:
             entry = aggregate[result.case_id]
             entry["passes"] += 1 if result.passed else 0

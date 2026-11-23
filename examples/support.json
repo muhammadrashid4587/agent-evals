@@ -1,0 +1,59 @@
+{
+  "cases": [
+    {
+      "id": "refund-policy",
+      "prompt": "What is your refund policy?",
+      "scorer": {
+        "judge": "stub",
+        "rubric": {
+          "criteria": [
+            {
+              "must_mention": [
+                "30 days",
+                "refund"
+              ],
+              "name": "names the refund window"
+            },
+            {
+              "must_mention": [
+                "Contact support"
+              ],
+              "name": "offers the next step"
+            }
+          ],
+          "must_not_mention": [
+            "as an AI"
+          ]
+        },
+        "type": "judge"
+      }
+    },
+    {
+      "id": "refund-escalation",
+      "prompt": "I need a refund and I want to talk to a human.",
+      "scorer": {
+        "judge": "stub",
+        "rubric": {
+          "criteria": [
+            {
+              "must_mention": [
+                "30 days",
+                "refund"
+              ],
+              "name": "names the refund window"
+            },
+            {
+              "must_mention": [
+                "human agent"
+              ],
+              "name": "escalates to a human"
+            }
+          ],
+          "pass_threshold": 0.5
+        },
+        "type": "judge"
+      }
+    }
+  ],
+  "name": "support"
+}

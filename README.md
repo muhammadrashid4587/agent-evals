@@ -14,9 +14,12 @@ cases count more than others, and some scorers give partial credit.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Eight deterministic scorers: exact match, substring, contains-all,
+- Nine scorers: exact match, substring, contains-all,
   contains-any, regex, JSON-schema shape, JSON-path value, numeric
-  tolerance.
+  tolerance, and a judge scorer that scores free-form output against
+  a rubric with a pluggable judge (a deterministic built-in stub
+  judge by default; bring your own LLM judge as a callable or an
+  HTTP endpoint).
 - A CLI that runs a suite JSON file against an agent named as
   `module:attribute` and exits 0 only when every case passes (a case
   that passes its checks but exceeds its latency budget does not fail
@@ -26,9 +29,11 @@ cases count more than others, and some scorers give partial credit.
 
 ## What it is not
 
-- Not a model-as-judge: nothing here calls an LLM, and no scorer asks a
-  model for an opinion. Same output, same verdict, every run.
-- Not a benchmark dataset: the two example suites are tiny on purpose.
+- Not a model-as-judge by default: nothing here calls an LLM, and no
+  scorer asks a model for an opinion unless you register a judge that
+  does. Same output, same verdict, every run — the built-in stub
+  judge is deterministic, and a custom judge is opt-in.
+- Not a benchmark dataset: the three example suites are tiny on purpose.
   Bring your own cases.
 - Not a tracing or observability tool. For recording what an agent did,
   see [blackbox](https://github.com/muhammadrashid4587/blackbox).
@@ -85,6 +90,7 @@ detail; the run continues with the remaining cases.
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
+| `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
 The JSON-schema shape language: a type name (`str`, `int`, `float`,
 `bool`, `list`, `dict`, `number`), a dict of `field -> subschema` for
@@ -95,6 +101,68 @@ The JSON-path language: an optional leading `$`, dot-separated keys, and
 `[n]` array indices, e.g. `$.result.total` or `items[0].name`. A missing
 key or index fails the case; a malformed path is a scorer error. Numbers
 compare with an optional `tolerance`; `bool` is never accepted as `int`.
+
+## LLM-as-judge scorer
+
+Free-form output — an explanation, a summary, a support answer — cannot
+be checked with substrings. The `judge` scorer sends the prompt, the
+output, and a rubric to a judge and records its verdict:
+
+```json
+{"type": "judge", "judge": "stub", "rubric": {
+  "criteria": [
+    {"name": "names the refund window",
+     "must_mention": ["30 days", "refund"]},
+    {"name": "offers the next step",
+     "must_mention": ["Contact support"]}
+  ],
+  "must_not_mention": ["as an AI"],
+  "pass_threshold": 1.0
+}}
+```
+
+A judge is a callable `judge(prompt, output, rubric)` returning a
+verdict: `passed` (bool), `score` (0–1), and a `rationale` string. The
+verdict's score earns partial credit like `contains_all` does — a case
+that meets half the rubric's weighted criteria earns half its weight —
+and the rationale lands in the report's detail, so a human can see why
+the output scored the way it did. A judge that raises, or returns
+something that is not a verdict, is a scorer error: the case fails and
+the run continues.
+
+Three ways to get a judge:
+
+- **Built-in stub** (`"stub"`, the default when the spec omits
+  `"judge"`): deterministic, offline, no model. Each criterion lists
+  substrings the output must mention (a `weight` per criterion is
+  optional, default 1.0); the score is the weighted fraction of
+  criteria met. The case passes when the score reaches
+  `pass_threshold` (default 1.0) and no `must_not_mention` substring
+  appears — a forbidden substring always fails the case. Use it in
+  tests and demos, and as the reference for a real judge.
+- **Your own callable**: pass a registry to `run_suite` —
+  `run_suite(suite, agent, judges={"my-judge": my_judge})` — and name
+  it in the spec (`"judge": "my-judge"`). The CLI takes
+  `--judge module:attribute` and registers it as `"custom"`.
+- **An HTTP endpoint**: `make_http_judge("https://...")` returns a
+  judge callable that POSTs `{"prompt", "output", "rubric"}` and
+  expects `{"passed", "score", "rationale"}` back, so you can point
+  the harness at any LLM-judge service you run — a wrapper around an
+  LLM API, a local model server — without the harness holding API
+  keys. The CLI takes `--judge-url URL` and registers it as `"http"`.
+
+```bash
+python -m agent_evals.cli --suite examples/support.json \
+    --agent examples.support_agent:agent
+```
+
+Judge cases work with the rest of the harness: weights, latency
+budgets, timeouts, parallel runs (the judge must be thread-safe for
+`--workers` above 1), repeated runs, and run comparison all apply.
+A judge that calls a remote model is nondeterministic by nature, so a
+`--repeat` run is the honest way to check whether its verdicts are
+stable — a case the judge passes sometimes and fails other times shows
+up as flaky, same as any other.
 
 ## Suite files
 
@@ -267,6 +335,10 @@ as JSON. `repetitions` must be a positive integer.
 - `examples/kv_agent.py` — a stateful in-memory key-value store speaking
   `SET` / `GET` / `DEL` / `EXISTS`, so a suite can SET in one case and
   GET in a later one.
+- `examples/support_agent.py` — a canned support agent answering refund
+  questions, so `examples/support.json` can show the judge scorer:
+  one case passes outright, one earns partial credit against its
+  rubric.
 
 ## Tests
 
@@ -283,3 +355,6 @@ make demo    # run both example suites through the CLI
 - ~~Comparing two run reports to catch regressions.~~ (done in v0.2.0)
 - ~~Latency budgets per case, so a case that passes but gets too slow fails.~~ (done in v0.3.0)
 - ~~Repeated runs that flag flaky cases by per-case pass rate.~~ (done in v0.4.0)
+- ~~Judge / LLM-as-judge scorer: a pluggable judge that scores free-form
+  output against a rubric, with a deterministic built-in stub judge
+  and an HTTP judge for real LLM endpoints.~~ (done in v0.5.0)

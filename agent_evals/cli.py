@@ -14,7 +14,11 @@ unless ``--fail-on-budget`` is given. ``--workers N`` runs cases
 concurrently on a thread pool (default 1); the agent must be
 thread-safe for more than 1. ``--repeat N`` runs the whole suite N
 times and reports per-case pass rates, flagging flaky cases; the run
-only passes when every case passed every time.
+only passes when every case passed every time. Cases with a ``judge``
+scorer use the built-in deterministic ``stub`` judge unless a judge is
+registered: ``--judge module:attribute`` registers a judge callable
+under the name ``"custom"``, and ``--judge-url URL`` registers an HTTP
+judge under the name ``"http"``.
 """
 
 from __future__ import annotations
@@ -24,21 +28,27 @@ import importlib
 import sys
 
 from .evals import format_summary, load_suite, run_suite
+from .judge import DEFAULT_JUDGES, make_http_judge
 from .stability import format_stability, repeat_suite
+
+
+def load_callable(spec: str, kind: str):
+    """Import a callable from a ``module:attribute`` spec."""
+    if ":" not in spec:
+        raise ValueError(
+            f"{kind} must be given as module:attribute, got {spec!r}"
+        )
+    module_name, attr = spec.split(":", 1)
+    module = importlib.import_module(module_name)
+    value = getattr(module, attr)
+    if not callable(value):
+        raise ValueError(f"{kind} {spec!r} is not callable")
+    return value
 
 
 def load_agent(spec: str):
     """Import an agent from a ``module:attribute`` spec."""
-    if ":" not in spec:
-        raise ValueError(
-            f"agent must be given as module:attribute, got {spec!r}"
-        )
-    module_name, attr = spec.split(":", 1)
-    module = importlib.import_module(module_name)
-    agent = getattr(module, attr)
-    if not callable(agent):
-        raise ValueError(f"agent {spec!r} is not callable")
-    return agent
+    return load_callable(spec, "agent")
 
 
 def main(argv=None) -> int:
@@ -77,6 +87,18 @@ def main(argv=None) -> int:
         "flagging flaky cases that pass sometimes and fail other "
         "times (default 1, a single run)",
     )
+    parser.add_argument(
+        "--judge",
+        help="judge callable for 'judge' scorers, as "
+        "module:attribute (e.g. my_judges:llm_judge); registered "
+        "under the name \"custom\"",
+    )
+    parser.add_argument(
+        "--judge-url",
+        help="HTTP endpoint for 'judge' scorers; registered under "
+        "the name \"http\" (POSTs {prompt, output, rubric}, expects "
+        "{passed, score, rationale})",
+    )
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be a positive integer")
@@ -85,15 +107,22 @@ def main(argv=None) -> int:
 
     suite = load_suite(args.suite)
     agent = load_agent(args.agent)
+    judges = dict(DEFAULT_JUDGES)
+    if args.judge:
+        judges["custom"] = load_callable(args.judge, "judge")
+    if args.judge_url:
+        judges["http"] = make_http_judge(args.judge_url)
     if args.repeat > 1:
-        stability = repeat_suite(suite, agent, args.repeat, workers=args.workers)
+        stability = repeat_suite(
+            suite, agent, args.repeat, workers=args.workers, judges=judges
+        )
         print(format_stability(stability))
         if args.report:
             stability.save(args.report)
             print(f"\nStability report written to {args.report}")
         # A repeated run only passes when every case passed every time.
         return 0 if not stability.flaky_cases and not stability.always_failing else 1
-    report = run_suite(suite, agent, workers=args.workers)
+    report = run_suite(suite, agent, workers=args.workers, judges=judges)
     print(format_summary(report))
     if args.report:
         report.save(args.report)

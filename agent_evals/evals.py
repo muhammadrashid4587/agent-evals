@@ -16,6 +16,7 @@ Design
       {"type": "json_schema", "schema": {"name": "str", "age": "int"}}
       {"type": "json_path", "path": "$.result.total", "expected": 42}
       {"type": "numeric", "expected": 3.14159, "tolerance": 0.001}
+      {"type": "judge", "judge": "stub", "rubric": {"criteria": [...]}}
 
 * A case may carry a ``weight`` (default 1.0): how much of the suite's
   total score it is worth. Scorers also return a score in [0, 1] — 1.0
@@ -35,8 +36,12 @@ Design
     - a ``str`` (the agent's output; token count unknown),
     - a ``(output, tokens)`` tuple (output str, token count int),
     - a ``dict`` with an ``"output"`` key and an optional ``"tokens"`` key.
-* Every scorer is deterministic: same output, same verdict, every run.
-  There is no model-as-judge here on purpose.
+* Every scorer is deterministic: same output, same verdict, every run —
+  except the ``judge`` scorer, which calls a judge you supply. The
+  built-in ``stub`` judge is deterministic (it scores the output
+  against rubric criteria mechanically, with no model and no network),
+  and any other judge is a plain callable you register with
+  ``run_suite`` — see :mod:`agent_evals.judge`.
 """
 
 from __future__ import annotations
@@ -50,6 +55,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
+
+from .judge import DEFAULT_JUDGES, coerce_verdict
 
 __all__ = [
     "Case",
@@ -427,10 +434,54 @@ def score_numeric(output: str, expected: float, tolerance: float = 0.0) -> tuple
     return ok, detail, 1.0 if ok else 0.0
 
 
-def score_case(case: Case, output: str) -> tuple:
+def score_judge(output: str, case: Case, judges: Optional[dict] = None) -> tuple:
+    """Score one case's output with a judge.
+
+    The scorer spec names the judge (default ``"stub"``) and carries a
+    ``rubric`` dict::
+
+        {"type": "judge", "judge": "stub", "rubric": {"criteria": [...]}}
+
+    ``judges`` maps judge names to callables
+    ``judge(prompt, output, rubric) -> JudgeVerdict | dict``; when it
+    is None the built-in registry (:data:`agent_evals.judge.DEFAULT_JUDGES`,
+    just the deterministic stub judge) is used. A judge that raises, or
+    returns something that is not a verdict, is a scorer error. The
+    detail carries the judge's rationale, so the report says *why* the
+    output scored the way it did.
+    """
+    spec = case.scorer
+    rubric = spec.get("rubric")
+    if not isinstance(rubric, dict):
+        raise ValueError("judge scorer requires a 'rubric' object")
+    name = str(spec.get("judge", "stub"))
+    registry = DEFAULT_JUDGES if judges is None else judges
+    judge = registry.get(name)
+    if judge is None:
+        known = ", ".join(sorted(registry)) or "(none)"
+        raise ValueError(
+            f"unknown judge {name!r}; known judges: {known}"
+        )
+    if not callable(judge):
+        raise ValueError(f"judge {name!r} is not callable")
+    try:
+        verdict = coerce_verdict(judge(case.prompt, output, rubric))
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a failing judge is a scorer error
+        raise ValueError(f"judge {name!r} failed: {exc}") from exc
+    detail = f"judge {name!r}: score {verdict.score:.2f}"
+    if verdict.rationale:
+        detail += f" — {verdict.rationale}"
+    return verdict.passed, detail, verdict.score
+
+
+def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     """Score one case's output. Returns (passed, detail, score) where
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
-    when the scorer gives partial credit (see ``score_contains_all``)."""
+    when the scorer gives partial credit (see ``score_contains_all`` and
+    ``score_judge``). ``judges`` is the registry of judge callables
+    used by a ``judge`` scorer; None means the built-in registry."""
     spec = case.scorer
     kind = spec.get("type")
     if kind == "exact":
@@ -458,6 +509,8 @@ def score_case(case: Case, output: str) -> tuple:
         return score_numeric(
             output, float(spec["expected"]), float(spec.get("tolerance", 0.0))
         )
+    if kind == "judge":
+        return score_judge(output, case, judges)
     raise ValueError(f"unknown scorer type: {kind!r}")
 
 
@@ -631,7 +684,9 @@ def _run_agent(
         return "timeout", "", None, None
 
 
-def _run_case(case: Case, agent: Callable[[str], Any]) -> Result:
+def _run_case(
+    case: Case, agent: Callable[[str], Any], judges: Optional[dict] = None
+) -> Result:
     """Run one case against the agent and return its Result.
 
     An agent that raises is recorded as a failed case with the exception
@@ -662,7 +717,7 @@ def _run_case(case: Case, agent: Callable[[str], Any]) -> Result:
             weight=case.weight,
         )
     try:
-        passed, detail, score = score_case(case, output)
+        passed, detail, score = score_case(case, output, judges)
     except ValueError as exc:
         passed, detail, score = False, f"scorer error: {exc}", 0.0
     budget_violated = False
@@ -694,7 +749,10 @@ def _run_case(case: Case, agent: Callable[[str], Any]) -> Result:
 
 
 def run_suite(
-    suite: Suite, agent: Callable[[str], Any], workers: int = 1
+    suite: Suite,
+    agent: Callable[[str], Any],
+    workers: int = 1,
+    judges: Optional[dict] = None,
 ) -> RunReport:
     """Run every case in ``suite`` against ``agent`` and return a report.
 
@@ -713,19 +771,26 @@ def run_suite(
     depend on each other's order (for example a SET in one case and a
     GET in a later one) can give different verdicts when cases run at
     the same time, so leave ``workers`` at 1 for those suites.
+
+    ``judges`` maps judge names to callables for ``judge`` scorers;
+    None means the built-in registry (just the deterministic stub
+    judge). A judge that calls a remote model must be thread-safe for
+    ``workers`` greater than 1.
     """
     if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
         raise ValueError(f"workers must be a positive integer, got {workers!r}")
     started = datetime.now(timezone.utc).isoformat()
     if workers == 1:
-        results = [_run_case(case, agent) for case in suite.cases]
+        results = [_run_case(case, agent, judges) for case in suite.cases]
     else:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=workers
         ) as executor:
             # map() yields results in suite order, not finish order.
             results = list(
-                executor.map(lambda case: _run_case(case, agent), suite.cases)
+                executor.map(
+                    lambda case: _run_case(case, agent, judges), suite.cases
+                )
             )
     ended = datetime.now(timezone.utc).isoformat()
     return RunReport(suite=suite.name, started_at=started, ended_at=ended, results=results)
