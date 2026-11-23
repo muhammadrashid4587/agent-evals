@@ -442,9 +442,14 @@ and token totals side by side, a winner per case (highest score,
 ties broken by lowest latency — a case every agent failed has no
 winner), and a case-wins count per agent. `--json` writes the
 comparison as JSON. At least two `--agent name=module:attribute`
-specs are required. The comparison always exits 0: it reports which
-agent won, it does not gate CI — use the two-run compare to gate on
-regressions.
+specs are required. The comparison exits 0 by default: it reports
+which agent won, it does not gate CI. `--fail-on-lose BASELINE`
+turns it into a gate: it exits 1 when the named baseline agent
+beats any other agent (higher weighted score, then higher pass
+rate, then lower total latency — an exact tie on all three is not
+a loss), so a candidate agent that regresses against the baseline
+fails CI. Use the two-run compare to gate on regressions between
+two runs of the same agent.
 
 ## Comparing across a reports directory
 
@@ -925,3 +930,10 @@ make demo    # run both example suites through the CLI
   delta in the headline and in the JSON output, so a run that
   passes everything but got slower or more expensive is visible
   at a glance.~~ (done in v0.21.0)
+- ~~`--fail-on-lose` CI gate for the per-model comparison:
+  `python -m agent_evals.model_compare ... --fail-on-lose
+  BASELINE` exits 1 when the named baseline agent beats any
+  other agent in the comparison (weighted score, then pass rate,
+  then lowest total latency — an exact tie is not a loss), so a
+  candidate agent that regresses against the baseline fails CI
+  instead of just losing a row in the table.~~ (done in v0.22.0)

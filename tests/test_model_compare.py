@@ -237,6 +237,56 @@ class TestCompareModels(unittest.TestCase):
         self.assertIn("hard", text)
 
 
+class TestLosersToBaseline(unittest.TestCase):
+    def test_loser_is_agent_the_baseline_beats(self):
+        comp = compare_models(_suite(), {"good": _good, "bad": _bad})
+        self.assertEqual(comp.losers_to("good"), ["bad"])
+        self.assertEqual(comp.losers_to("bad"), [])
+
+    def test_only_agents_strictly_beaten_are_losers(self):
+        comp = compare_models(
+            _suite(), {"good": _good, "mixed": _mixed, "bad": _bad}
+        )
+        # mixed beats bad but loses to good; good beats both.
+        self.assertEqual(comp.losers_to("mixed"), ["bad"])
+        self.assertEqual(comp.losers_to("good"), ["mixed", "bad"])
+
+    def test_exact_tie_is_not_a_loss(self):
+        # Identical reports: the ranking still orders them by name,
+        # but neither agent has lost to the other.
+        from agent_evals.evals import Result, RunReport
+
+        def report():
+            return RunReport(
+                suite="calc",
+                started_at="2026-11-23T00:00:00+00:00",
+                ended_at="2026-11-23T00:00:01+00:00",
+                results=[
+                    Result(
+                        case_id="add",
+                        passed=True,
+                        detail="ok",
+                        latency_ms=1.0,
+                        score=1.0,
+                    )
+                ],
+            )
+
+        from agent_evals.model_compare import ModelComparison
+
+        comp = ModelComparison(
+            suite="calc", reports={"b": report(), "a": report()}
+        )
+        self.assertEqual(comp.ranking, ["a", "b"])
+        self.assertEqual(comp.losers_to("a"), [])
+        self.assertEqual(comp.losers_to("b"), [])
+
+    def test_unknown_baseline_is_an_error(self):
+        comp = compare_models(_suite(), {"good": _good, "bad": _bad})
+        with self.assertRaises(ValueError):
+            comp.losers_to("nope")
+
+
 class TestModelCompareCli(unittest.TestCase):
     def _write_suite(self, tmp):
         path = os.path.join(tmp, "suite.json")
@@ -308,6 +358,58 @@ class TestModelCompareCli(unittest.TestCase):
                         "a=examples.no_such_module:agent",
                         "--agent",
                         "b=examples.kv_agent:agent",
+                    ]
+                )
+
+    def test_cli_fail_on_lose_exits_1_when_baseline_wins(self):
+        # calc passes both cases, kv passes none: kv loses to calc.
+        with tempfile.TemporaryDirectory() as tmp:
+            suite = self._write_suite(tmp)
+            code = main(
+                [
+                    "--suite",
+                    suite,
+                    "--agent",
+                    "calc=examples.calculator_agent:agent",
+                    "--agent",
+                    "kv=examples.kv_agent:agent",
+                    "--fail-on-lose",
+                    "calc",
+                ]
+            )
+            self.assertEqual(code, 1)
+
+    def test_cli_fail_on_lose_exits_0_when_nobody_loses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            suite = self._write_suite(tmp)
+            code = main(
+                [
+                    "--suite",
+                    suite,
+                    "--agent",
+                    "calc=examples.calculator_agent:agent",
+                    "--agent",
+                    "kv=examples.kv_agent:agent",
+                    "--fail-on-lose",
+                    "kv",
+                ]
+            )
+            self.assertEqual(code, 0)
+
+    def test_cli_fail_on_lose_rejects_unknown_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            suite = self._write_suite(tmp)
+            with self.assertRaises(SystemExit):
+                main(
+                    [
+                        "--suite",
+                        suite,
+                        "--agent",
+                        "calc=examples.calculator_agent:agent",
+                        "--agent",
+                        "kv=examples.kv_agent:agent",
+                        "--fail-on-lose",
+                        "nope",
                     ]
                 )
 

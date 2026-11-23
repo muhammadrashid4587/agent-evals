@@ -26,9 +26,15 @@ comparison view shows. Two specs may not share a name, and at least
 two agents are required — comparing one agent against itself is a
 single run, not a comparison.
 
-Exit code is always 0: a comparison view reports which agent won, it
-does not gate CI. Use ``agent-evals-compare`` to gate on regressions
-between two runs of the same agent.
+Exit code is 0 by default: a comparison view reports which agent
+won, it does not gate CI. Use ``agent-evals-compare`` to gate on
+regressions between two runs of the same agent. ``--fail-on-lose
+BASELINE`` turns the view into a gate: it exits 1 when the named
+baseline agent beats any other agent in the comparison (higher
+weighted score, then higher pass rate, then lower total latency —
+an exact tie on all three is not a loss, so the name tie-break that
+decides the ranking never fails the gate), and 0 when no agent
+loses to the baseline.
 """
 
 from __future__ import annotations
@@ -105,6 +111,19 @@ class ModelComparison:
         """Agent names in the order they were given."""
         return list(self.reports)
 
+    def _score_key(self, name: str) -> tuple:
+        """The comparison key for one agent: weighted score, then
+        pass rate, then lowest total latency. Higher is better. The
+        name tie-break in ``ranking`` is not part of this key — a
+        dead heat on all three is a tie, not a win, and the
+        ``--fail-on-lose`` gate must not fail on it."""
+        report = self.reports[name]
+        return (
+            report.weighted_score,
+            report.pass_rate,
+            -report.total_latency_ms,
+        )
+
     @property
     def ranking(self) -> list:
         """Agent names best first: weighted score, then pass rate,
@@ -112,12 +131,36 @@ class ModelComparison:
         return sorted(
             self.reports,
             key=lambda name: (
-                -self.reports[name].weighted_score,
-                -self.reports[name].pass_rate,
-                self.reports[name].total_latency_ms,
+                -self._score_key(name)[0],
+                -self._score_key(name)[1],
+                -self._score_key(name)[2],
                 name,
             ),
         )
+
+    def losers_to(self, baseline: str) -> list:
+        """The agents the named baseline agent beats, best first.
+
+        An agent loses to the baseline when the baseline is strictly
+        better on the ranking key — higher weighted score, then
+        higher pass rate, then lower total latency. An agent tied
+        with the baseline on all three has not lost: the name
+        tie-break that decides the ranking never counts as a loss.
+        Raises ``ValueError`` when ``baseline`` is not one of the
+        compared agents.
+        """
+        if baseline not in self.reports:
+            raise ValueError(
+                f"baseline {baseline!r} is not one of the compared "
+                f"agents: {', '.join(self.agent_names)}"
+            )
+        baseline_key = self._score_key(baseline)
+        return [
+            name
+            for name in self.ranking
+            if name != baseline
+            and baseline_key > self._score_key(name)
+        ]
 
     @property
     def winner(self) -> Optional[str]:
@@ -355,6 +398,15 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--json", help="optional path to write the comparison as JSON"
     )
+    parser.add_argument(
+        "--fail-on-lose",
+        metavar="BASELINE",
+        help="exit 1 when the named baseline agent beats any other "
+        "agent in the comparison (higher weighted score, then "
+        "higher pass rate, then lower total latency; an exact tie "
+        "on all three is not a loss), so a candidate agent that "
+        "regresses against the baseline fails CI",
+    )
     args = parser.parse_args(argv)
     if len(args.agent) < 2:
         parser.error("at least two --agent specs are required")
@@ -369,6 +421,11 @@ def main(argv=None) -> int:
             agents[name] = load_agent(agent_spec)
         except (ImportError, AttributeError, ValueError) as exc:
             parser.error(f"cannot load agent {spec!r}: {exc}")
+    if args.fail_on_lose and args.fail_on_lose not in agents:
+        parser.error(
+            f"--fail-on-lose baseline {args.fail_on_lose!r} is not "
+            f"one of the compared agents: {', '.join(agents)}"
+        )
     from .judge import DEFAULT_JUDGES, make_http_judge
 
     judges = dict(DEFAULT_JUDGES)
@@ -389,6 +446,15 @@ def main(argv=None) -> int:
             json.dump(comp.to_dict(), f, indent=2)
             f.write("\n")
         print(f"\nComparison written to {args.json}")
+    if args.fail_on_lose:
+        losers = comp.losers_to(args.fail_on_lose)
+        if losers:
+            print(
+                f"\nFail-on-lose gate FAILED: baseline "
+                f"{args.fail_on_lose!r} beats " + ", ".join(losers),
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 
