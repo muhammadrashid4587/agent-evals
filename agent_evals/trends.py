@@ -12,6 +12,10 @@ returned by ``load_report``), ordered oldest first, and builds a
 * per-case pass rate over the whole history, plus the score in each
   run, so a case that used to pass and now fails sometimes is visible
   as a number, not a feeling;
+* per-case latency trends — mean/min/max latency, first-to-last
+  change, and a least-squares slope per run, so a case that keeps
+  passing but gets steadily slower shows up before it blows its
+  latency budget;
 * newly failing / newly passing cases — what moved in the latest run
   compared with the previous run that contained the case;
 * worst regressions across the history — cases that passed at least
@@ -185,6 +189,114 @@ class CaseTrend:
         history, so the verdict is not reproducible run to run."""
         return self.ever_passed and self.ever_failed
 
+    # -- latency trends -------------------------------------------------
+
+    @property
+    def latencies(self) -> list:
+        """Latencies in ms for the runs that contained the case,
+        skipping runs where it was absent."""
+        return [lat for lat in self.latency_history if lat is not None]
+
+    @property
+    def first_latency_ms(self) -> Optional[float]:
+        for lat in self.latency_history:
+            if lat is not None:
+                return round(float(lat), 3)
+        return None
+
+    @property
+    def last_latency_ms(self) -> Optional[float]:
+        for lat in reversed(self.latency_history):
+            if lat is not None:
+                return round(float(lat), 3)
+        return None
+
+    @property
+    def mean_latency_ms(self) -> Optional[float]:
+        latencies = self.latencies
+        if not latencies:
+            return None
+        return round(sum(latencies) / len(latencies), 3)
+
+    @property
+    def min_latency_ms(self) -> Optional[float]:
+        latencies = self.latencies
+        if not latencies:
+            return None
+        return round(min(latencies), 3)
+
+    @property
+    def max_latency_ms(self) -> Optional[float]:
+        latencies = self.latencies
+        if not latencies:
+            return None
+        return round(max(latencies), 3)
+
+    @property
+    def latency_delta_ms(self) -> Optional[float]:
+        """Last latency minus first latency (positive = slower)."""
+        if self.first_latency_ms is None or self.last_latency_ms is None:
+            return None
+        return round(self.last_latency_ms - self.first_latency_ms, 3)
+
+    @property
+    def latency_delta_pct(self) -> Optional[float]:
+        """Last latency minus first, as a percent of the first
+        (None when there are no samples, or the first latency
+        was 0)."""
+        if self.first_latency_ms in (None, 0) or self.last_latency_ms is None:
+            return None
+        return round(
+            (self.last_latency_ms - self.first_latency_ms)
+            / self.first_latency_ms
+            * 100,
+            1,
+        )
+
+    @property
+    def latency_slope_ms_per_run(self) -> Optional[float]:
+        """Least-squares slope of latency against run index, in ms
+        per run (positive = getting slower run over run). Uses the
+        run index, not the compacted sample position, so a case
+        absent from a run keeps its spacing. None with fewer than
+        two samples."""
+        points = [
+            (i, lat)
+            for i, lat in enumerate(self.latency_history)
+            if lat is not None
+        ]
+        if len(points) < 2:
+            return None
+        n = len(points)
+        mean_x = sum(x for x, _ in points) / n
+        mean_y = sum(y for _, y in points) / n
+        denom = sum((x - mean_x) ** 2 for x, _ in points)
+        if denom == 0:
+            return 0.0
+        slope = (
+            sum((x - mean_x) * (y - mean_y) for x, y in points) / denom
+        )
+        return round(slope, 3)
+
+    @property
+    def latency_trend(self) -> Optional[str]:
+        """``"slowing"``, ``"improving"``, or ``"flat"`` from the
+        latency slope relative to the case's mean latency: a slope
+        bigger than 10% of the mean per run counts as slowing (or
+        improving, when negative). A single sample, or a mean of
+        zero, has no trend (None). Latency is noisy, so this is a
+        signal to look at the case, not a verdict."""
+        slope = self.latency_slope_ms_per_run
+        mean = self.mean_latency_ms
+        if slope is None or not mean:
+            return None
+        relative = slope / mean
+        if relative > 0.10:
+            return "slowing"
+        if relative < -0.10:
+            return "improving"
+        return "flat"
+
     def to_dict(self) -> dict:
         return {
             "case_id": self.case_id,
@@ -201,6 +313,16 @@ class CaseTrend:
             "newly_passing": self.newly_passing,
             "current_failing_streak": self.current_failing_streak,
             "flaky": self.flaky,
+            "latency_history": self.latency_history,
+            "first_latency_ms": self.first_latency_ms,
+            "last_latency_ms": self.last_latency_ms,
+            "mean_latency_ms": self.mean_latency_ms,
+            "min_latency_ms": self.min_latency_ms,
+            "max_latency_ms": self.max_latency_ms,
+            "latency_delta_ms": self.latency_delta_ms,
+            "latency_delta_pct": self.latency_delta_pct,
+            "latency_slope_ms_per_run": self.latency_slope_ms_per_run,
+            "latency_trend": self.latency_trend,
         }
 
 
@@ -280,6 +402,35 @@ class TrendReport:
         return bool(self.newly_failing)
 
     @property
+    def slowest_growing(self) -> list:
+        """Cases whose latency is trending up, worst first: ranked
+        by the latency slope relative to the case's mean latency
+        (a case growing 2 ms per run on a 10 ms mean outranks one
+        growing 2 ms per run on a 200 ms mean); ties break on the
+        first-to-last percent change, then case_id. A case with
+        fewer than two latency samples has no slope and never
+        appears here."""
+        growing = [
+            c for c in self.cases if c.latency_trend == "slowing"
+        ]
+
+        def _relative_slope(case: CaseTrend) -> float:
+            mean = case.mean_latency_ms
+            slope = case.latency_slope_ms_per_run
+            if not mean or slope is None:
+                return 0.0
+            return slope / mean
+
+        return sorted(
+            growing,
+            key=lambda c: (
+                -_relative_slope(c),
+                -(c.latency_delta_pct or 0.0),
+                c.case_id,
+            ),
+        )
+
+    @property
     def pass_rate_delta(self) -> Optional[float]:
         """Latest run's pass rate minus the first run's (None when
         there is only one run)."""
@@ -305,6 +456,7 @@ class TrendReport:
             "newly_passing": [c.case_id for c in self.newly_passing],
             "worst_regressions": [c.case_id for c in self.worst_regressions],
             "flaky": [c.case_id for c in self.flaky_cases],
+            "slowest_growing": [c.case_id for c in self.slowest_growing],
             "runs": [r.to_dict() for r in self.runs],
             "cases": [c.to_dict() for c in self.cases],
         }
@@ -502,12 +654,23 @@ def format_trend(trend: TrendReport) -> str:
             f"{c.runs_present} runs)"
         ),
     )
+    _section(
+        "Slowest growing latency",
+        trend.slowest_growing,
+        lambda c: (
+            f"{c.case_id} ({c.first_latency_ms:.1f} -> "
+            f"{c.last_latency_ms:.1f} ms, "
+            f"{c.latency_delta_pct:+.1f}%, "
+            f"+{c.latency_slope_ms_per_run:.2f} ms/run, "
+            f"mean {c.mean_latency_ms:.1f} ms)"
+        ),
+    )
     lines.append("Per-case trend:")
     lines.append(
         f"{'case':<22} {'runs':>4} {'pass rate':>10} "
-        f"{'score':>13} {'worst drop':>10}  latest"
+        f"{'score':>13} {'worst drop':>10}  {'latency':>20}  latest"
     )
-    lines.append("-" * 72)
+    lines.append("-" * 92)
     for case in trend.cases:
         first = case.first_score
         last = case.last_score
@@ -517,10 +680,22 @@ def format_trend(trend: TrendReport) -> str:
             else "-"
         )
         latest = "PASS" if case.last_passed else "FAIL"
+        if (
+            case.first_latency_ms is not None
+            and case.last_latency_ms is not None
+        ):
+            pct = case.latency_delta_pct
+            pct_text = f" ({pct:+.0f}%)" if pct is not None else ""
+            latency = (
+                f"{case.first_latency_ms:.1f} -> "
+                f"{case.last_latency_ms:.1f} ms{pct_text}"
+            )
+        else:
+            latency = "-"
         lines.append(
             f"{case.case_id:<22} {case.runs_present:>4} "
             f"{case.pass_rate * 100:>9.1f}% {score:>13} "
-            f"{case.worst_drop:>10.2f}  {latest}"
+            f"{case.worst_drop:>10.2f}  {latency:>20}  {latest}"
         )
     return "\n".join(lines).rstrip("\n")
 

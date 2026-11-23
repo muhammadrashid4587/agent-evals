@@ -338,6 +338,32 @@ The CLI exits 1 when at least one case newly failed in the latest
 run, 0 otherwise, so it can gate a CI step the same way the two-run
 comparison does. `--json` writes the trend as JSON.
 
+### Per-case latency trends
+
+Pass rates say whether the agent still works; latency says whether
+it is quietly getting slower. The trend report carries a latency
+history per case and summarises it:
+
+- **first / last / mean / min / max** latency in ms, plus the
+  first-to-last change in ms and as a percent;
+- a **least-squares slope** in ms per run, fitted against run index
+  (so a case absent from a run keeps its spacing), which uses every
+  sample instead of just the endpoints;
+- a **trend label** — `slowing`, `improving`, or `flat` — from the
+  slope relative to the case's mean latency: a slope bigger than
+  10% of the mean per run counts as slowing (or improving, when
+  negative). Latency is noisy, so the label is a signal to look at
+  the case, not a verdict.
+
+The trend lists the **slowest growing** cases — the ones trending
+slower, ranked by slope relative to their mean latency — so a case
+that keeps passing but creeps from 50 ms to 200 ms shows up before
+it starts tripping its latency budget. A case with fewer than two
+latency samples has no slope and no trend. The per-case table shows
+each case's first-to-last latency alongside its pass rate and score
+movement, and the JSON trend carries the full latency history per
+case.
+
 ## Eval-set versioning
 
 A suite file may carry an optional `"version"` label, e.g.
@@ -474,3 +500,7 @@ make demo    # run both example suites through the CLI
   score trends, newly failing / newly passing cases, and the worst
   regressions in the history (not just between two runs).~~ (done in
   v0.8.0)
+- ~~Per-case latency trends: first/last/mean/min/max latency, a
+  least-squares slope per run, and a slowest-growing list, so a case
+  that keeps passing but gets steadily slower is visible before it
+  trips its latency budget.~~ (done in v0.9.0)

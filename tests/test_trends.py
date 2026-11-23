@@ -145,6 +145,138 @@ class TestCaseTrend(unittest.TestCase):
         self.assertAlmostEqual(self.trend.weighted_score_delta, -0.17, places=4)
 
 
+def _latency_history():
+    """Four runs with explicit per-case latencies: one case getting
+    steadily slower, one getting faster, one flat, one with a single
+    sample, and one absent from a middle run."""
+    return [
+        _report(
+            "2026-11-21T10:00:00+00:00",
+            [
+                {"case_id": "slowing", "passed": True, "latency_ms": 10.0},
+                {"case_id": "improving", "passed": True, "latency_ms": 20.0},
+                {"case_id": "flat", "passed": True, "latency_ms": 5.0},
+                {"case_id": "gappy", "passed": True, "latency_ms": 8.0},
+            ],
+        ),
+        _report(
+            "2026-11-21T11:00:00+00:00",
+            [
+                {"case_id": "slowing", "passed": True, "latency_ms": 12.0},
+                {"case_id": "improving", "passed": True, "latency_ms": 15.0},
+                {"case_id": "flat", "passed": True, "latency_ms": 5.0},
+            ],
+        ),
+        _report(
+            "2026-11-21T12:00:00+00:00",
+            [
+                {"case_id": "slowing", "passed": True, "latency_ms": 15.0},
+                {"case_id": "improving", "passed": True, "latency_ms": 12.0},
+                {"case_id": "flat", "passed": True, "latency_ms": 5.0},
+                {"case_id": "gappy", "passed": True, "latency_ms": 9.0},
+            ],
+        ),
+        _report(
+            "2026-11-21T13:00:00+00:00",
+            [
+                {"case_id": "slowing", "passed": True, "latency_ms": 20.0},
+                {"case_id": "improving", "passed": True, "latency_ms": 10.0},
+                {"case_id": "flat", "passed": True, "latency_ms": 5.0},
+                {"case_id": "gappy", "passed": True, "latency_ms": 9.0},
+                {"case_id": "single", "passed": True, "latency_ms": 3.0},
+            ],
+        ),
+    ]
+
+
+class TestLatencyTrends(unittest.TestCase):
+    def setUp(self):
+        self.trend = compare_history(_latency_history())
+        self.by_id = {c.case_id: c for c in self.trend.cases}
+
+    def test_first_last_mean_min_max(self):
+        slowing = self.by_id["slowing"]
+        self.assertEqual(slowing.first_latency_ms, 10.0)
+        self.assertEqual(slowing.last_latency_ms, 20.0)
+        self.assertEqual(slowing.mean_latency_ms, 14.25)
+        self.assertEqual(slowing.min_latency_ms, 10.0)
+        self.assertEqual(slowing.max_latency_ms, 20.0)
+
+    def test_latency_delta_ms_and_pct(self):
+        slowing = self.by_id["slowing"]
+        self.assertEqual(slowing.latency_delta_ms, 10.0)
+        self.assertEqual(slowing.latency_delta_pct, 100.0)
+        improving = self.by_id["improving"]
+        self.assertEqual(improving.latency_delta_ms, -10.0)
+        self.assertEqual(improving.latency_delta_pct, -50.0)
+        self.assertEqual(self.by_id["flat"].latency_delta_pct, 0.0)
+
+    def test_latency_slope_uses_run_index(self):
+        # slowing: 10, 12, 15, 20 over runs 0..3 -> slope 3.3 ms/run.
+        self.assertAlmostEqual(
+            self.by_id["slowing"].latency_slope_ms_per_run, 3.3, places=3
+        )
+        # improving: 20, 15, 12, 10 -> slope -3.3 ms/run.
+        self.assertAlmostEqual(
+            self.by_id["improving"].latency_slope_ms_per_run, -3.3, places=3
+        )
+        self.assertEqual(self.by_id["flat"].latency_slope_ms_per_run, 0.0)
+        # gappy: 8 at run 0, absent run 1, 9 at run 2, 9 at run 3.
+        # The gap keeps its spacing: slope over x = 0, 2, 3 is 5/14.
+        self.assertAlmostEqual(
+            self.by_id["gappy"].latency_slope_ms_per_run, 5 / 14, places=3
+        )
+
+    def test_latency_trend_labels(self):
+        self.assertEqual(self.by_id["slowing"].latency_trend, "slowing")
+        self.assertEqual(self.by_id["improving"].latency_trend, "improving")
+        self.assertEqual(self.by_id["flat"].latency_trend, "flat")
+        # A single sample has no slope and no trend.
+        self.assertIsNone(self.by_id["single"].latency_slope_ms_per_run)
+        self.assertIsNone(self.by_id["single"].latency_trend)
+        self.assertEqual(self.by_id["single"].latency_delta_pct, 0.0)
+
+    def test_latency_history_skips_absent_runs(self):
+        self.assertEqual(
+            self.by_id["gappy"].latency_history, [8.0, None, 9.0, 9.0]
+        )
+        self.assertEqual(self.by_id["gappy"].latencies, [8.0, 9.0, 9.0])
+
+    def test_slowest_growing_ranks_by_relative_slope(self):
+        # Only "slowing" trends as slowing; "gappy" grows too but
+        # its slope is small relative to its mean, so it is flat.
+        self.assertEqual(
+            [c.case_id for c in self.trend.slowest_growing], ["slowing"]
+        )
+        self.assertEqual(self.by_id["gappy"].latency_trend, "flat")
+
+    def test_latency_fields_in_dict(self):
+        data = self.by_id["slowing"].to_dict()
+        self.assertEqual(data["first_latency_ms"], 10.0)
+        self.assertEqual(data["last_latency_ms"], 20.0)
+        self.assertEqual(data["mean_latency_ms"], 14.25)
+        self.assertEqual(data["latency_delta_pct"], 100.0)
+        self.assertAlmostEqual(
+            data["latency_slope_ms_per_run"], 3.3, places=3
+        )
+        self.assertEqual(data["latency_trend"], "slowing")
+        self.assertEqual(data["latency_history"], [10.0, 12.0, 15.0, 20.0])
+        self.assertEqual(
+            self.trend.to_dict()["slowest_growing"], ["slowing"]
+        )
+
+    def test_format_shows_slowest_growing_and_latency_column(self):
+        text = format_trend(self.trend)
+        self.assertIn("Slowest growing latency (1):", text)
+        self.assertIn("slowing (10.0 -> 20.0 ms, +100.0%", text)
+        self.assertIn("10.0 -> 20.0 ms (+100%)", text)
+        self.assertIn("latency", text)
+
+    def test_format_single_report_has_no_slowest_growing_section(self):
+        text = format_trend(compare_history(_latency_history()[:1]))
+        self.assertNotIn("Slowest growing latency", text)
+
+
 class TestSingleReport(unittest.TestCase):
     def test_single_report_has_no_newly_failing_and_no_deltas(self):
         trend = compare_history(_history()[:1])
