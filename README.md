@@ -388,6 +388,21 @@ regressed, 0 otherwise, so it can gate a CI step. `--json` writes the
 comparison as JSON. Fixes, new cases, and score improvements never
 fail the comparison — only a regression does.
 
+The comparison also counts **case wins** per run: a shared case is
+won by the run with the higher score, with a tie on score broken by
+the lowest latency — the same rule the per-model comparison uses.
+A case both runs scored 0 on has no winner, and neither does an
+exact tie or a case present in only one run. The text summary prints
+`Case wins: baseline N, current M` and the JSON carries a
+`case_wins` count per run. `--fail-on-lose-per-case` turns the count
+into a gate: it exits 1 when the baseline run won strictly more
+individual cases than the current run (a tie in case wins is not a
+loss), so a current run that loses case by case still fails CI even
+if it wins the aggregate — for example when it wins the weighted
+score on one heavy case but loses several lighter ones on partial
+credit. The gate is independent of the regression rule: either one
+failing exits 1.
+
 ### Was it the agent or the eval set?
 
 A score delta between two runs can come from the agent changing, or
@@ -948,3 +963,12 @@ make demo    # run both example suites through the CLI
   that loses case by case fails CI even if it wins the aggregate;
   the comparison JSON also carries a `case_wins` count per
   agent.~~ (done in v0.23.0)
+- ~~Per-case-wins gate for the two-run comparison: the diff counts
+  case wins per run (higher score wins a shared case, ties broken
+  by lowest latency; a case both runs scored 0 on, an exact tie,
+  or a new/removed case counts for nobody), prints them and
+  carries them in the JSON, and `--fail-on-lose-per-case` exits 1
+  when the baseline run won strictly more individual cases than
+  the current run (a tie is not a loss), so a run that loses case
+  by case fails CI even if it wins the aggregate.~~ (done in
+  v0.24.0)

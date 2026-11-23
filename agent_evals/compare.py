@@ -44,7 +44,13 @@ Usage:
 
 Exit code is 0 when there is no regression, 1 when at least one case
 regressed. Fixes, new cases, and score improvements never fail the
-comparison — only a regression does.
+comparison — only a regression does. ``--fail-on-lose-per-case``
+adds a second gate, mirroring the per-model comparison: it exits 1
+when the baseline run won strictly more individual cases than the
+current run (a tie in case wins is not a loss), so a current run
+that loses case by case still fails CI even if it wins the
+aggregate. The comparison JSON carries a ``case_wins`` count per
+run.
 """
 
 from __future__ import annotations
@@ -126,10 +132,45 @@ class CaseChange:
             return "score_change"
         return "unchanged"
 
+    @property
+    def winner(self) -> Optional[str]:
+        """Which run won this case — ``"baseline"``, ``"current"``,
+        or None when neither did.
+
+        The run with the higher score wins; a tie on score is broken
+        by the lowest latency, mirroring the per-model comparison.
+        A case both runs scored 0 on has no winner — there is
+        nothing to win — and neither does a case with an exact
+        score and latency tie, or a case present in only one run
+        (a new or removed case is a set change, not an agent win).
+        """
+        if self.baseline_score is None or self.current_score is None:
+            return None
+        if max(self.baseline_score, self.current_score) <= 0.0:
+            return None
+        if self.baseline_score == self.current_score:
+            if (
+                self.baseline_latency_ms is not None
+                and self.current_latency_ms is not None
+                and self.baseline_latency_ms != self.current_latency_ms
+            ):
+                return (
+                    "baseline"
+                    if self.baseline_latency_ms < self.current_latency_ms
+                    else "current"
+                )
+            return None
+        return (
+            "baseline"
+            if self.baseline_score > self.current_score
+            else "current"
+        )
+
     def to_dict(self) -> dict:
         return {
             "case_id": self.case_id,
             "kind": self.kind,
+            "winner": self.winner,
             "case_changed": self.case_changed,
             "baseline_passed": self.baseline_passed,
             "current_passed": self.current_passed,
@@ -319,6 +360,28 @@ class ReportComparison:
             return "IMPROVED"
         return "UNCHANGED"
 
+    def case_wins(self) -> dict:
+        """How many individual cases each run won outright.
+
+        A case's winner is the run with the higher score, ties
+        broken by lowest latency; a case both runs scored 0 on, an
+        exact tie, or a case present in only one run counts for
+        nobody.
+        """
+        wins = {"baseline": 0, "current": 0}
+        for change in self.changes:
+            if change.winner is not None:
+                wins[change.winner] += 1
+        return wins
+
+    @property
+    def baseline_wins_more_cases(self) -> bool:
+        """True when the baseline run won strictly more individual
+        cases than the current run. A tie in case wins is not a
+        loss — the per-case gate must not fail on it."""
+        wins = self.case_wins()
+        return wins["baseline"] > wins["current"]
+
     def to_dict(self) -> dict:
         return {
             "baseline_suite": self.baseline_suite,
@@ -343,6 +406,7 @@ class ReportComparison:
             "current_total_tokens": self.current_total_tokens,
             "token_delta": self.token_delta,
             "winner": self.winner,
+            "case_wins": self.case_wins(),
             "verdict": self.verdict,
             "regressions": [c.case_id for c in self.regressions],
             "fixes": [c.case_id for c in self.fixes],
@@ -605,6 +669,11 @@ def format_comparison(comp: ReportComparison) -> str:
             f"({comp.baseline_total_tokens} -> {comp.current_total_tokens})"
         )
     lines.append(f"Winner: {comp.winner or 'tie'}")
+    wins = comp.case_wins()
+    lines.append(
+        f"Case wins: baseline {wins['baseline']}, "
+        f"current {wins['current']}"
+    )
     lines.append(f"Verdict: {comp.verdict}")
     lines.append("")
     lines.append(_format_side_by_side(comp))
@@ -671,6 +740,15 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--json", help="optional path to write the comparison as JSON"
     )
+    parser.add_argument(
+        "--fail-on-lose-per-case",
+        action="store_true",
+        help="exit 1 when the baseline run won strictly more "
+        "individual cases than the current run (the \"Case wins\" "
+        "count; a tie in case wins is not a loss), so a current "
+        "run that loses case by case fails CI even if it wins the "
+        "aggregate",
+    )
     args = parser.parse_args(argv)
 
     baseline = load_report(args.baseline)
@@ -682,6 +760,15 @@ def main(argv=None) -> int:
             json.dump(comp.to_dict(), f, indent=2)
             f.write("\n")
         print(f"\nComparison written to {args.json}")
+    if args.fail_on_lose_per_case and comp.baseline_wins_more_cases:
+        wins = comp.case_wins()
+        print(
+            f"\nFail-on-lose-per-case gate FAILED: baseline won "
+            f"{wins['baseline']} cases, beating current "
+            f"({wins['current']})",
+            file=sys.stderr,
+        )
+        return 1
     return 1 if comp.has_regression else 0
 
 

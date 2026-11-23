@@ -284,6 +284,95 @@ class TestWinner(unittest.TestCase):
         self.assertEqual(data["changes"][0]["score_delta"], 0.0)
 
 
+class TestCaseWins(unittest.TestCase):
+    def test_case_wins_counts_outright_wins(self):
+        comp = compare_reports(
+            _report(results=[_result("a", True, latency_ms=10.0),
+                             _result("b", True),
+                             _result("c", False, score=0.75)]),
+            _report(results=[_result("a", True, latency_ms=2.0),
+                             _result("b", False, score=0.0),
+                             _result("c", False, score=0.25)]),
+        )
+        self.assertEqual(comp.case_wins(), {"baseline": 2, "current": 1})
+        self.assertTrue(comp.baseline_wins_more_cases)
+
+    def test_case_both_runs_failed_has_no_winner(self):
+        # Both runs scored 0 on the case: nothing to win, even
+        # though the baseline was faster.
+        comp = compare_reports(
+            _report(results=[_result("a", False, score=0.0,
+                                     latency_ms=1.0)]),
+            _report(results=[_result("a", False, score=0.0,
+                                     latency_ms=10.0)]),
+        )
+        self.assertEqual(comp.case_wins(), {"baseline": 0, "current": 0})
+        self.assertFalse(comp.baseline_wins_more_cases)
+        self.assertIsNone(comp.changes[0].winner)
+
+    def test_higher_partial_score_wins_a_still_failing_case(self):
+        # A case both runs failed can still be won on partial credit.
+        comp = compare_reports(
+            _report(results=[_result("a", False, score=0.75)]),
+            _report(results=[_result("a", False, score=0.25)]),
+        )
+        self.assertEqual(comp.changes[0].winner, "baseline")
+        self.assertEqual(comp.case_wins(), {"baseline": 1, "current": 0})
+
+    def test_score_tie_broken_by_latency(self):
+        comp = compare_reports(
+            _report(results=[_result("a", True, latency_ms=10.0)]),
+            _report(results=[_result("a", True, latency_ms=2.0)]),
+        )
+        self.assertEqual(comp.changes[0].winner, "current")
+        self.assertEqual(comp.case_wins(), {"baseline": 0, "current": 1})
+        self.assertFalse(comp.baseline_wins_more_cases)
+
+    def test_exact_tie_has_no_winner(self):
+        comp = compare_reports(
+            _report(results=[_result("a", True, latency_ms=5.0)]),
+            _report(results=[_result("a", True, latency_ms=5.0)]),
+        )
+        self.assertIsNone(comp.changes[0].winner)
+        self.assertEqual(comp.case_wins(), {"baseline": 0, "current": 0})
+        self.assertFalse(comp.baseline_wins_more_cases)
+
+    def test_new_and_removed_cases_count_for_nobody(self):
+        comp = compare_reports(
+            _report(results=[_result("old", True)]),
+            _report(results=[_result("fresh", True)]),
+        )
+        for change in comp.changes:
+            self.assertIsNone(change.winner)
+        self.assertEqual(comp.case_wins(), {"baseline": 0, "current": 0})
+
+    def test_tied_case_wins_are_not_a_loss(self):
+        comp = compare_reports(
+            _report(results=[_result("a", True),
+                             _result("b", False, score=0.0)]),
+            _report(results=[_result("a", False, score=0.0),
+                             _result("b", True)]),
+        )
+        self.assertEqual(comp.case_wins(), {"baseline": 1, "current": 1})
+        self.assertFalse(comp.baseline_wins_more_cases)
+
+    def test_case_wins_are_in_json_and_text(self):
+        comp = compare_reports(
+            _report(results=[_result("a", True), _result("b", True)]),
+            _report(results=[_result("a", True),
+                             _result("b", False, score=0.0)]),
+        )
+        data = json.loads(json.dumps(comp.to_dict()))
+        self.assertEqual(
+            data["case_wins"], {"baseline": 1, "current": 0}
+        )
+        self.assertEqual(data["changes"][0]["winner"], None)
+        self.assertEqual(data["changes"][1]["winner"], "baseline")
+        self.assertIn(
+            "Case wins: baseline 1, current 0", format_comparison(comp)
+        )
+
+
 class TestSideBySideTable(unittest.TestCase):
     def test_table_shows_score_latency_and_token_deltas(self):
         comp = compare_reports(
@@ -392,6 +481,66 @@ class TestCompareCli(unittest.TestCase):
             self.assertEqual(data["verdict"], "UNCHANGED")
             self.assertIsNone(data["winner"])
             self.assertIn("token_delta", data)
+
+    def test_cli_fail_on_lose_per_case_exits_1_when_baseline_wins_cases(self):
+        # No regression here — the baseline only wins on partial
+        # credit — so the gate, not the regression rule, fails it.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._write(
+                tmp, "base.json",
+                _report(results=[_result("a", False, score=0.75),
+                                 _result("b", False, score=0.75)]),
+            )
+            cur = self._write(
+                tmp, "cur.json",
+                _report(results=[_result("a", False, score=0.25),
+                                 _result("b", False, score=0.25)]),
+            )
+            self.assertEqual(
+                main(["--baseline", base, "--current", cur]), 0
+            )
+            self.assertEqual(
+                main(["--baseline", base, "--current", cur,
+                      "--fail-on-lose-per-case"]),
+                1,
+            )
+
+    def test_cli_fail_on_lose_per_case_exits_0_on_tied_case_wins(self):
+        # One case win each, no regressions: the tie is not a loss.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._write(
+                tmp, "base.json",
+                _report(results=[_result("a", False, score=0.75),
+                                 _result("b", False, score=0.25)]),
+            )
+            cur = self._write(
+                tmp, "cur.json",
+                _report(results=[_result("a", False, score=0.25),
+                                 _result("b", False, score=0.75)]),
+            )
+            self.assertEqual(
+                main(["--baseline", base, "--current", cur,
+                      "--fail-on-lose-per-case"]),
+                0,
+            )
+
+    def test_cli_fail_on_lose_per_case_exits_0_when_current_wins_more(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._write(
+                tmp, "base.json",
+                _report(results=[_result("a", False, score=0.25),
+                                 _result("b", False, score=0.25)]),
+            )
+            cur = self._write(
+                tmp, "cur.json",
+                _report(results=[_result("a", False, score=0.75),
+                                 _result("b", False, score=0.75)]),
+            )
+            self.assertEqual(
+                main(["--baseline", base, "--current", cur,
+                      "--fail-on-lose-per-case"]),
+                0,
+            )
 
 
 if __name__ == "__main__":
