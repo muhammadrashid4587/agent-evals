@@ -563,7 +563,10 @@ verdict is not reproducible. That is the signal to look at the agent
 (a scorer too brittle for the agent's output), rather than treating
 the run as a clean pass or a clean fail. The CLI exits 0 only when
 every case passed every time; `--report` writes the stability report
-as JSON. `repetitions` must be a positive integer. Tag filters apply
+as JSON. In the JSON report each case carries its run count, passes,
+fails, and flakiness flag (`"runs"`, `"passes"`, `"fails"`,
+`"flaky"`), and the text summary lists the flaky cases by name with
+their pass counts. `repetitions` must be a positive integer. Tag filters apply
 to repeated runs too: `--tag smoke --repeat 5` repeats only the
 smoke cases, and the stability report records the filter that was
 applied — `tag_filter` in the JSON report (null when no filter was
@@ -579,6 +582,50 @@ count, total passes, total case-runs, pass rate, mean score, and
 how many cases under the tag were flaky, and the text summary ends
 with a `Per-tag pass rates:` section. A case carrying several tags
 counts under each of them; untagged cases appear under no tag.
+
+### Flaky-case history across stability reports
+
+One stability report says which cases flipped in a single burst of
+repeated runs. A directory of stability reports says which cases
+*keep* flipping — a case that is flaky in every report is a
+different problem from one that flipped once and has been stable
+since:
+
+```bash
+python -m agent_evals.flaky_history --reports-dir stability/
+python -m agent_evals.flaky_history --reports-dir stability/ \
+    --json flaky-history.json
+```
+
+Or from Python:
+
+```python
+from agent_evals import compare_flaky_history, format_flaky_history
+from agent_evals import load_stability_reports_dir
+
+history = compare_flaky_history(
+    load_stability_reports_dir("stability/"))
+print(format_flaky_history(history))
+```
+
+The history shows, per case, its pass-rate history and flaky
+history across the reports, and groups cases into **persistently
+flaky** (flaky in at least two reports), **flaky in the latest
+report** (the live signal), **newly flaky** (stable in every earlier
+report, flaky in the latest one), and **stopped flaky** (flaky
+before, stable now). A case that first appears flaky in the latest
+report was never stable before, so it counts as flaky in the latest
+report but not as newly flaky; a case added or removed mid-history
+gets no verdict for the reports it was not part of, so it does not
+skew the other cases' histories. The JSON history carries the same
+groups plus per-case totals (`total_runs`, `total_passes`,
+`total_fails`, `flaky_reports`) and the pass-rate history, so CI
+can track a case's reliability over time. The CLI exits 1 while any
+case is flaky in the latest stability report, 0 otherwise, so it
+can gate a CI step on current flakiness — a case that stopped
+flipping passes the gate, whatever its history says. Files in the
+directory that are not stability reports (single-run reports, bad
+JSON) are skipped with a warning, not an error.
 
 ## Report format
 
@@ -695,3 +742,10 @@ make demo    # run both example suites through the CLI
   `Per-tag pass rates:` section (text summary), aggregated over
   repetitions with a flaky count per tag, so a tag that keeps
   failing or flipping is visible at a glance.~~ (done in v0.16.0)
+- ~~Flaky-case history across stability reports: per-case
+  pass/fail history across a directory of `--repeat` reports —
+  persistently flaky, newly flaky, and stopped-flaky cases, with a
+  `fails` count and a flaky-case list in each stability report —
+  so a case that keeps flipping is visible as a history, not a
+  single burst, and the CLI gates on flakiness in the latest
+  report.~~ (done in v0.17.0)

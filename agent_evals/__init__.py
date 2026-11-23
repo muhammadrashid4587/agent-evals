@@ -5,7 +5,7 @@ unless you register a judge that calls one (see ``agent_evals.judge``).
 The agent under test is a plain Python callable.
 """
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 from .evals import (
     Case,
@@ -36,26 +36,32 @@ from .stability import (
 
 __all__ = [
     "Case",
+    "CaseFlakyHistory",
     "CaseStability",
     "CaseTrend",
     "DEFAULT_JUDGES",
+    "FlakyHistoryReport",
     "JudgeVerdict",
     "ReportComparison",
     "Result",
     "RunReport",
     "RunSummary",
     "StabilityReport",
+    "StabilityRunSummary",
     "Suite",
     "TrendReport",
     "coerce_verdict",
+    "compare_flaky_history",
     "compare_history",
     "compare_reports",
     "format_comparison",
+    "format_flaky_history",
     "format_stability",
     "format_summary",
     "format_trend",
     "load_report",
     "load_reports_dir",
+    "load_stability_reports_dir",
     "load_suite",
     "make_http_judge",
     "make_output_diff",
@@ -108,5 +114,30 @@ def __getattr__(name):
             "compare_history": compare_history,
             "format_trend": format_trend,
             "load_reports_dir": load_reports_dir,
+        }[name]
+    if name in {
+        "CaseFlakyHistory",
+        "FlakyHistoryReport",
+        "StabilityRunSummary",
+        "compare_flaky_history",
+        "format_flaky_history",
+        "load_stability_reports_dir",
+    }:
+        from .flaky_history import (
+            CaseFlakyHistory,
+            FlakyHistoryReport,
+            StabilityRunSummary,
+            compare_flaky_history,
+            format_flaky_history,
+            load_stability_reports_dir,
+        )
+
+        return {
+            "CaseFlakyHistory": CaseFlakyHistory,
+            "FlakyHistoryReport": FlakyHistoryReport,
+            "StabilityRunSummary": StabilityRunSummary,
+            "compare_flaky_history": compare_flaky_history,
+            "format_flaky_history": format_flaky_history,
+            "load_stability_reports_dir": load_stability_reports_dir,
         }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

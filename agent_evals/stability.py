@@ -73,6 +73,11 @@ class CaseStability:
         return (self.passes / self.runs) if self.runs else 0.0
 
     @property
+    def fails(self) -> int:
+        """How many of the runs failed (``runs - passes``)."""
+        return self.runs - self.passes
+
+    @property
     def flaky(self) -> bool:
         return 0 < self.passes < self.runs
 
@@ -81,6 +86,7 @@ class CaseStability:
             "case_id": self.case_id,
             "runs": self.runs,
             "passes": self.passes,
+            "fails": self.fails,
             "pass_rate": round(self.pass_rate, 4),
             "flaky": self.flaky,
             "mean_latency_ms": round(self.mean_latency_ms, 3),
@@ -328,6 +334,15 @@ def format_stability(report: StabilityReport) -> str:
             f"{c.passes}/{c.runs:<6} {c.mean_latency_ms:>8.1f}  {verdict}"
         )
     if report.flaky_cases:
+        lines += [
+            "",
+            f"Flaky cases ({len(report.flaky_cases)}):",
+        ]
+        for c in report.flaky_cases:
+            lines.append(
+                f"  {c.case_id}  {c.passes}/{c.runs} "
+                f"({c.pass_rate * 100:.1f}%)"
+            )
         lines += [
             "",
             "Flaky cases passed at least once and failed at least once; "
