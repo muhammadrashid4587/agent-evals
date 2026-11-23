@@ -448,7 +448,11 @@ turns it into a gate: it exits 1 when the named baseline agent
 beats any other agent (higher weighted score, then higher pass
 rate, then lower total latency — an exact tie on all three is not
 a loss), so a candidate agent that regresses against the baseline
-fails CI. Use the two-run compare to gate on regressions between
+fails CI. `--fail-on-lose-per-case BASELINE` is the per-case
+variant: it exits 1 when the baseline won strictly more
+individual cases than any other agent (a tie in case wins is not
+a loss), so a candidate that loses case by case still fails CI
+even if it wins the aggregate. Use the two-run compare to gate on regressions between
 two runs of the same agent.
 
 ## Comparing across a reports directory
@@ -937,3 +941,10 @@ make demo    # run both example suites through the CLI
   then lowest total latency — an exact tie is not a loss), so a
   candidate agent that regresses against the baseline fails CI
   instead of just losing a row in the table.~~ (done in v0.22.0)
+- ~~Per-case variant of the `--fail-on-lose` gate:
+  `--fail-on-lose-per-case BASELINE` exits 1 when the named
+  baseline agent won strictly more individual cases than any
+  other agent (a tie in case wins is not a loss), so a candidate
+  that loses case by case fails CI even if it wins the aggregate;
+  the comparison JSON also carries a `case_wins` count per
+  agent.~~ (done in v0.23.0)

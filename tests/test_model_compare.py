@@ -287,6 +287,82 @@ class TestLosersToBaseline(unittest.TestCase):
             comp.losers_to("nope")
 
 
+def _left(prompt):
+    """Wins only the first case."""
+    return ("4", 10) if prompt == "2+2" else ("9", 10)
+
+
+def _right(prompt):
+    """Wins only the second case."""
+    return ("0", 10) if prompt == "2+2" else ("2", 10)
+
+
+class TestPerCaseLosersToBaseline(unittest.TestCase):
+    def test_case_wins_counts_outright_wins(self):
+        comp = compare_models(
+            _suite(), {"good": _good, "mixed": _mixed, "bad": _bad}
+        )
+        self.assertEqual(
+            comp.case_wins(), {"good": 2, "mixed": 0, "bad": 0}
+        )
+
+    def test_case_wins_ignores_cases_with_no_winner(self):
+        suite = _suite(
+            [
+                {
+                    "id": "add",
+                    "prompt": "2+2",
+                    "scorer": {"type": "exact", "expected": "4"},
+                },
+                {
+                    "id": "hard",
+                    "prompt": "sqrt(-1)",
+                    "scorer": {"type": "exact", "expected": "i"},
+                },
+            ]
+        )
+        comp = compare_models(suite, {"good": _good, "bad": _bad})
+        self.assertEqual(comp.case_wins(), {"good": 1, "bad": 0})
+
+    def test_per_case_loser_is_agent_with_fewer_case_wins(self):
+        comp = compare_models(
+            _suite(), {"good": _good, "mixed": _mixed, "bad": _bad}
+        )
+        # good won both cases; mixed and bad won none.
+        self.assertEqual(
+            comp.per_case_losers_to("good"), ["mixed", "bad"]
+        )
+        self.assertEqual(comp.per_case_losers_to("bad"), [])
+
+    def test_tied_case_wins_are_not_a_loss(self):
+        # Each agent wins one case outright: neither has lost.
+        comp = compare_models(_suite(), {"left": _left, "right": _right})
+        self.assertEqual(comp.case_wins(), {"left": 1, "right": 1})
+        self.assertEqual(comp.per_case_losers_to("left"), [])
+        self.assertEqual(comp.per_case_losers_to("right"), [])
+
+    def test_tied_at_zero_wins_is_not_a_loss(self):
+        comp = compare_models(
+            _suite(), {"good": _good, "mixed": _mixed, "bad": _bad}
+        )
+        # mixed and bad both won 0 cases: neither beats the other.
+        self.assertEqual(comp.per_case_losers_to("mixed"), [])
+
+    def test_unknown_baseline_is_an_error(self):
+        comp = compare_models(_suite(), {"good": _good, "bad": _bad})
+        with self.assertRaises(ValueError):
+            comp.per_case_losers_to("nope")
+
+    def test_to_dict_carries_case_wins(self):
+        comp = compare_models(
+            _suite(), {"good": _good, "mixed": _mixed, "bad": _bad}
+        )
+        data = json.loads(json.dumps(comp.to_dict()))
+        self.assertEqual(
+            data["case_wins"], {"good": 2, "mixed": 0, "bad": 0}
+        )
+
+
 class TestModelCompareCli(unittest.TestCase):
     def _write_suite(self, tmp):
         path = os.path.join(tmp, "suite.json")
@@ -412,6 +488,80 @@ class TestModelCompareCli(unittest.TestCase):
                         "nope",
                     ]
                 )
+
+    def test_cli_fail_on_lose_per_case_exits_1_when_baseline_wins_cases(self):
+        # calc wins both cases, kv wins none: kv loses per-case.
+        with tempfile.TemporaryDirectory() as tmp:
+            suite = self._write_suite(tmp)
+            code = main(
+                [
+                    "--suite",
+                    suite,
+                    "--agent",
+                    "calc=examples.calculator_agent:agent",
+                    "--agent",
+                    "kv=examples.kv_agent:agent",
+                    "--fail-on-lose-per-case",
+                    "calc",
+                ]
+            )
+            self.assertEqual(code, 1)
+
+    def test_cli_fail_on_lose_per_case_exits_0_when_nobody_loses(self):
+        # kv won 0 cases and calc won 2: kv beats nobody per-case.
+        with tempfile.TemporaryDirectory() as tmp:
+            suite = self._write_suite(tmp)
+            code = main(
+                [
+                    "--suite",
+                    suite,
+                    "--agent",
+                    "calc=examples.calculator_agent:agent",
+                    "--agent",
+                    "kv=examples.kv_agent:agent",
+                    "--fail-on-lose-per-case",
+                    "kv",
+                ]
+            )
+            self.assertEqual(code, 0)
+
+    def test_cli_fail_on_lose_per_case_rejects_unknown_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            suite = self._write_suite(tmp)
+            with self.assertRaises(SystemExit):
+                main(
+                    [
+                        "--suite",
+                        suite,
+                        "--agent",
+                        "calc=examples.calculator_agent:agent",
+                        "--agent",
+                        "kv=examples.kv_agent:agent",
+                        "--fail-on-lose-per-case",
+                        "nope",
+                    ]
+                )
+
+    def test_cli_both_gates_fail_together(self):
+        # calc beats kv on the aggregate and on case wins, so
+        # passing both gates still exits 1 (once).
+        with tempfile.TemporaryDirectory() as tmp:
+            suite = self._write_suite(tmp)
+            code = main(
+                [
+                    "--suite",
+                    suite,
+                    "--agent",
+                    "calc=examples.calculator_agent:agent",
+                    "--agent",
+                    "kv=examples.kv_agent:agent",
+                    "--fail-on-lose",
+                    "calc",
+                    "--fail-on-lose-per-case",
+                    "calc",
+                ]
+            )
+            self.assertEqual(code, 1)
 
 
 class TestPackageExports(unittest.TestCase):

@@ -34,7 +34,16 @@ baseline agent beats any other agent in the comparison (higher
 weighted score, then higher pass rate, then lower total latency —
 an exact tie on all three is not a loss, so the name tie-break that
 decides the ranking never fails the gate), and 0 when no agent
-loses to the baseline.
+loses to the baseline. ``--fail-on-lose-per-case BASELINE`` is the
+per-case variant of the same gate: it exits 1 when the baseline
+won strictly more individual cases than any other agent (the
+"Case wins" count the view already prints), and 0 when no agent
+loses to the baseline on case wins. A tie in case wins is not a
+loss, and a case no agent won counts for nobody. The aggregate
+gate can pass while the per-case gate fails (a baseline that wins
+narrowly on many cases but loses the aggregate on score), and
+vice versa — use both when a candidate must beat the baseline
+case by case as well as overall.
 """
 
 from __future__ import annotations
@@ -162,6 +171,43 @@ class ModelComparison:
             and baseline_key > self._score_key(name)
         ]
 
+    def case_wins(self) -> dict:
+        """How many individual cases each agent won outright.
+
+        A case with no winner (every agent scored 0) counts for
+        nobody. The keys follow ``agent_names`` order.
+        """
+        wins = {name: 0 for name in self.agent_names}
+        for case in self.cases:
+            if case.winner is not None:
+                wins[case.winner] += 1
+        return wins
+
+    def per_case_losers_to(self, baseline: str) -> list:
+        """The agents the named baseline agent beats on case wins,
+        best first (by the overall ranking).
+
+        An agent loses per-case to the baseline when the baseline
+        won strictly more individual cases than it did. A tie in
+        case wins is not a loss, mirroring ``losers_to``: the
+        aggregate gate and the per-case gate can disagree, which
+        is the point — a candidate can win the aggregate on score
+        while losing case by case, or the other way round. Raises
+        ``ValueError`` when ``baseline`` is not one of the
+        compared agents.
+        """
+        if baseline not in self.reports:
+            raise ValueError(
+                f"baseline {baseline!r} is not one of the compared "
+                f"agents: {', '.join(self.agent_names)}"
+            )
+        wins = self.case_wins()
+        return [
+            name
+            for name in self.ranking
+            if name != baseline and wins[baseline] > wins[name]
+        ]
+
     @property
     def winner(self) -> Optional[str]:
         """The best agent overall, or None when there are no agents."""
@@ -186,6 +232,7 @@ class ModelComparison:
             },
             "ranking": self.ranking,
             "winner": self.winner,
+            "case_wins": self.case_wins(),
             "cases": [case.to_dict() for case in self.cases],
         }
 
@@ -339,10 +386,7 @@ def format_model_comparison(comp: ModelComparison) -> str:
         )
         lines.append(row.rstrip())
     # Wins per agent: how many cases each agent won outright.
-    wins = {name: 0 for name in names}
-    for case in comp.cases:
-        if case.winner is not None:
-            wins[case.winner] += 1
+    wins = comp.case_wins()
     lines.append("")
     lines.append(
         "Case wins: "
@@ -407,6 +451,15 @@ def main(argv=None) -> int:
         "on all three is not a loss), so a candidate agent that "
         "regresses against the baseline fails CI",
     )
+    parser.add_argument(
+        "--fail-on-lose-per-case",
+        metavar="BASELINE",
+        help="exit 1 when the named baseline agent won strictly "
+        "more individual cases than any other agent (the \"Case "
+        "wins\" count; a tie in case wins is not a loss), so a "
+        "candidate agent that loses case by case against the "
+        "baseline fails CI even if it wins the aggregate",
+    )
     args = parser.parse_args(argv)
     if len(args.agent) < 2:
         parser.error("at least two --agent specs are required")
@@ -424,6 +477,15 @@ def main(argv=None) -> int:
     if args.fail_on_lose and args.fail_on_lose not in agents:
         parser.error(
             f"--fail-on-lose baseline {args.fail_on_lose!r} is not "
+            f"one of the compared agents: {', '.join(agents)}"
+        )
+    if (
+        args.fail_on_lose_per_case
+        and args.fail_on_lose_per_case not in agents
+    ):
+        parser.error(
+            f"--fail-on-lose-per-case baseline "
+            f"{args.fail_on_lose_per_case!r} is not "
             f"one of the compared agents: {', '.join(agents)}"
         )
     from .judge import DEFAULT_JUDGES, make_http_judge
@@ -446,6 +508,7 @@ def main(argv=None) -> int:
             json.dump(comp.to_dict(), f, indent=2)
             f.write("\n")
         print(f"\nComparison written to {args.json}")
+    failed = False
     if args.fail_on_lose:
         losers = comp.losers_to(args.fail_on_lose)
         if losers:
@@ -454,7 +517,26 @@ def main(argv=None) -> int:
                 f"{args.fail_on_lose!r} beats " + ", ".join(losers),
                 file=sys.stderr,
             )
-            return 1
+            failed = True
+    if args.fail_on_lose_per_case:
+        wins = comp.case_wins()
+        per_case_losers = comp.per_case_losers_to(
+            args.fail_on_lose_per_case
+        )
+        if per_case_losers:
+            beaten = ", ".join(
+                f"{name} ({wins[name]})" for name in per_case_losers
+            )
+            print(
+                f"\nFail-on-lose-per-case gate FAILED: baseline "
+                f"{args.fail_on_lose_per_case!r} won "
+                f"{wins[args.fail_on_lose_per_case]} cases, beating "
+                f"{beaten}",
+                file=sys.stderr,
+            )
+            failed = True
+    if failed:
+        return 1
     return 0
 
 
