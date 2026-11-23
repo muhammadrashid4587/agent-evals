@@ -14,6 +14,19 @@ by how it moved between the runs:
   partial score, so progress (or decay) is visible even before a pass.
 * ``unchanged`` — same verdict and same score in both runs.
 
+On top of the verdict movement, the comparison attributes movement to
+its cause. Run reports record the eval set's version label and
+content fingerprint plus a fingerprint per case, so the comparison
+can tell whether the set itself changed between the runs:
+
+* ``eval_set_changed`` — the two runs were measured against different
+  eval sets (different suite fingerprints, or different version
+  labels when a fingerprint is missing from an old report).
+* ``case_changed`` per shared case — the case's own definition
+  (prompt, scorer, timeout, weight, budget) changed between the runs.
+  A regression or fix on a changed case may come from the set, not
+  the agent; a regression on an unchanged case is an agent regression.
+
 The comparison also carries the headline deltas: pass rate,
 weighted score, and total latency, plus a per-case latency change
 for shared cases, so a run that passes everything but got much
@@ -50,7 +63,13 @@ __all__ = [
 
 @dataclass
 class CaseChange:
-    """How one case moved between the baseline and the current run."""
+    """How one case moved between the baseline and the current run.
+
+    ``case_changed`` is True when the case's own definition (prompt,
+    scorer, timeout, weight, budget) differs between the runs, False
+    when it is identical, and None when either report predates
+    per-case fingerprints and the comparison cannot tell.
+    """
 
     case_id: str
     baseline_passed: Optional[bool]
@@ -59,6 +78,7 @@ class CaseChange:
     current_score: Optional[float]
     baseline_latency_ms: Optional[float] = None
     current_latency_ms: Optional[float] = None
+    case_changed: Optional[bool] = None
 
     @property
     def latency_delta_ms(self) -> Optional[float]:
@@ -87,6 +107,7 @@ class CaseChange:
         return {
             "case_id": self.case_id,
             "kind": self.kind,
+            "case_changed": self.case_changed,
             "baseline_passed": self.baseline_passed,
             "current_passed": self.current_passed,
             "baseline_score": self.baseline_score,
@@ -99,7 +120,17 @@ class CaseChange:
 
 @dataclass
 class ReportComparison:
-    """The result of comparing two run reports."""
+    """The result of comparing two run reports.
+
+    ``baseline_suite_version`` / ``current_suite_version`` are the
+    eval sets' human version labels (None when a report predates
+    versioning), and the ``*_suite_fingerprint`` fields are the sets'
+    content hashes. ``eval_set_changed`` is True when the two runs
+    were measured against different eval sets — different suite
+    fingerprints, or different version labels when a fingerprint is
+    missing — so a score delta between the runs may come from the set
+    rather than the agent.
+    """
 
     baseline_suite: str
     current_suite: str
@@ -112,6 +143,39 @@ class ReportComparison:
     baseline_total_latency_ms: float
     current_total_latency_ms: float
     changes: list = field(default_factory=list)
+    baseline_suite_version: Optional[str] = None
+    current_suite_version: Optional[str] = None
+    baseline_suite_fingerprint: Optional[str] = None
+    current_suite_fingerprint: Optional[str] = None
+
+    @property
+    def eval_set_changed(self) -> bool:
+        """True when the two runs were measured against different eval
+        sets. Fingerprints decide when both reports carry them; when
+        one is missing (a report predating versioning), differing
+        version labels decide; when neither is available the sets
+        are treated as unchanged, since there is no evidence either
+        way."""
+        if (
+            self.baseline_suite_fingerprint is not None
+            and self.current_suite_fingerprint is not None
+        ):
+            return (
+                self.baseline_suite_fingerprint
+                != self.current_suite_fingerprint
+            )
+        if (
+            self.baseline_suite_version is not None
+            and self.current_suite_version is not None
+        ):
+            return self.baseline_suite_version != self.current_suite_version
+        return False
+
+    @property
+    def changed_cases(self) -> list:
+        """Shared cases whose own definition changed between the runs
+        (a different prompt, scorer, timeout, weight, or budget)."""
+        return [c for c in self.changes if c.case_changed]
 
     @property
     def regressions(self) -> list:
@@ -169,6 +233,11 @@ class ReportComparison:
         return {
             "baseline_suite": self.baseline_suite,
             "current_suite": self.current_suite,
+            "baseline_suite_version": self.baseline_suite_version,
+            "current_suite_version": self.current_suite_version,
+            "baseline_suite_fingerprint": self.baseline_suite_fingerprint,
+            "current_suite_fingerprint": self.current_suite_fingerprint,
+            "eval_set_changed": self.eval_set_changed,
             "baseline_passed": self.baseline_passed,
             "baseline_total": self.baseline_total,
             "current_passed": self.current_passed,
@@ -185,6 +254,7 @@ class ReportComparison:
             "fixes": [c.case_id for c in self.fixes],
             "new": [c.case_id for c in self.new_cases],
             "removed": [c.case_id for c in self.removed_cases],
+            "changed": [c.case_id for c in self.changed_cases],
             "changes": [c.to_dict() for c in self.changes],
         }
 
@@ -218,6 +288,17 @@ def compare_reports(baseline: dict, current: dict) -> ReportComparison:
     ]:
         base = base_results.get(case_id)
         cur = cur_results.get(case_id)
+        base_fp = base.get("case_fingerprint") if base else None
+        cur_fp = cur.get("case_fingerprint") if cur else None
+        # Both fingerprints present: the case definition changed iff
+        # they differ. Either missing (a report predating versioning):
+        # unknown — a new or removed case has no counterpart to compare.
+        if base is not None and cur is not None:
+            case_changed = (
+                None if base_fp is None or cur_fp is None else base_fp != cur_fp
+            )
+        else:
+            case_changed = None
         changes.append(
             CaseChange(
                 case_id=case_id,
@@ -231,6 +312,7 @@ def compare_reports(baseline: dict, current: dict) -> ReportComparison:
                 current_latency_ms=(
                     cur.get("latency_ms") if cur else None
                 ),
+                case_changed=case_changed,
             )
         )
     return ReportComparison(
@@ -253,7 +335,23 @@ def compare_reports(baseline: dict, current: dict) -> ReportComparison:
             current.get("total_latency_ms", 0.0)
         ),
         changes=changes,
+        baseline_suite_version=baseline.get("suite_version"),
+        current_suite_version=current.get("suite_version"),
+        baseline_suite_fingerprint=baseline.get("suite_fingerprint"),
+        current_suite_fingerprint=current.get("suite_fingerprint"),
     )
+
+
+def _set_label(version, fingerprint) -> str:
+    """Render one run's eval set as ``v1.2 (sha abc123...)`` or just
+    the fingerprint, or "" when the report predates versioning."""
+    if version is not None and fingerprint is not None:
+        return f"v{version} (sha {fingerprint})"
+    if version is not None:
+        return f"v{version}"
+    if fingerprint is not None:
+        return f"sha {fingerprint}"
+    return ""
 
 
 def format_comparison(comp: ReportComparison) -> str:
@@ -270,6 +368,20 @@ def format_comparison(comp: ReportComparison) -> str:
             f"({comp.baseline_suite!r} vs {comp.current_suite!r}); "
             f"cases matched by case_id only"
         )
+    base_set = _set_label(
+        comp.baseline_suite_version, comp.baseline_suite_fingerprint
+    )
+    cur_set = _set_label(
+        comp.current_suite_version, comp.current_suite_fingerprint
+    )
+    if base_set or cur_set:
+        lines.append(f"Eval set: baseline {base_set or '(unknown)'} -> "
+                     f"current {cur_set or '(unknown)'}")
+        if comp.eval_set_changed:
+            lines.append(
+                "Note: the eval set changed between these runs — "
+                "score deltas may come from the set, not the agent"
+            )
     delta = comp.pass_rate_delta
     lines.append(
         f"Pass rate: {delta * 100:+.1f}%  "
@@ -294,16 +406,32 @@ def format_comparison(comp: ReportComparison) -> str:
             latency_note = (
                 f"  latency {latency:+.1f} ms" if latency is not None else ""
             )
+            changed_note = (
+                "  (case changed — may be the set, not the agent)"
+                if change.case_changed
+                else ""
+            )
             if change.kind in ("regression", "fix"):
-                lines.append(f"  {change.case_id}{latency_note}")
+                lines.append(
+                    f"  {change.case_id}{latency_note}{changed_note}"
+                )
             elif change.kind == "score_change":
                 lines.append(
                     f"  {change.case_id}: score "
                     f"{change.baseline_score} -> {change.current_score}"
-                    f"{latency_note}"
+                    f"{latency_note}{changed_note}"
                 )
             else:
                 lines.append(f"  {change.case_id}")
+        lines.append("")
+    if comp.changed_cases:
+        lines.append(
+            f"Changed cases ({len(comp.changed_cases)}): the case "
+            f"definition changed between runs, so its movement may "
+            f"come from the set, not the agent:"
+        )
+        for change in comp.changed_cases:
+            lines.append(f"  {change.case_id}: {change.kind}")
         lines.append("")
     if comp.verdict == "UNCHANGED":
         lines.append("No changes: same verdicts, scores, and case set.")

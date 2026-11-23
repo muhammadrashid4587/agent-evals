@@ -167,7 +167,10 @@ up as flaky, same as any other.
 ## Suite files
 
 A suite is JSON: `{"name": ..., "cases": [{"id", "prompt", "scorer"}]}`.
-See `examples/calculator.json` and `examples/kv_store.json`.
+See `examples/calculator.json` and `examples/kv_store.json`. A suite
+may also carry an optional `"version"` label, e.g. `"version": "1.1"`,
+recorded in run reports alongside the set's content fingerprint (see
+"Eval-set versioning").
 
 A case may also carry an optional `timeout` in seconds, e.g.
 `{"id": "slow", "prompt": "...", "scorer": {...}, "timeout": 5}`. If the
@@ -273,6 +276,45 @@ regressed, 0 otherwise, so it can gate a CI step. `--json` writes the
 comparison as JSON. Fixes, new cases, and score improvements never
 fail the comparison — only a regression does.
 
+### Was it the agent or the eval set?
+
+A score delta between two runs can come from the agent changing, or
+from the eval set changing underneath it. Run reports record the set
+each run was measured against — a human version label and a content
+fingerprint — plus a fingerprint per case, so the diff attributes
+the movement:
+
+- **Eval set changed**: the two runs' suite fingerprints differ
+  (different cases), so score deltas may come from the set, not the
+  agent. The diff prints both sets, e.g. `v1.0 (sha f2a43e864e07) ->
+  v1.1 (sha 5ea6c4a5e807)`.
+- **Changed cases**: shared cases whose own definition changed
+  (prompt, scorer, timeout, weight, or budget). A regression or fix
+  on a changed case is annotated `(case changed — may be the set,
+  not the agent)` and listed in its own section; a regression on an
+  unchanged case is an agent regression.
+- **Added / removed cases** are the set changing too: a case only in
+  the current run is new, one only in the baseline is removed.
+
+A regression still fails the diff (exit 1) even when its case
+changed — a case that now fails still fails the gate — but the
+annotation says where to look first. Reports written before v0.6.0
+carry no fingerprints: the diff falls back to comparing version
+labels for the set, and reports per-case change as unknown rather
+than guessing.
+
+## Eval-set versioning
+
+A suite file may carry an optional `"version"` label, e.g.
+`{"name": "calculator", "version": "1.1", "cases": [...]}`. The label
+is a human marker only — what identifies a set is its fingerprint,
+a short SHA-256 of the suite's name and cases. Relabelling a version
+without touching a case keeps the same fingerprint; changing any
+case changes it even if the label was not bumped. Every run report
+records `suite_version`, `suite_fingerprint`, and a
+`case_fingerprint` per result, so any two reports can be diffed for
+both verdict movement and set movement (see above).
+
 ## Repeated runs and flaky cases
 
 A single run cannot tell a genuinely broken case from a flaky one:
@@ -308,6 +350,8 @@ as JSON. `repetitions` must be a positive integer.
 ```json
 {
   "suite": "kv-store",
+  "suite_version": "1.1",
+  "suite_fingerprint": "f2a43e864e07",
   "started_at": "2026-11-21T20:52:00+00:00",
   "ended_at": "2026-11-21T20:52:00+00:00",
   "total": 8,
@@ -323,7 +367,8 @@ as JSON. `repetitions` must be a positive integer.
     {"case_id": "set-a", "passed": true, "detail": "exact match",
      "latency_ms": 0.123, "tokens": null, "output": "OK",
      "timed_out": false, "score": 1.0, "weight": 1.0,
-     "max_latency_ms": null, "budget_violated": false}
+     "max_latency_ms": null, "budget_violated": false,
+     "case_fingerprint": "a1b2c3d4e5f6"}
   ]
 }
 ```
@@ -358,3 +403,7 @@ make demo    # run both example suites through the CLI
 - ~~Judge / LLM-as-judge scorer: a pluggable judge that scores free-form
   output against a rubric, with a deterministic built-in stub judge
   and an HTTP judge for real LLM endpoints.~~ (done in v0.5.0)
+- ~~Eval-set versioning with run diffing: versioned eval sets (hash +
+  version id in run reports) and a diff that flags cases
+  added/removed/changed and attributes score deltas to set changes
+  vs agent changes.~~ (done in v0.6.0)

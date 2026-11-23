@@ -31,6 +31,15 @@ Design
   are in the detail). A case that fails its checks is never also a
   budget violation, and a timed-out case is not one either.
 
+* An eval set is versioned: a suite file may carry a ``"version"``
+  label, and every suite and case has a content fingerprint (a short
+  SHA-256 of its canonical JSON). A run report records the suite's
+  version and fingerprint plus each case's fingerprint, so a later
+  diff (see :mod:`agent_evals.compare`) can tell whether a score
+  delta came from the agent or from the eval set changing underneath
+  it. The fingerprint covers the name and the cases only — relabelling
+  a version without touching a case keeps the same fingerprint.
+
 * The agent under test is a plain callable ``agent(prompt) -> ...``. It may
   return:
     - a ``str`` (the agent's output; token count unknown),
@@ -47,6 +56,7 @@ Design
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import queue
 import re
@@ -71,6 +81,22 @@ __all__ = [
 ]
 
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
+
+# Fingerprints are the first 12 hex chars of a SHA-256 over a canonical
+# JSON encoding: short enough to read, long enough that a collision
+# between two distinct eval sets is not a practical concern.
+
+
+def _canonical_json(data: Any) -> str:
+    """Encode ``data`` as JSON with sorted keys and no whitespace, so
+    the same logical content always encodes to the same string no
+    matter how a dict was built or ordered."""
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _fingerprint(data: Any) -> str:
+    """A short content hash of ``data`` (see ``_canonical_json``)."""
+    return hashlib.sha256(_canonical_json(data).encode("utf-8")).hexdigest()[:12]
 
 _TYPE_NAMES = {
     "str": str,
@@ -172,23 +198,61 @@ class Case:
             data["max_latency_ms"] = self.max_latency_ms
         return data
 
+    def fingerprint(self) -> str:
+        """A short content hash of this case: its id, prompt, scorer,
+        timeout, weight, and latency budget. Two cases with the same
+        fingerprint are the same case; a changed prompt or scorer
+        changes the fingerprint, so a run diff can tell a case that
+        changed from an agent that changed."""
+        return _fingerprint(self.to_dict())
+
 
 @dataclass
 class Suite:
-    """A named list of cases."""
+    """A named list of cases.
+
+    ``version`` is an optional human label for this eval set, e.g.
+    ``"1.3"`` — read from a suite file's ``"version"`` field and
+    recorded in run reports. The label is not part of the suite's
+    identity: :meth:`fingerprint` hashes only the name and the cases,
+    so renaming a version without touching a case keeps the same
+    fingerprint, and changing a case changes it even if the label
+    was not bumped.
+    """
 
     name: str
     cases: list = field(default_factory=list)
+    version: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "Suite":
+        version = data.get("version")
+        if version is not None and not isinstance(version, str):
+            raise ValueError(
+                f"suite version must be a string, got {version!r}"
+            )
         return cls(
             name=str(data.get("name", "suite")),
             cases=[Case.from_dict(c) for c in data.get("cases", [])],
+            version=version,
         )
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "cases": [c.to_dict() for c in self.cases]}
+        data: dict = {"name": self.name, "cases": [c.to_dict() for c in self.cases]}
+        if self.version is not None:
+            data["version"] = self.version
+        return data
+
+    def fingerprint(self) -> str:
+        """A short content hash of this eval set: its name and every
+        case. Two suites with the same fingerprint contain the same
+        cases, whatever version label they carry; a different
+        fingerprint means the set itself changed, so a score delta
+        between runs on the two sets may come from the set rather
+        than from the agent."""
+        return _fingerprint(
+            {"name": self.name, "cases": [c.to_dict() for c in self.cases]}
+        )
 
 
 def load_suite(path: str) -> Suite:
@@ -530,6 +594,9 @@ class Result:
     took longer than its ``max_latency_ms`` budget; such a case is not
     a pass (``passed`` is false, ``score`` is 0.0) and the latency and
     the budget are in the detail.
+    ``case_fingerprint`` is the case's content hash (see
+    :meth:`Case.fingerprint`): a run diff can compare it with the
+    baseline's to tell whether the case itself changed between runs.
     """
 
     case_id: str
@@ -543,6 +610,7 @@ class Result:
     weight: float = 1.0
     max_latency_ms: Optional[float] = None
     budget_violated: bool = False
+    case_fingerprint: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -557,6 +625,7 @@ class Result:
             "weight": self.weight,
             "max_latency_ms": self.max_latency_ms,
             "budget_violated": self.budget_violated,
+            "case_fingerprint": self.case_fingerprint,
         }
 
 
@@ -575,12 +644,22 @@ def _split_agent_result(raw: Any) -> tuple:
 
 @dataclass
 class RunReport:
-    """Everything a run produced, serialisable to JSON."""
+    """Everything a run produced, serialisable to JSON.
+
+    ``suite_version`` is the eval set's human version label (None when
+    the suite carries none) and ``suite_fingerprint`` is the set's
+    content hash (see :meth:`Suite.fingerprint`): together they say
+    exactly which eval set a run was measured against, so a later
+    diff can tell whether a score delta came from the agent or from
+    the set changing underneath it.
+    """
 
     suite: str
     started_at: str
     ended_at: str
     results: list = field(default_factory=list)
+    suite_version: Optional[str] = None
+    suite_fingerprint: Optional[str] = None
 
     @property
     def total(self) -> int:
@@ -622,6 +701,8 @@ class RunReport:
     def to_dict(self) -> dict:
         return {
             "suite": self.suite,
+            "suite_version": self.suite_version,
+            "suite_fingerprint": self.suite_fingerprint,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "total": self.total,
@@ -705,6 +786,7 @@ def _run_case(
             timed_out=True,
             score=0.0,
             weight=case.weight,
+            case_fingerprint=case.fingerprint(),
         )
     if status == "error":
         return Result(
@@ -715,6 +797,7 @@ def _run_case(
             output="",
             score=0.0,
             weight=case.weight,
+            case_fingerprint=case.fingerprint(),
         )
     try:
         passed, detail, score = score_case(case, output, judges)
@@ -745,6 +828,7 @@ def _run_case(
         weight=case.weight,
         max_latency_ms=case.max_latency_ms,
         budget_violated=budget_violated,
+        case_fingerprint=case.fingerprint(),
     )
 
 
@@ -793,7 +877,14 @@ def run_suite(
                 )
             )
     ended = datetime.now(timezone.utc).isoformat()
-    return RunReport(suite=suite.name, started_at=started, ended_at=ended, results=results)
+    return RunReport(
+        suite=suite.name,
+        started_at=started,
+        ended_at=ended,
+        results=results,
+        suite_version=suite.version,
+        suite_fingerprint=suite.fingerprint(),
+    )
 
 
 def format_summary(report: RunReport) -> str:
