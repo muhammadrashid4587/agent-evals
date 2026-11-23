@@ -31,6 +31,12 @@ Design
   are in the detail). A case that fails its checks is never also a
   budget violation, and a timed-out case is not one either.
 
+* When an ``exact`` case fails, the result carries a unified diff of
+  the expected output vs the actual output (``Result.diff``, also in
+  the JSON report and under the row in the text summary), so a
+  regression is visible at a glance. Other scorers have no expected
+  text to diff against, so they carry no diff.
+
 * An eval set is versioned: a suite file may carry a ``"version"``
   label, and every suite and case has a content fingerprint (a short
   SHA-256 of its canonical JSON). A run report records the suite's
@@ -56,6 +62,7 @@ Design
 from __future__ import annotations
 
 import concurrent.futures
+import difflib
 import hashlib
 import json
 import queue
@@ -76,6 +83,7 @@ __all__ = [
     "format_summary",
     "load_report",
     "load_suite",
+    "make_output_diff",
     "run_suite",
     "score_case",
 ]
@@ -578,6 +586,38 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     raise ValueError(f"unknown scorer type: {kind!r}")
 
 
+def make_output_diff(
+    expected: str, actual: str, max_lines: Optional[int] = None
+) -> Optional[str]:
+    """A unified diff of ``expected`` vs ``actual``, or None when they
+    are identical.
+
+    Line-based, so a one-word change in a multi-line answer shows just
+    the changed lines instead of two full blobs. Only meaningful for
+    scorers with a full expected output (today: ``exact``) — a
+    ``contains`` case has no expected output to diff against, and a
+    ``numeric``/``json_path`` case compares values, not text.
+    ``max_lines`` caps the diff (the text summary uses it); the JSON
+    report keeps the full diff.
+    """
+    lines = list(
+        difflib.unified_diff(
+            expected.splitlines(),
+            actual.splitlines(),
+            fromfile="expected",
+            tofile="actual",
+            lineterm="",
+        )
+    )
+    if not lines:
+        return None
+    if max_lines is not None and len(lines) > max_lines:
+        lines = lines[:max_lines] + [
+            f"... ({len(lines) - max_lines} more diff lines)"
+        ]
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Runner and report
 # ---------------------------------------------------------------------------
@@ -597,6 +637,10 @@ class Result:
     ``case_fingerprint`` is the case's content hash (see
     :meth:`Case.fingerprint`): a run diff can compare it with the
     baseline's to tell whether the case itself changed between runs.
+    ``diff`` is a unified diff of the expected output vs the actual
+    output, present only when an ``exact`` case failed — a failing
+    answer is visible at a glance instead of requiring the reader to
+    compare two blobs by eye.
     """
 
     case_id: str
@@ -611,6 +655,7 @@ class Result:
     max_latency_ms: Optional[float] = None
     budget_violated: bool = False
     case_fingerprint: Optional[str] = None
+    diff: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -626,6 +671,7 @@ class Result:
             "max_latency_ms": self.max_latency_ms,
             "budget_violated": self.budget_violated,
             "case_fingerprint": self.case_fingerprint,
+            "diff": self.diff,
         }
 
 
@@ -803,6 +849,14 @@ def _run_case(
         passed, detail, score = score_case(case, output, judges)
     except ValueError as exc:
         passed, detail, score = False, f"scorer error: {exc}", 0.0
+    diff = None
+    if not passed and case.scorer.get("type") == "exact":
+        # The expected output is a full string, so a line diff shows
+        # exactly what changed; other scorers have no expected text
+        # to diff against.
+        expected = case.scorer.get("expected")
+        if isinstance(expected, str):
+            diff = make_output_diff(expected, output)
     budget_violated = False
     if (
         passed
@@ -829,6 +883,7 @@ def _run_case(
         max_latency_ms=case.max_latency_ms,
         budget_violated=budget_violated,
         case_fingerprint=case.fingerprint(),
+        diff=diff,
     )
 
 
@@ -921,4 +976,13 @@ def format_summary(report: RunReport) -> str:
             f"{r.case_id:<22} {mark:<7} {r.score:>6.2f} {r.latency_ms:>8.1f} "
             f"{tokens:>7}  {r.detail}"
         )
+        if r.diff is not None:
+            # The diff shows what changed; cap it so one huge answer
+            # does not drown the table (the JSON report keeps it whole).
+            for diff_line in r.diff.splitlines()[:30]:
+                lines.append(f"    {diff_line}")
+            if len(r.diff.splitlines()) > 30:
+                lines.append(
+                    f"    ... ({len(r.diff.splitlines()) - 30} more diff lines)"
+                )
     return "\n".join(lines)

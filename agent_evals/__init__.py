@@ -5,7 +5,7 @@ unless you register a judge that calls one (see ``agent_evals.judge``).
 The agent under test is a plain Python callable.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 from .evals import (
     Case,
@@ -15,6 +15,7 @@ from .evals import (
     format_summary,
     load_report,
     load_suite,
+    make_output_diff,
     run_suite,
     score_case,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "load_report",
     "load_suite",
     "make_http_judge",
+    "make_output_diff",
     "repeat_suite",
     "run_suite",
     "score_case",

@@ -315,6 +315,30 @@ records `suite_version`, `suite_fingerprint`, and a
 `case_fingerprint` per result, so any two reports can be diffed for
 both verdict movement and set movement (see above).
 
+## Output diffs on failures
+
+When an `exact` case fails, the report carries a unified diff of the
+expected output vs the actual output, so a regression is visible at a
+glance instead of requiring two blobs to be compared by eye. The diff
+is in the JSON report as `"diff"` on the failing result, and printed
+under the failing row in the text summary (capped at 30 lines there;
+the JSON report keeps it whole):
+
+```
+bad-1                  FAIL      0.00      0.1       -  expected 'alpha\nbeta', got 'alpha\ngamma'
+    --- expected
+    +++ actual
+    @@ -1,2 +1,2 @@
+     alpha
+    -beta
+    +gamma
+```
+
+Only `exact` cases carry a diff: other scorers have no expected text
+to diff against — `contains` checks for a substring, `numeric` and
+`json_path` compare values, and the judge scorer's rationale is already
+in the detail. A passing case has `"diff": null`.
+
 ## Repeated runs and flaky cases
 
 A single run cannot tell a genuinely broken case from a flaky one:
@@ -368,7 +392,7 @@ as JSON. `repetitions` must be a positive integer.
      "latency_ms": 0.123, "tokens": null, "output": "OK",
      "timed_out": false, "score": 1.0, "weight": 1.0,
      "max_latency_ms": null, "budget_violated": false,
-     "case_fingerprint": "a1b2c3d4e5f6"}
+     "case_fingerprint": "a1b2c3d4e5f6", "diff": null}
   ]
 }
 ```
@@ -407,3 +431,7 @@ make demo    # run both example suites through the CLI
   version id in run reports) and a diff that flags cases
   added/removed/changed and attributes score deltas to set changes
   vs agent changes.~~ (done in v0.6.0)
+- ~~Per-case output diffs: when an exact-match case fails, the report
+  carries a unified diff of the expected output vs the actual output
+  (in JSON and in the text summary), so a regression is visible at a
+  glance.~~ (done in v0.7.0)

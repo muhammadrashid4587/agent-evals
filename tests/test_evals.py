@@ -12,6 +12,7 @@ from agent_evals.evals import (
     format_summary,
     load_report,
     load_suite,
+    make_output_diff,
     run_suite,
     score_case,
 )
@@ -1006,6 +1007,75 @@ class TestLatencyBudgets(unittest.TestCase):
                 ]
             )
             self.assertEqual(code, 1)
+
+
+class TestOutputDiff(unittest.TestCase):
+    def test_identical_outputs_have_no_diff(self):
+        self.assertIsNone(make_output_diff("same\nlines", "same\nlines"))
+
+    def test_diff_marks_removed_and_added_lines(self):
+        diff = make_output_diff("line1\nline2\nline3", "line1\nCHANGED\nline3")
+        self.assertIn("-line2", diff)
+        self.assertIn("+CHANGED", diff)
+        self.assertIn("line1", diff)  # context lines are kept
+        self.assertIn("--- expected", diff)
+        self.assertIn("+++ actual", diff)
+
+    def test_max_lines_caps_the_diff(self):
+        expected = "\n".join(f"line{i}" for i in range(20))
+        actual = "\n".join(f"CHANGED{i}" for i in range(20))
+        diff = make_output_diff(expected, actual, max_lines=5)
+        self.assertEqual(len(diff.splitlines()), 6)  # 5 lines + truncation note
+        self.assertIn("more diff lines", diff)
+
+    def test_failing_exact_case_carries_a_diff(self):
+        suite = Suite(
+            "d",
+            [Case("bad", "q", {"type": "exact", "expected": "alpha\nbeta"})],
+        )
+        report = run_suite(suite, lambda prompt: "alpha\ngamma")
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertIn("-beta", result.diff)
+        self.assertIn("+gamma", result.diff)
+
+    def test_passing_exact_case_has_no_diff(self):
+        suite = Suite(
+            "d", [Case("ok", "q", {"type": "exact", "expected": "yes"})]
+        )
+        report = run_suite(suite, lambda prompt: "yes")
+        self.assertIsNone(report.results[0].diff)
+
+    def test_non_exact_failing_case_has_no_diff(self):
+        suite = Suite(
+            "d",
+            [Case("bad", "q", {"type": "contains", "substring": "hello"})],
+        )
+        report = run_suite(suite, lambda prompt: "goodbye")
+        self.assertFalse(report.results[0].passed)
+        self.assertIsNone(report.results[0].diff)
+
+    def test_diff_round_trips_in_json_report(self):
+        suite = Suite(
+            "d", [Case("bad", "q", {"type": "exact", "expected": "a\nb"})]
+        )
+        report = run_suite(suite, lambda prompt: "a\nc")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "report.json")
+            report.save(path)
+            loaded = load_report(path)
+        self.assertIn("-b", loaded["results"][0]["diff"])
+        self.assertIn("+c", loaded["results"][0]["diff"])
+
+    def test_summary_prints_the_diff_under_the_failing_row(self):
+        suite = Suite(
+            "d", [Case("bad", "q", {"type": "exact", "expected": "a\nb"})]
+        )
+        report = run_suite(suite, lambda prompt: "a\nc")
+        text = format_summary(report)
+        self.assertIn("FAIL", text)
+        self.assertIn("-b", text)
+        self.assertIn("+c", text)
 
 
 if __name__ == "__main__":
