@@ -5,7 +5,7 @@ unless you register a judge that calls one (see ``agent_evals.judge``).
 The agent under test is a plain Python callable.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 from .evals import (
     Case,
@@ -36,19 +36,25 @@ from .stability import (
 __all__ = [
     "Case",
     "CaseStability",
+    "CaseTrend",
     "DEFAULT_JUDGES",
     "JudgeVerdict",
     "ReportComparison",
     "Result",
     "RunReport",
+    "RunSummary",
     "StabilityReport",
     "Suite",
+    "TrendReport",
     "coerce_verdict",
+    "compare_history",
     "compare_reports",
     "format_comparison",
     "format_stability",
     "format_summary",
+    "format_trend",
     "load_report",
+    "load_reports_dir",
     "load_suite",
     "make_http_judge",
     "make_output_diff",
@@ -60,9 +66,10 @@ __all__ = [
 
 
 def __getattr__(name):
-    # Lazy import: importing .compare eagerly would make
-    # `python -m agent_evals.compare` warn about the module already
-    # being in sys.modules (it is imported by this package __init__).
+    # Lazy import: importing .compare/.trends eagerly would make
+    # `python -m agent_evals.compare` (or `.trends`) warn about the
+    # module already being in sys.modules (it is imported by this
+    # package __init__).
     if name in {"ReportComparison", "compare_reports", "format_comparison"}:
         from .compare import (
             ReportComparison,
@@ -74,5 +81,30 @@ def __getattr__(name):
             "ReportComparison": ReportComparison,
             "compare_reports": compare_reports,
             "format_comparison": format_comparison,
+        }[name]
+    if name in {
+        "CaseTrend",
+        "RunSummary",
+        "TrendReport",
+        "compare_history",
+        "format_trend",
+        "load_reports_dir",
+    }:
+        from .trends import (
+            CaseTrend,
+            RunSummary,
+            TrendReport,
+            compare_history,
+            format_trend,
+            load_reports_dir,
+        )
+
+        return {
+            "CaseTrend": CaseTrend,
+            "RunSummary": RunSummary,
+            "TrendReport": TrendReport,
+            "compare_history": compare_history,
+            "format_trend": format_trend,
+            "load_reports_dir": load_reports_dir,
         }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

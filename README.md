@@ -303,6 +303,41 @@ carry no fingerprints: the diff falls back to comparing version
 labels for the set, and reports per-case change as unknown rather
 than guessing.
 
+## Comparing across a reports directory
+
+A two-run diff says what changed between yesterday and today. A
+directory of reports says how the agent has been trending:
+
+```bash
+python -m agent_evals.trends --reports-dir reports/
+python -m agent_evals.trends --reports-dir reports/ --json trends.json
+```
+
+Or from Python:
+
+```python
+from agent_evals import compare_history, format_trend, load_reports_dir
+
+trend = compare_history(load_reports_dir("reports/"))
+print(format_trend(trend))
+```
+
+The trend report shows a per-run table (pass rate and weighted score
+per run, plus the headline trend from the first run to the latest),
+per-case pass rates over the whole history with first-to-last score
+movement, the cases that newly failed or newly passed in the latest
+run, the flaky cases across the history, and the worst regressions —
+cases that passed at least once and are failing in their latest run,
+ranked by how reliably they used to pass, so a case that passed 9
+of 10 runs and now fails outranks one that was already failing half
+the time. Reports load in `started_at` order; a case added or removed
+mid-history gets no verdict for the runs it was not part of, so it
+does not skew the other cases' pass rates. A file in the directory
+that is not a run report is skipped with a warning, not an error.
+The CLI exits 1 when at least one case newly failed in the latest
+run, 0 otherwise, so it can gate a CI step the same way the two-run
+comparison does. `--json` writes the trend as JSON.
+
 ## Eval-set versioning
 
 A suite file may carry an optional `"version"` label, e.g.
@@ -435,3 +470,7 @@ make demo    # run both example suites through the CLI
   carries a unified diff of the expected output vs the actual output
   (in JSON and in the text summary), so a regression is visible at a
   glance.~~ (done in v0.7.0)
+- ~~Compare across a reports directory: per-case pass rates over time,
+  score trends, newly failing / newly passing cases, and the worst
+  regressions in the history (not just between two runs).~~ (done in
+  v0.8.0)
