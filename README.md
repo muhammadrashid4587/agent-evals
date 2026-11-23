@@ -376,8 +376,12 @@ The comparison classifies every case by how it moved: **regression**
 **fix** (failed, now passed), **score change** (failed in both runs
 but earned a different partial score), **new**, **removed**, or
 unchanged. It also reports the pass-rate delta, the weighted-score
-delta, and the total latency delta, plus a per-case latency change,
-so a run that passes everything but got much slower is visible too.
+delta, the total latency delta, and the total token delta, names an
+overall **winner** (weighted score, then pass rate, then lowest total
+latency, then lowest total tokens — a tie has no winner), and prints
+every case side by side in one table — baseline vs current score,
+latency, and tokens with their deltas — so a run that passes
+everything but got much slower or more expensive is visible too.
 Cases are matched by `case_id`; a suite-name mismatch is noted but
 does not stop the comparison. The CLI exits 1 when at least one case
 regressed, 0 otherwise, so it can gate a CI step. `--json` writes the
@@ -914,3 +918,10 @@ make demo    # run both example suites through the CLI
   (`python -m agent_evals.model_compare --agent name=module:attr
   ...`) and from Python (`compare_models` /
   `format_model_comparison`).~~ (done in v0.20.0)
+- ~~Compare saved reports side by side: a two-run diff shows
+  per-case score, latency, and token/cost deltas in one table,
+  names an overall winner (weighted score, then pass rate, then
+  lowest latency, then lowest tokens), and carries the total token
+  delta in the headline and in the JSON output, so a run that
+  passes everything but got slower or more expensive is visible
+  at a glance.~~ (done in v0.21.0)

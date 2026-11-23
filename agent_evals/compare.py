@@ -28,9 +28,13 @@ can tell whether the set itself changed between the runs:
   the agent; a regression on an unchanged case is an agent regression.
 
 The comparison also carries the headline deltas: pass rate,
-weighted score, and total latency, plus a per-case latency change
-for shared cases, so a run that passes everything but got much
-slower is visible too.
+weighted score, total latency, and total tokens, plus a per-case
+latency and token change for shared cases, so a run that passes
+everything but got much slower or more expensive is visible too.
+It also names an overall winner — the run with the better weighted
+score, then pass rate, then lowest total latency, then lowest total
+tokens — and prints every case side by side, baseline vs current,
+with its score, latency, and token deltas.
 
 Usage:
     python -m agent_evals.compare --baseline reports/old.json \
@@ -78,6 +82,8 @@ class CaseChange:
     current_score: Optional[float]
     baseline_latency_ms: Optional[float] = None
     current_latency_ms: Optional[float] = None
+    baseline_tokens: Optional[int] = None
+    current_tokens: Optional[int] = None
     case_changed: Optional[bool] = None
 
     @property
@@ -87,6 +93,23 @@ class CaseChange:
         if self.baseline_latency_ms is None or self.current_latency_ms is None:
             return None
         return round(self.current_latency_ms - self.baseline_latency_ms, 3)
+
+    @property
+    def token_delta(self) -> Optional[int]:
+        """Change in tokens (positive = more expensive), or None when
+        either run has no token count for the case — an agent that
+        reports no tokens has nothing to compare."""
+        if self.baseline_tokens is None or self.current_tokens is None:
+            return None
+        return self.current_tokens - self.baseline_tokens
+
+    @property
+    def score_delta(self) -> Optional[float]:
+        """Change in score (positive = better), or None when either
+        run has no score for the case."""
+        if self.baseline_score is None or self.current_score is None:
+            return None
+        return round(self.current_score - self.baseline_score, 4)
 
     @property
     def kind(self) -> str:
@@ -112,9 +135,13 @@ class CaseChange:
             "current_passed": self.current_passed,
             "baseline_score": self.baseline_score,
             "current_score": self.current_score,
+            "score_delta": self.score_delta,
             "baseline_latency_ms": self.baseline_latency_ms,
             "current_latency_ms": self.current_latency_ms,
             "latency_delta_ms": self.latency_delta_ms,
+            "baseline_tokens": self.baseline_tokens,
+            "current_tokens": self.current_tokens,
+            "token_delta": self.token_delta,
         }
 
 
@@ -142,6 +169,8 @@ class ReportComparison:
     current_weighted_score: float
     baseline_total_latency_ms: float
     current_total_latency_ms: float
+    baseline_total_tokens: Optional[int] = None
+    current_total_tokens: Optional[int] = None
     changes: list = field(default_factory=list)
     baseline_suite_version: Optional[str] = None
     current_suite_version: Optional[str] = None
@@ -202,10 +231,24 @@ class ReportComparison:
         return bool(self.regressions)
 
     @property
+    def baseline_pass_rate(self) -> float:
+        return (
+            (self.baseline_passed / self.baseline_total)
+            if self.baseline_total
+            else 0.0
+        )
+
+    @property
+    def current_pass_rate(self) -> float:
+        return (
+            (self.current_passed / self.current_total)
+            if self.current_total
+            else 0.0
+        )
+
+    @property
     def pass_rate_delta(self) -> float:
-        base = (self.baseline_passed / self.baseline_total) if self.baseline_total else 0.0
-        cur = (self.current_passed / self.current_total) if self.current_total else 0.0
-        return round(cur - base, 4)
+        return round(self.current_pass_rate - self.baseline_pass_rate, 4)
 
     @property
     def weighted_score_delta(self) -> float:
@@ -218,6 +261,53 @@ class ReportComparison:
         return round(
             self.current_total_latency_ms - self.baseline_total_latency_ms, 3
         )
+
+    @property
+    def token_delta(self) -> Optional[int]:
+        """Change in total tokens (positive = more expensive), or
+        None when either run reported no token count — an agent that
+        reports no tokens has nothing to compare."""
+        if (
+            self.baseline_total_tokens is None
+            or self.current_total_tokens is None
+        ):
+            return None
+        return self.current_total_tokens - self.baseline_total_tokens
+
+    @property
+    def winner(self) -> Optional[str]:
+        """Which run won overall: ``"baseline"``, ``"current"``, or
+        None on a tie. Ranked the same way the per-model comparison
+        ranks agents: weighted score, then pass rate, then lowest
+        total latency, then lowest total tokens (only when both runs
+        reported tokens — otherwise cost does not break the tie).
+        A regression can still win on score: the winner is the
+        better run overall, the verdict is the CI gate."""
+        base_tokens = (
+            self.baseline_total_tokens
+            if self.token_delta is not None
+            else 0
+        )
+        cur_tokens = (
+            self.current_total_tokens if self.token_delta is not None else 0
+        )
+        base = (
+            -self.baseline_weighted_score,
+            -self.baseline_pass_rate,
+            self.baseline_total_latency_ms,
+            base_tokens,
+        )
+        cur = (
+            -self.current_weighted_score,
+            -self.current_pass_rate,
+            self.current_total_latency_ms,
+            cur_tokens,
+        )
+        if base < cur:
+            return "baseline"
+        if cur < base:
+            return "current"
+        return None
 
     @property
     def verdict(self) -> str:
@@ -249,6 +339,10 @@ class ReportComparison:
             "baseline_total_latency_ms": self.baseline_total_latency_ms,
             "current_total_latency_ms": self.current_total_latency_ms,
             "latency_delta_ms": self.latency_delta_ms,
+            "baseline_total_tokens": self.baseline_total_tokens,
+            "current_total_tokens": self.current_total_tokens,
+            "token_delta": self.token_delta,
+            "winner": self.winner,
             "verdict": self.verdict,
             "regressions": [c.case_id for c in self.regressions],
             "fixes": [c.case_id for c in self.fixes],
@@ -269,6 +363,21 @@ def _results_by_id(report: dict) -> dict:
         if case_id is not None and case_id not in by_id:
             by_id[case_id] = result
     return by_id
+
+
+def _total_tokens(report: dict) -> Optional[int]:
+    """A report's total token count: the report-level total when the
+    report carries one, else the sum of the per-result counts, else
+    None when no result reported tokens."""
+    total = report.get("total_tokens")
+    if total is not None:
+        return int(total)
+    tokens = [
+        r.get("tokens")
+        for r in report.get("results", [])
+        if r.get("tokens") is not None
+    ]
+    return sum(tokens) if tokens else None
 
 
 def compare_reports(baseline: dict, current: dict) -> ReportComparison:
@@ -312,6 +421,8 @@ def compare_reports(baseline: dict, current: dict) -> ReportComparison:
                 current_latency_ms=(
                     cur.get("latency_ms") if cur else None
                 ),
+                baseline_tokens=base.get("tokens") if base else None,
+                current_tokens=cur.get("tokens") if cur else None,
                 case_changed=case_changed,
             )
         )
@@ -334,6 +445,8 @@ def compare_reports(baseline: dict, current: dict) -> ReportComparison:
         current_total_latency_ms=float(
             current.get("total_latency_ms", 0.0)
         ),
+        baseline_total_tokens=_total_tokens(baseline),
+        current_total_tokens=_total_tokens(current),
         changes=changes,
         baseline_suite_version=baseline.get("suite_version"),
         current_suite_version=current.get("suite_version"),
@@ -352,6 +465,104 @@ def _set_label(version, fingerprint) -> str:
     if fingerprint is not None:
         return f"sha {fingerprint}"
     return ""
+
+
+def _format_side_by_side(comp: ReportComparison) -> str:
+    """Every case in one table, baseline vs current side by side:
+    score, latency, and tokens with their deltas, plus how the case
+    moved. A missing side (a new or removed case, or a run that
+    reported no tokens) shows "-". Token columns appear only when
+    some case reported tokens in either run."""
+    lines = ["Per-case (side by side):"]
+    if not comp.changes:
+        lines.append("  (no cases in either run)")
+        return "\n".join(lines)
+
+    def num(value, fmt):
+        return fmt.format(value) if value is not None else "-"
+
+    show_tokens = any(
+        c.baseline_tokens is not None or c.current_tokens is not None
+        for c in comp.changes
+    )
+    # Each column: (header, cells, right-aligned?).
+    columns = [
+        ("case", [c.case_id for c in comp.changes], False),
+        (
+            "base_score",
+            [num(c.baseline_score, "{:.2f}") for c in comp.changes],
+            True,
+        ),
+        (
+            "cur_score",
+            [num(c.current_score, "{:.2f}") for c in comp.changes],
+            True,
+        ),
+        (
+            "Δscore",
+            [num(c.score_delta, "{:+.2f}") for c in comp.changes],
+            True,
+        ),
+        (
+            "base_ms",
+            [num(c.baseline_latency_ms, "{:.1f}") for c in comp.changes],
+            True,
+        ),
+        (
+            "cur_ms",
+            [num(c.current_latency_ms, "{:.1f}") for c in comp.changes],
+            True,
+        ),
+        (
+            "Δms",
+            [num(c.latency_delta_ms, "{:+.1f}") for c in comp.changes],
+            True,
+        ),
+    ]
+    if show_tokens:
+        columns += [
+            (
+                "base_tok",
+                [num(c.baseline_tokens, "{:d}") for c in comp.changes],
+                True,
+            ),
+            (
+                "cur_tok",
+                [num(c.current_tokens, "{:d}") for c in comp.changes],
+                True,
+            ),
+            (
+                "Δtok",
+                [num(c.token_delta, "{:+d}") for c in comp.changes],
+                True,
+            ),
+        ]
+    columns.append(
+        (
+            "movement",
+            [c.kind if c.kind != "unchanged" else "" for c in comp.changes],
+            False,
+        )
+    )
+    widths = [
+        max(len(header), *(len(cell) for cell in cells))
+        for header, cells, _ in columns
+    ]
+
+    def render(cells):
+        return "  ".join(
+            f"{cell:>{w}}" if right else f"{cell:<{w}}"
+            for cell, w, (_, _, right) in zip(cells, widths, columns)
+        )
+
+    header = render([header for header, _, _ in columns])
+    lines.append(header)
+    lines.append("-" * len(header))
+    for i in range(len(comp.changes)):
+        lines.append(
+            render([cells[i] for _, cells, _ in columns]).rstrip()
+        )
+    return "\n".join(lines)
 
 
 def format_comparison(comp: ReportComparison) -> str:
@@ -388,7 +599,15 @@ def format_comparison(comp: ReportComparison) -> str:
         f"Weighted score: {comp.weighted_score_delta:+.4f}  "
         f"Latency: {comp.latency_delta_ms:+.1f} ms"
     )
+    if comp.token_delta is not None:
+        lines.append(
+            f"Tokens: {comp.token_delta:+d} "
+            f"({comp.baseline_total_tokens} -> {comp.current_total_tokens})"
+        )
+    lines.append(f"Winner: {comp.winner or 'tie'}")
     lines.append(f"Verdict: {comp.verdict}")
+    lines.append("")
+    lines.append(_format_side_by_side(comp))
     lines.append("")
     sections = [
         ("Regressions", comp.regressions),
