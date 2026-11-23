@@ -4,7 +4,7 @@ Pure Python 3 standard library. No model calls, no API keys, no network.
 The agent under test is a plain Python callable.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .evals import (
     Case,
@@ -17,18 +17,28 @@ from .evals import (
     run_suite,
     score_case,
 )
+from .stability import (
+    CaseStability,
+    StabilityReport,
+    format_stability,
+    repeat_suite,
+)
 
 __all__ = [
     "Case",
+    "CaseStability",
     "ReportComparison",
     "Result",
     "RunReport",
+    "StabilityReport",
     "Suite",
     "compare_reports",
     "format_comparison",
+    "format_stability",
     "format_summary",
     "load_report",
     "load_suite",
+    "repeat_suite",
     "run_suite",
     "score_case",
 ]

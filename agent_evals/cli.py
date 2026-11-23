@@ -12,7 +12,9 @@ that passes its checks but exceeds its ``max_latency_ms`` budget is
 reported as a budget violation, not a pass, but does not fail the run
 unless ``--fail-on-budget`` is given. ``--workers N`` runs cases
 concurrently on a thread pool (default 1); the agent must be
-thread-safe for more than 1.
+thread-safe for more than 1. ``--repeat N`` runs the whole suite N
+times and reports per-case pass rates, flagging flaky cases; the run
+only passes when every case passed every time.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import importlib
 import sys
 
 from .evals import format_summary, load_suite, run_suite
+from .stability import format_stability, repeat_suite
 
 
 def load_agent(spec: str):
@@ -66,12 +69,30 @@ def main(argv=None) -> int:
         "max_latency_ms budget (by default a budget violation is "
         "reported but does not fail the run)",
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="run the suite N times and report per-case pass rates, "
+        "flagging flaky cases that pass sometimes and fail other "
+        "times (default 1, a single run)",
+    )
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be a positive integer")
+    if args.repeat < 1:
+        parser.error("--repeat must be a positive integer")
 
     suite = load_suite(args.suite)
     agent = load_agent(args.agent)
+    if args.repeat > 1:
+        stability = repeat_suite(suite, agent, args.repeat, workers=args.workers)
+        print(format_stability(stability))
+        if args.report:
+            stability.save(args.report)
+            print(f"\nStability report written to {args.report}")
+        # A repeated run only passes when every case passed every time.
+        return 0 if not stability.flaky_cases and not stability.always_failing else 1
     report = run_suite(suite, agent, workers=args.workers)
     print(format_summary(report))
     if args.report:

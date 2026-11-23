@@ -20,7 +20,9 @@ cases count more than others, and some scorers give partial credit.
 - A CLI that runs a suite JSON file against an agent named as
   `module:attribute` and exits 0 only when every case passes (a case
   that passes its checks but exceeds its latency budget does not fail
-  the run unless `--fail-on-budget` is given).
+  the run unless `--fail-on-budget` is given). With `--repeat N` it
+  runs the suite N times and flags flaky cases that pass sometimes
+  and fail other times.
 
 ## What it is not
 
@@ -203,6 +205,36 @@ regressed, 0 otherwise, so it can gate a CI step. `--json` writes the
 comparison as JSON. Fixes, new cases, and score improvements never
 fail the comparison — only a regression does.
 
+## Repeated runs and flaky cases
+
+A single run cannot tell a genuinely broken case from a flaky one:
+an agent that answers nondeterministically passes a case sometimes
+and fails it other times. Run the suite N times and aggregate:
+
+```bash
+python -m agent_evals.cli --suite examples/calculator.json \
+    --agent examples.calculator_agent:agent --repeat 5
+```
+
+Or from Python:
+
+```python
+from agent_evals import repeat_suite, format_stability
+
+stability = repeat_suite(suite, agent, repetitions=5)
+print(format_stability(stability))
+```
+
+Each case gets a pass rate over the N runs plus its mean latency and
+mean score. A case is **flaky** when its pass rate is strictly between
+0 and 1: it passed at least once and failed at least once, so the
+verdict is not reproducible. That is the signal to look at the agent
+(nondeterminism, a race, a timeout that is too tight) or at the case
+(a scorer too brittle for the agent's output), rather than treating
+the run as a clean pass or a clean fail. The CLI exits 0 only when
+every case passed every time; `--report` writes the stability report
+as JSON. `repetitions` must be a positive integer.
+
 ## Report format
 
 ```json
@@ -250,3 +282,4 @@ make demo    # run both example suites through the CLI
 - ~~Parallel case execution for slow agents.~~ (done in v0.1.5)
 - ~~Comparing two run reports to catch regressions.~~ (done in v0.2.0)
 - ~~Latency budgets per case, so a case that passes but gets too slow fails.~~ (done in v0.3.0)
+- ~~Repeated runs that flag flaky cases by per-case pass rate.~~ (done in v0.4.0)
