@@ -10,7 +10,10 @@ The agent is named as ``module:attribute`` and must be a callable taking a
 prompt string. Exit code is 0 when every case passes, 1 otherwise. A case
 that passes its checks but exceeds its ``max_latency_ms`` budget is
 reported as a budget violation, not a pass, but does not fail the run
-unless ``--fail-on-budget`` is given. ``--report`` writes the JSON
+unless ``--fail-on-budget`` is given; a case that passes its checks but
+whose agent reported more tokens than its ``max_tokens`` budget is
+reported as a cost violation, not a pass, but does not fail the run
+unless ``--fail-on-cost`` is given. ``--report`` writes the JSON
 report; ``--junit`` writes the same run as JUnit XML for CI ingestion.
 ``--workers N`` runs cases concurrently on a thread pool (default 1); the agent must be
 thread-safe for more than 1. ``--repeat N`` runs the whole suite N
@@ -93,6 +96,15 @@ def main(argv=None) -> int:
         help="exit 1 when a case passes its checks but exceeds its "
         "max_latency_ms budget (by default a budget violation is "
         "reported but does not fail the run)",
+    )
+    parser.add_argument(
+        "--fail-on-cost",
+        action="store_true",
+        help="exit 1 when a case passes its checks but the agent "
+        "reported more tokens than its max_tokens budget (by "
+        "default a cost violation is reported but does not fail "
+        "the run; a case whose agent reports no token count can "
+        "never trip it)",
     )
     parser.add_argument(
         "--repeat",
@@ -234,12 +246,15 @@ def main(argv=None) -> int:
     if args.junit:
         report.save_junit(args.junit)
         print(f"JUnit report written to {args.junit}")
-    if args.fail_on_budget:
+    if args.fail_on_budget or args.fail_on_cost:
         return 0 if report.passed == report.total else 1
-    # Without --fail-on-budget, only genuine check failures fail the run;
-    # budget violations are reported but do not fail it.
+    # Without --fail-on-budget / --fail-on-cost, only genuine check
+    # failures fail the run; budget and cost violations are reported
+    # but do not fail it.
     genuine_failures = [
-        r for r in report.results if not r.passed and not r.budget_violated
+        r
+        for r in report.results
+        if not r.passed and not r.budget_violated and not r.cost_violated
     ]
     return 0 if not genuine_failures else 1
 

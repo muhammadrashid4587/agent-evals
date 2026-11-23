@@ -8,7 +8,10 @@ result's detail; a case that could not be scored at all — a timeout,
 an agent crash, or a scorer error — becomes an ``<error>`` instead,
 because the failure was in the harness or the agent, not in the
 answer. A budget violation is a ``<failure>``: the answer was right
-but too slow, and the detail says by how much. Suite version,
+but too slow, and the detail says by how much. A cost violation is
+a ``<failure>`` for the same reason: the answer was right but the
+agent reported more tokens than the case's ``max_tokens`` budget.
+Suite version,
 fingerprint, and weighted score ride along as ``<properties>``.
 
 The XML is built with :mod:`xml.etree.ElementTree`, so text and

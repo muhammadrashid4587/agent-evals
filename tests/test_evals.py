@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -1007,6 +1008,235 @@ class TestLatencyBudgets(unittest.TestCase):
                 ]
             )
             self.assertEqual(code, 1)
+
+
+class TestTokenBudgets(unittest.TestCase):
+    def _cost_case(self, budget, prompt="q"):
+        return Case(
+            "cost",
+            prompt,
+            {"type": "exact", "expected": "x"},
+            max_tokens=budget,
+        )
+
+    def _token_agent(self, tokens):
+        def agent(prompt):
+            return "x", tokens
+
+        return agent
+
+    def test_budget_parsed_from_dict_and_round_trips(self):
+        case = Case.from_dict(
+            {
+                "id": "c",
+                "prompt": "p",
+                "scorer": {"type": "exact", "expected": "x"},
+                "max_tokens": 100,
+            }
+        )
+        self.assertEqual(case.max_tokens, 100)
+        self.assertEqual(case.to_dict()["max_tokens"], 100)
+
+    def test_budget_absent_by_default(self):
+        case = Case.from_dict(
+            {"id": "c", "prompt": "p", "scorer": {"type": "exact", "expected": "x"}}
+        )
+        self.assertIsNone(case.max_tokens)
+        self.assertNotIn("max_tokens", case.to_dict())
+
+    def test_invalid_budget_rejected(self):
+        for bad in (0, -1, "many", 1.5, True):
+            with self.assertRaises(ValueError):
+                Case.from_dict(
+                    {
+                        "id": "c",
+                        "prompt": "p",
+                        "scorer": {"type": "exact", "expected": "x"},
+                        "max_tokens": bad,
+                    }
+                )
+
+    def test_adding_a_budget_changes_the_fingerprint(self):
+        plain = Case("c", "p", {"type": "exact", "expected": "x"})
+        budgeted = Case(
+            "c", "p", {"type": "exact", "expected": "x"}, max_tokens=100
+        )
+        self.assertNotEqual(plain.fingerprint(), budgeted.fingerprint())
+
+    def test_within_budget_passes(self):
+        suite = Suite("b", [self._cost_case(100)])
+        report = run_suite(suite, self._token_agent(42))
+        result = report.results[0]
+        self.assertTrue(result.passed)
+        self.assertFalse(result.cost_violated)
+        self.assertEqual(result.max_tokens, 100)
+        self.assertEqual(result.tokens, 42)
+        self.assertEqual(report.cost_violations, 0)
+
+    def test_at_budget_passes(self):
+        suite = Suite("b", [self._cost_case(100)])
+        report = run_suite(suite, self._token_agent(100))
+        self.assertTrue(report.results[0].passed)
+        self.assertFalse(report.results[0].cost_violated)
+
+    def test_over_budget_is_flagged_not_passed(self):
+        suite = Suite("b", [self._cost_case(100)])
+        report = run_suite(suite, self._token_agent(250))
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertTrue(result.cost_violated)
+        self.assertEqual(result.score, 0.0)
+        self.assertEqual(result.max_tokens, 100)
+        self.assertEqual(result.tokens, 250)
+        self.assertIn("token budget", result.detail)
+        self.assertIn("250 tokens > 100 tokens", result.detail)
+        self.assertEqual(report.cost_violations, 1)
+        self.assertEqual(report.passed, 0)
+
+    def test_no_tokens_reported_leaves_pass_unchanged(self):
+        # An agent that returns a plain string reports no token count,
+        # so the budget has nothing to compare against and cannot trip.
+        suite = Suite("b", [self._cost_case(100)])
+        report = run_suite(suite, lambda prompt: "x")
+        result = report.results[0]
+        self.assertTrue(result.passed)
+        self.assertFalse(result.cost_violated)
+        self.assertIsNone(result.tokens)
+        self.assertEqual(report.cost_violations, 0)
+
+    def test_failing_case_is_not_a_cost_violation(self):
+        suite = Suite(
+            "b",
+            [Case("c", "q", {"type": "exact", "expected": "x"}, max_tokens=100)],
+        )
+        report = run_suite(suite, lambda prompt: ("wrong", 250))
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertFalse(result.cost_violated)
+        self.assertNotIn("token budget", result.detail)
+        self.assertEqual(report.cost_violations, 0)
+
+    def test_timed_out_case_is_not_a_cost_violation(self):
+        suite = Suite(
+            "b",
+            [
+                Case(
+                    "slow",
+                    "q",
+                    {"type": "exact", "expected": "x"},
+                    timeout=0.05,
+                    max_tokens=1,
+                )
+            ],
+        )
+
+        def agent(prompt):
+            time.sleep(0.5)
+            return "x", 100
+
+        report = run_suite(suite, agent)
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertTrue(result.timed_out)
+        self.assertFalse(result.cost_violated)
+        self.assertEqual(report.cost_violations, 0)
+
+    def test_latency_budget_is_checked_before_token_budget(self):
+        # A case over both budgets is a latency violation, not both:
+        # one verdict, one reason.
+        suite = Suite(
+            "b",
+            [
+                Case(
+                    "both",
+                    "q",
+                    {"type": "exact", "expected": "x"},
+                    max_latency_ms=10,
+                    max_tokens=1,
+                )
+            ],
+        )
+
+        def agent(prompt):
+            time.sleep(0.1)
+            return "x", 100
+
+        report = run_suite(suite, agent)
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertTrue(result.budget_violated)
+        self.assertFalse(result.cost_violated)
+        self.assertEqual(report.budget_violations, 1)
+        self.assertEqual(report.cost_violations, 0)
+
+    def test_cost_fields_in_json_report(self):
+        suite = Suite("b", [self._cost_case(100)])
+        report = run_suite(suite, self._token_agent(250))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "report.json")
+            report.save(path)
+            loaded = load_report(path)
+        self.assertEqual(loaded["cost_violations"], 1)
+        result = loaded["results"][0]
+        self.assertFalse(result["passed"])
+        self.assertTrue(result["cost_violated"])
+        self.assertEqual(result["max_tokens"], 100)
+        self.assertEqual(result["tokens"], 250)
+        self.assertIn("token budget", result["detail"])
+
+    def test_summary_marks_cost_violation(self):
+        suite = Suite("b", [self._cost_case(100)])
+        report = run_suite(suite, self._token_agent(250))
+        text = format_summary(report)
+        self.assertIn("COST", text)
+        self.assertIn("Cost violations: 1", text)
+
+    def test_cli_fail_on_cost_flag(self):
+        from agent_evals.cli import main
+
+        data = {
+            "name": "cli-c",
+            "cases": [
+                {
+                    "id": "chatty",
+                    "prompt": "2 + 3",
+                    "scorer": {"type": "exact", "expected": "5"},
+                    "max_tokens": 10,
+                }
+            ],
+        }
+        agent_src = (
+            "def agent(prompt):\n"
+            "    return \"5\", 120\n"
+        )
+        # The agent answers correctly but reports 120 tokens against
+        # a 10-token budget: a cost violation, reported as a failure,
+        # but the run only fails the CLI when --fail-on-cost is given.
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "token_agent.py"), "w") as f:
+                f.write(agent_src)
+            path = os.path.join(tmp, "suite.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            sys.path.insert(0, tmp)
+            try:
+                code = main(
+                    ["--suite", path, "--agent", "token_agent:agent"]
+                )
+                self.assertEqual(code, 0)
+                code = main(
+                    [
+                        "--suite",
+                        path,
+                        "--agent",
+                        "token_agent:agent",
+                        "--fail-on-cost",
+                    ]
+                )
+                self.assertEqual(code, 1)
+            finally:
+                sys.path.remove(tmp)
+                sys.modules.pop("token_agent", None)
 
 
 class TestOutputDiff(unittest.TestCase):

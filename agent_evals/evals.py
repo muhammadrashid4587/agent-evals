@@ -31,6 +31,16 @@ Design
   are in the detail). A case that fails its checks is never also a
   budget violation, and a timed-out case is not one either.
 
+* A case may carry a ``max_tokens`` budget: if the agent's answer
+  passes its checks but the agent reported more tokens than the
+  budget, the case is reported as a cost violation instead of a pass
+  (``passed`` is false, ``cost_violated`` is true, and the token
+  count and the budget are in the detail). It only applies when the
+  agent reports a token count — an agent that returns a plain string
+  reports no tokens, so its cases can never trip the budget. A case
+  that fails its checks is never also a cost violation, and a
+  timed-out case is not one either.
+
 * A case may carry ``tags``, a list of labels such as ``"smoke"`` or
   ``"slow"``. Tags are recorded per result in the report and shown in
   the summary, and a suite can be filtered to the cases carrying a
@@ -144,6 +154,10 @@ class Case:
     ``max_latency_ms`` is an optional per-case latency budget in
     milliseconds: a case that passes its checks but takes longer than
     the budget is reported as a budget violation instead of a pass.
+    ``max_tokens`` is an optional per-case token budget: a case that
+    passes its checks but whose agent reported more tokens than the
+    budget is reported as a cost violation instead of a pass. The
+    token budget only applies when the agent reports a token count.
     ``tags`` is an optional list of labels (e.g. ``["smoke"]``) used
     to select cases for a run; it defaults to no tags.
     """
@@ -154,6 +168,7 @@ class Case:
     timeout: Optional[float] = None
     weight: float = 1.0
     max_latency_ms: Optional[float] = None
+    max_tokens: Optional[int] = None
     tags: list = field(default_factory=list)
 
     @classmethod
@@ -199,6 +214,18 @@ class Case:
                     f"case {data.get('id')!r}: max_latency_ms must be "
                     f"positive, got {max_latency_ms!r}"
                 )
+        max_tokens = data.get("max_tokens")
+        if max_tokens is not None:
+            # Tokens are a count, so the budget is a whole number.
+            if (
+                isinstance(max_tokens, bool)
+                or not isinstance(max_tokens, int)
+                or max_tokens <= 0
+            ):
+                raise ValueError(
+                    f"case {data.get('id')!r}: max_tokens must be a "
+                    f"positive integer, got {max_tokens!r}"
+                )
         tags = data.get("tags", [])
         if not isinstance(tags, list):
             raise ValueError(
@@ -226,6 +253,7 @@ class Case:
             timeout=timeout,
             weight=weight,
             max_latency_ms=max_latency_ms,
+            max_tokens=max_tokens,
             tags=clean_tags,
         )
 
@@ -237,13 +265,15 @@ class Case:
             data["weight"] = self.weight
         if self.max_latency_ms is not None:
             data["max_latency_ms"] = self.max_latency_ms
+        if self.max_tokens is not None:
+            data["max_tokens"] = self.max_tokens
         if self.tags:
             data["tags"] = list(self.tags)
         return data
 
     def fingerprint(self) -> str:
         """A short content hash of this case: its id, prompt, scorer,
-        timeout, weight, latency budget, and tags. Two cases with the
+        timeout, weight, latency budget, token budget, and tags. Two cases with the
         same fingerprint are the same case; a changed prompt or scorer
         changes the fingerprint, so a run diff can tell a case that
         changed from an agent that changed."""
@@ -721,6 +751,13 @@ class Result:
     took longer than its ``max_latency_ms`` budget; such a case is not
     a pass (``passed`` is false, ``score`` is 0.0) and the latency and
     the budget are in the detail.
+    ``cost_violated`` is true when the case passed its checks but the
+    agent reported more tokens than the case's ``max_tokens`` budget;
+    such a case is not a pass either (``passed`` is false, ``score``
+    is 0.0) and the token count and the budget are in the detail. A
+    case whose agent reported no token count can never be a cost
+    violation. A case is never both a budget violation and a cost
+    violation: the latency budget is checked first.
     ``case_fingerprint`` is the case's content hash (see
     :meth:`Case.fingerprint`): a run diff can compare it with the
     baseline's to tell whether the case itself changed between runs.
@@ -743,6 +780,8 @@ class Result:
     weight: float = 1.0
     max_latency_ms: Optional[float] = None
     budget_violated: bool = False
+    max_tokens: Optional[int] = None
+    cost_violated: bool = False
     case_fingerprint: Optional[str] = None
     diff: Optional[str] = None
     tags: list = field(default_factory=list)
@@ -760,6 +799,8 @@ class Result:
             "weight": self.weight,
             "max_latency_ms": self.max_latency_ms,
             "budget_violated": self.budget_violated,
+            "max_tokens": self.max_tokens,
+            "cost_violated": self.cost_violated,
             "case_fingerprint": self.case_fingerprint,
             "diff": self.diff,
             "tags": list(self.tags),
@@ -836,6 +877,10 @@ class RunReport:
         return sum(1 for r in self.results if r.budget_violated)
 
     @property
+    def cost_violations(self) -> int:
+        return sum(1 for r in self.results if r.cost_violated)
+
+    @property
     def tag_breakdown(self) -> dict:
         """Per-tag pass rates: tag -> ``{"cases", "passed",
         "pass_rate", "weighted_score"}``.
@@ -887,6 +932,7 @@ class RunReport:
             "earned_weight": round(self.earned_weight, 4),
             "weighted_score": round(self.weighted_score, 4),
             "budget_violations": self.budget_violations,
+            "cost_violations": self.cost_violations,
             "tag_breakdown": {
                 tag: {
                     "cases": entry["cases"],
@@ -1020,6 +1066,23 @@ def _run_case(
             f"{detail}; exceeded latency budget "
             f"{latency:.1f} ms > {case.max_latency_ms:g} ms"
         )
+    cost_violated = False
+    if (
+        passed
+        and case.max_tokens is not None
+        and tokens is not None
+        and tokens > case.max_tokens
+    ):
+        # The answer was right but too expensive: a cost violation,
+        # not a pass. An agent that reports no token count can never
+        # trip this — there is nothing to compare against.
+        cost_violated = True
+        passed = False
+        score = 0.0
+        detail = (
+            f"{detail}; exceeded token budget "
+            f"{tokens} tokens > {case.max_tokens} tokens"
+        )
     return Result(
         case_id=case.id,
         passed=passed,
@@ -1031,6 +1094,8 @@ def _run_case(
         weight=case.weight,
         max_latency_ms=case.max_latency_ms,
         budget_violated=budget_violated,
+        max_tokens=case.max_tokens,
+        cost_violated=cost_violated,
         case_fingerprint=case.fingerprint(),
         diff=diff,
         tags=list(case.tags),
@@ -1109,6 +1174,8 @@ def format_summary(report: RunReport) -> str:
     ]
     if report.budget_violations:
         lines.append(f"Budget violations: {report.budget_violations}")
+    if report.cost_violations:
+        lines.append(f"Cost violations: {report.cost_violations}")
     lines += [
         "",
         f"{'case':<22} {'pass':<7} {'score':>6} {'ms':>8} {'tokens':>7}  detail",
@@ -1117,6 +1184,8 @@ def format_summary(report: RunReport) -> str:
     for r in report.results:
         if r.budget_violated:
             mark = "BUDGET"
+        elif r.cost_violated:
+            mark = "COST"
         elif r.timed_out:
             mark = "TIMEOUT"
         else:

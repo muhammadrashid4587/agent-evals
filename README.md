@@ -24,7 +24,9 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 - A CLI that runs a suite JSON file against an agent named as
   `module:attribute` and exits 0 only when every case passes (a case
   that passes its checks but exceeds its latency budget does not fail
-  the run unless `--fail-on-budget` is given). With `--repeat N` it
+  the run unless `--fail-on-budget` is given, and a case that passes
+  its checks but exceeds its token budget does not fail the run
+  unless `--fail-on-cost` is given). With `--repeat N` it
   runs the suite N times and flags flaky cases that pass sometimes
   and fail other times. With `--junit results.xml` it also writes the
   run as JUnit XML, so CI systems can ingest the results.
@@ -226,6 +228,45 @@ python -m agent_evals.cli --suite examples/calculator.json \
 ```
 
 Non-positive or non-numeric budgets are rejected when the suite loads.
+
+## Token budgets
+
+A case may also carry an optional `max_tokens` budget, e.g.
+`{"id": "terse", ..., "max_tokens": 100}`. If the agent's answer
+passes its checks but the agent reported more tokens than the budget,
+the case is reported as a cost violation instead of a pass: `passed`
+is false, `cost_violated` is true, the score is 0, and the detail
+records the token count and the budget, e.g. `exact match; exceeded
+token budget 250 tokens > 100 tokens`. The JSON report carries the
+budget per result (`max_tokens`, `cost_violated`) and a
+`cost_violations` count for the run, and the summary marks such cases
+`COST`. A case that fails its checks is never also a cost violation,
+and neither is a timed-out case; a case over both its latency and
+token budgets is a latency violation only, so one case gets one
+reason. The budget only applies when the agent reports a token count
+(a `(output, tokens)` tuple or a dict with a `"tokens"` key): an
+agent that returns a plain string reports no tokens, so its cases
+can never trip the budget.
+
+By default a cost violation does not fail the CLI run — the answer
+was right, just expensive — so the exit code stays 0 when every case
+passed its checks. Pass `--fail-on-cost` to make cost violations
+fail the run as well, e.g. to gate a CI step on token spend:
+
+```bash
+python -m agent_evals.cli --suite examples/calculator.json \
+    --agent examples.calculator_agent:agent --fail-on-cost
+```
+
+The flag only bites when the agent reports a token count: the
+example agents return plain strings, so they never trip a token
+budget. An agent that returns `(output, tokens)` or a dict with a
+`"tokens"` key is what a token budget measures.
+
+`max_tokens` must be a positive integer; anything else is rejected
+when the suite loads. It is part of a case's fingerprint, so adding
+or changing a token budget changes the case — a run diff attributes
+the movement to the eval set, not the agent.
 
 ## Case tags
 
@@ -643,6 +684,7 @@ JSON) are skipped with a warning, not an error.
   "earned_weight": 9.0,
   "weighted_score": 1.0,
   "budget_violations": 0,
+  "cost_violations": 0,
   "tag_breakdown": {
     "smoke": {"cases": 2, "passed": 2, "pass_rate": 1.0,
               "weighted_score": 1.0}
@@ -749,3 +791,12 @@ make demo    # run both example suites through the CLI
   so a case that keeps flipping is visible as a history, not a
   single burst, and the CLI gates on flakiness in the latest
   report.~~ (done in v0.17.0)
+- ~~Per-case token budgets: a case may carry a `max_tokens`
+  budget, and a case that passes its checks but whose agent
+  reported more tokens than the budget is a cost violation
+  instead of a pass (reported as `COST`, with a
+  `cost_violations` count in the JSON report), and
+  `--fail-on-cost` makes cost violations fail the CLI run, so
+  token spend can gate CI the same way latency budgets do. The
+  budget only applies when the agent reports a token count.~~
+  (done in v0.18.0)
