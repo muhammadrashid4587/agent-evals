@@ -211,7 +211,14 @@ def main(argv=None) -> int:
         if args.junit:
             parser.error("--junit is not supported with --repeat")
         stability = repeat_suite(
-            suite, agent, args.repeat, workers=args.workers, judges=judges
+            suite,
+            agent,
+            args.repeat,
+            workers=args.workers,
+            judges=judges,
+            tags=args.tag or None,
+            tag_mode=args.tag_mode,
+            exclude_tags=args.exclude_tag or None,
         )
         print(format_stability(stability))
         if args.report:

@@ -21,7 +21,10 @@ Usage:
     print(format_stability(stability))
 
 Or from the CLI: ``python -m agent_evals.cli --suite ... --agent ...
---repeat 5``.
+--repeat 5``. Tag filters (``--tag`` / ``--exclude-tag``) apply to
+repeated runs too: the suite is scoped first, then repeated, and the
+stability report records which tag filter was applied, so a report
+says which subset of the suite it covers.
 """
 
 from __future__ import annotations
@@ -81,13 +84,20 @@ class CaseStability:
 
 @dataclass
 class StabilityReport:
-    """The aggregated result of running a suite several times."""
+    """The aggregated result of running a suite several times.
+
+    ``tag_filter`` records the tag filter the run was scoped to, so a
+    stability report can say which subset of the suite it covers:
+    ``{"tags": [...], "mode": "any"|"all", "exclude_tags": [...]}``,
+    or ``None`` when no tag filter was applied.
+    """
 
     suite: str
     repetitions: int
     started_at: str
     ended_at: str
     cases: list = field(default_factory=list)
+    tag_filter: Optional[dict] = None
 
     @property
     def flaky_cases(self) -> list:
@@ -107,6 +117,7 @@ class StabilityReport:
             "repetitions": self.repetitions,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
+            "tag_filter": self.tag_filter,
             "flaky": [c.case_id for c in self.flaky_cases],
             "always_passing": [c.case_id for c in self.always_passing],
             "always_failing": [c.case_id for c in self.always_failing],
@@ -125,6 +136,9 @@ def repeat_suite(
     repetitions: int,
     workers: int = 1,
     judges: Optional[dict] = None,
+    tags: Optional[list] = None,
+    tag_mode: str = "any",
+    exclude_tags: Optional[list] = None,
 ) -> StabilityReport:
     """Run ``suite`` against ``agent`` ``repetitions`` times and
     aggregate per-case pass rates.
@@ -135,6 +149,14 @@ def repeat_suite(
     parallel mode needs a thread-safe agent). ``judges`` is passed
     through to ``run_suite`` as well, so ``judge`` scorers work in
     repeated runs. Cases are reported in suite order.
+
+    ``tags`` / ``tag_mode`` / ``exclude_tags`` describe the tag filter
+    that was applied to the suite before this call (the CLI applies
+    ``--tag`` / ``--tag-mode`` / ``--exclude-tag`` first and passes
+    them here): the filter is recorded on the report, so a stability
+    report says which subset of the suite it covers. Pass the filter
+    that produced ``suite``; this function does not filter the suite
+    itself. ``tag_mode`` must be ``"any"`` or ``"all"``.
     """
     if (
         isinstance(repetitions, bool)
@@ -144,6 +166,15 @@ def repeat_suite(
         raise ValueError(
             f"repetitions must be a positive integer, got {repetitions!r}"
         )
+    if tag_mode not in ("any", "all"):
+        raise ValueError(f"tag_mode must be 'any' or 'all', got {tag_mode!r}")
+    tag_filter = None
+    if tags or exclude_tags:
+        tag_filter = {
+            "tags": list(tags) if tags else [],
+            "mode": tag_mode,
+            "exclude_tags": list(exclude_tags) if exclude_tags else [],
+        }
     started = datetime.now(timezone.utc).isoformat()
     # Accumulate per case_id, in suite order.
     aggregate: dict = {}
@@ -177,13 +208,33 @@ def repeat_suite(
         started_at=started,
         ended_at=ended,
         cases=cases,
+        tag_filter=tag_filter,
     )
+
+
+def _format_tag_filter(tag_filter: Optional[dict]) -> str:
+    """Render an applied tag filter as one summary line, e.g.
+    ``Tags: smoke, fast (mode any); excluded: slow``."""
+    parts = []
+    tags = tag_filter.get("tags") or []
+    if tags:
+        parts.append(
+            f"Tags: {', '.join(tags)} (mode {tag_filter.get('mode', 'any')})"
+        )
+    excluded = tag_filter.get("exclude_tags") or []
+    if excluded:
+        parts.append(f"Excluded tags: {', '.join(excluded)}")
+    return "; ".join(parts)
 
 
 def format_stability(report: StabilityReport) -> str:
     """Render a stability report as a plain-text summary table."""
     lines = [
         f"Suite: {report.suite}  (repeated {report.repetitions}x)",
+    ]
+    if report.tag_filter:
+        lines.append(_format_tag_filter(report.tag_filter))
+    lines += [
         f"Flaky: {len(report.flaky_cases)}  "
         f"Always passing: {len(report.always_passing)}  "
         f"Always failing: {len(report.always_failing)}",

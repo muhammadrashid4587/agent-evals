@@ -563,7 +563,14 @@ verdict is not reproducible. That is the signal to look at the agent
 (a scorer too brittle for the agent's output), rather than treating
 the run as a clean pass or a clean fail. The CLI exits 0 only when
 every case passed every time; `--report` writes the stability report
-as JSON. `repetitions` must be a positive integer.
+as JSON. `repetitions` must be a positive integer. Tag filters apply
+to repeated runs too: `--tag smoke --repeat 5` repeats only the
+smoke cases, and the stability report records the filter that was
+applied — `tag_filter` in the JSON report (null when no filter was
+given) and a `Tags: ...` line in the text summary — so a report
+says which subset of the suite it covers. From Python,
+`repeat_suite(suite, agent, 5, tags=["smoke"])` is the same run,
+with `tag_mode="all"` and `exclude_tags=["slow"]` available.
 
 ## Report format
 
@@ -669,3 +676,9 @@ make demo    # run both example suites through the CLI
   breakdown (`tag_breakdown` in JSON, a `Per-tag pass rates:`
   section in the text summary), so a tag that keeps failing is
   visible at a glance.~~ (done in v0.14.0)
+- ~~Per-tag filtering for `--repeat` stability reports: the `--tag`
+  / `--exclude-tag` filters apply to repeated runs too, and the
+  stability report records which tag filter was applied
+  (`tag_filter` in JSON, a `Tags: ...` line in the text summary),
+  so a stability report says which subset of the suite it covers.~~
+  (done in v0.15.0)

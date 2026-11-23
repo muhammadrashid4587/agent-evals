@@ -1,5 +1,8 @@
 """Tests for agent-evals stability: repeated runs and flaky detection."""
 
+import json
+import os
+import tempfile
 import unittest
 
 from agent_evals.evals import Case, Suite
@@ -102,6 +105,105 @@ class TestRepeatSuite(unittest.TestCase):
         self.assertIn("Flaky: 1", text)
         self.assertIn("FLAKY", text)
         self.assertIn("repeated 2x", text)
+
+
+class TestStabilityTagFilter(unittest.TestCase):
+    def test_tag_filter_recorded_in_dict(self):
+        report = repeat_suite(
+            _suite(),
+            lambda prompt: "19",
+            repetitions=2,
+            tags=["smoke", "fast"],
+            tag_mode="all",
+            exclude_tags=["slow"],
+        )
+        self.assertEqual(
+            report.to_dict()["tag_filter"],
+            {"tags": ["smoke", "fast"], "mode": "all",
+             "exclude_tags": ["slow"]},
+        )
+
+    def test_no_tag_filter_is_null_in_dict(self):
+        report = repeat_suite(_suite(), lambda prompt: "19", repetitions=2)
+        self.assertIsNone(report.to_dict()["tag_filter"])
+
+    def test_exclude_only_filter_recorded(self):
+        report = repeat_suite(
+            _suite(), lambda prompt: "19", repetitions=2,
+            exclude_tags=["slow"],
+        )
+        self.assertEqual(
+            report.to_dict()["tag_filter"],
+            {"tags": [], "mode": "any", "exclude_tags": ["slow"]},
+        )
+
+    def test_invalid_tag_mode_rejected(self):
+        with self.assertRaises(ValueError):
+            repeat_suite(
+                _suite(), lambda prompt: "19", repetitions=2,
+                tags=["smoke"], tag_mode="bogus",
+            )
+
+    def test_format_stability_shows_tag_filter(self):
+        report = repeat_suite(
+            _suite(),
+            lambda prompt: "19",
+            repetitions=2,
+            tags=["smoke", "fast"],
+            tag_mode="all",
+            exclude_tags=["slow"],
+        )
+        text = format_stability(report)
+        self.assertIn("Tags: smoke, fast (mode all)", text)
+        self.assertIn("Excluded tags: slow", text)
+
+    def test_format_stability_omits_tag_line_without_filter(self):
+        report = repeat_suite(_suite(), lambda prompt: "19", repetitions=2)
+        self.assertNotIn("Tags:", format_stability(report))
+
+    def test_cli_repeat_records_tag_filter_in_report(self):
+        from agent_evals.cli import main
+
+        suite = Suite(
+            name="tagged",
+            cases=[
+                Case.from_dict({"id": "smoke-fast", "prompt": "2 + 3",
+                                "scorer": {"type": "exact", "expected": "5"},
+                                "tags": ["fast", "smoke"]}),
+                Case.from_dict({"id": "smoke-slow", "prompt": "2 + 3",
+                                "scorer": {"type": "exact", "expected": "5"},
+                                "tags": ["slow", "smoke"]}),
+                Case.from_dict({"id": "fast-only", "prompt": "2 + 3",
+                                "scorer": {"type": "exact", "expected": "5"},
+                                "tags": ["fast"]}),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            report_path = os.path.join(tmp, "stability.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(suite.to_dict(), f)
+            code = main([
+                "--suite", path,
+                "--agent", "examples.calculator_agent:agent",
+                "--tag", "smoke",
+                "--tag-mode", "all",
+                "--exclude-tag", "slow",
+                "--repeat", "2",
+                "--report", report_path,
+            ])
+            self.assertEqual(code, 0)
+            with open(report_path, encoding="utf-8") as f:
+                stability = json.load(f)
+            # Only the smoke case that is not slow was repeated.
+            self.assertEqual(
+                [c["case_id"] for c in stability["cases"]], ["smoke-fast"]
+            )
+            self.assertEqual(
+                stability["tag_filter"],
+                {"tags": ["smoke"], "mode": "all",
+                 "exclude_tags": ["slow"]},
+            )
 
 
 if __name__ == "__main__":
