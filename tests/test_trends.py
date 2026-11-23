@@ -277,6 +277,165 @@ class TestLatencyTrends(unittest.TestCase):
         self.assertNotIn("Slowest growing latency", text)
 
 
+class TestLatencyGate(unittest.TestCase):
+    def setUp(self):
+        self.trend = compare_history(_latency_history())
+        self.by_id = {c.case_id: c for c in self.trend.cases}
+
+    def test_gate_passes_on_flat_and_improving_trends(self):
+        # Slopes: slowing +3.3, improving -3.3, flat 0.0, gappy ~0.36
+        # ms/run. A 5.0 threshold lets every case through.
+        self.assertEqual(self.trend.latency_gate_failures(5.0), [])
+        self.assertTrue(self.trend.latency_gate_passed(5.0))
+
+    def test_gate_fails_on_steep_slowing_slope(self):
+        # A 3.0 threshold catches only the slowing case (+3.3).
+        failures = self.trend.latency_gate_failures(3.0)
+        self.assertEqual([c.case_id for c in failures], ["slowing"])
+        self.assertFalse(self.trend.latency_gate_passed(3.0))
+
+    def test_threshold_is_strict_and_respected(self):
+        # A slope exactly at the threshold passes: the threshold is
+        # a budget, not a tripwire.
+        self.assertEqual(self.trend.latency_gate_failures(3.3), [])
+        # Just below it, the same case trips the gate.
+        self.assertEqual(
+            [c.case_id for c in self.trend.latency_gate_failures(3.29)],
+            ["slowing"],
+        )
+
+    def test_gate_ranks_failures_by_slope(self):
+        # With a 0.0 threshold both growing cases trip, worst first.
+        failures = self.trend.latency_gate_failures(0.0)
+        self.assertEqual(
+            [c.case_id for c in failures], ["slowing", "gappy"]
+        )
+
+    def test_single_sample_case_never_trips_gate(self):
+        # "single" has one latency sample, so no slope at all.
+        self.assertIsNone(self.by_id["single"].latency_slope_ms_per_run)
+        self.assertNotIn(
+            "single",
+            [c.case_id for c in self.trend.latency_gate_failures(0.0)],
+        )
+
+    def test_slowing_cases_property(self):
+        self.assertEqual(
+            [c.case_id for c in self.trend.slowing_cases], ["slowing"]
+        )
+
+    def test_gate_fields_in_dict(self):
+        data = self.trend.to_dict(latency_gate_threshold_ms_per_run=3.0)
+        self.assertEqual(data["latency_gate_threshold_ms_per_run"], 3.0)
+        self.assertEqual(data["latency_gate_failures"], ["slowing"])
+        self.assertFalse(data["latency_gate_passed"])
+        # Without a threshold, the gate keys are absent.
+        plain = self.trend.to_dict()
+        self.assertNotIn("latency_gate_failures", plain)
+        self.assertNotIn("latency_gate_passed", plain)
+
+    def test_format_shows_gate_section(self):
+        text = format_trend(self.trend, latency_gate_threshold_ms_per_run=3.0)
+        self.assertIn("Latency gate FAILED", text)
+        self.assertIn("slowing (+3.30 ms/run", text)
+        passing = format_trend(
+            self.trend, latency_gate_threshold_ms_per_run=5.0
+        )
+        self.assertIn("Latency gate passed", passing)
+        self.assertNotIn("Latency gate FAILED", passing)
+
+
+class TestLatencyGateCli(unittest.TestCase):
+    def _write_reports(self, tmp, reports):
+        for i, report in enumerate(reports):
+            with open(os.path.join(tmp, f"run-{i}.json"), "w") as f:
+                json.dump(report, f)
+
+    def _run_cli(self, tmp, *extra):
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agent_evals.trends",
+                "--reports-dir",
+                tmp,
+                *extra,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=os.path.join(os.path.dirname(__file__), ".."),
+        )
+
+    def test_cli_fail_on_trend_trips_on_steep_slope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _latency_history())
+            proc = self._run_cli(tmp, "--fail-on-trend", "3.0")
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("Latency gate FAILED", proc.stdout)
+            self.assertIn("slowing", proc.stdout)
+
+    def test_cli_fail_on_trend_passes_below_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # All cases pass every run, so with a generous threshold
+            # the trend gates clean.
+            self._write_reports(tmp, _latency_history())
+            proc = self._run_cli(tmp, "--fail-on-trend", "5.0")
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn("Latency gate passed", proc.stdout)
+
+    def test_cli_fail_on_slowing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _latency_history())
+            proc = self._run_cli(tmp, "--fail-on-slowing")
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("Slowing gate FAILED", proc.stderr)
+            self.assertIn("slowing", proc.stderr)
+
+    def test_cli_fail_on_slowing_passes_when_nothing_slowing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Flat and improving cases only: no case is slowing.
+            flat = [
+                _report(
+                    "2026-11-21T10:00:00+00:00",
+                    [
+                        {"case_id": "flat", "passed": True, "latency_ms": 5.0},
+                        {"case_id": "improving", "passed": True, "latency_ms": 20.0},
+                    ],
+                ),
+                _report(
+                    "2026-11-21T11:00:00+00:00",
+                    [
+                        {"case_id": "flat", "passed": True, "latency_ms": 5.0},
+                        {"case_id": "improving", "passed": True, "latency_ms": 10.0},
+                    ],
+                ),
+            ]
+            self._write_reports(tmp, flat)
+            proc = self._run_cli(tmp, "--fail-on-slowing")
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn("Slowing cases (0)", proc.stdout)
+
+    def test_cli_json_carries_gate_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _latency_history())
+            out = os.path.join(tmp, "trend.json")
+            proc = self._run_cli(
+                tmp, "--fail-on-trend", "3.0", "--json", out
+            )
+            self.assertEqual(proc.returncode, 1)
+            with open(out) as f:
+                data = json.load(f)
+            self.assertEqual(data["latency_gate_failures"], ["slowing"])
+            self.assertFalse(data["latency_gate_passed"])
+
+    def test_cli_rejects_negative_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _latency_history())
+            proc = self._run_cli(tmp, "--fail-on-trend", "-1")
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("--fail-on-trend must not be negative", proc.stderr)
+
+
 class TestSingleReport(unittest.TestCase):
     def test_single_report_has_no_newly_failing_and_no_deltas(self):
         trend = compare_history(_history()[:1])

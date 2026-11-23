@@ -364,6 +364,39 @@ each case's first-to-last latency alongside its pass rate and score
 movement, and the JSON trend carries the full latency history per
 case.
 
+### Latency-trend CI gate
+
+A trend report is a warning until it can fail a build. Two flags
+turn the latency slope into a gate:
+
+```bash
+# Fail when any case's latency slope exceeds +2 ms per run
+python -m agent_evals.trends --reports-dir reports/ --fail-on-trend 2.0
+
+# Fail when any case is labelled "slowing" at all
+python -m agent_evals.trends --reports-dir reports/ --fail-on-slowing
+```
+
+`--fail-on-trend N` fails (exit 1) when any case's least-squares
+latency slope exceeds N ms per run. The comparison is strict — a
+slope exactly at the threshold passes — so the threshold is a
+budget, not a tripwire, and a case with fewer than two latency
+samples has no slope and never trips the gate. `--fail-on-slowing`
+fails when any case carries the `slowing` label (slope bigger than
+10% of its mean latency per run), which catches slow creep on fast
+cases whose absolute slope is too small for `--fail-on-trend` to
+notice. Either flag combines with the existing newly-failing rule:
+the exit code is 1 when a case newly failed, the slope gate tripped,
+or a case is slowing, and 0 otherwise. The text report names the
+cases that tripped the gate with their slope and mean latency, and
+the JSON output carries `latency_gate_threshold_ms_per_run`,
+`latency_gate_failures`, and `latency_gate_passed` (plus
+`slowing_cases` with `--fail-on-slowing`), so CI can report exactly
+which cases are getting slower and by how much. From Python,
+`TrendReport.latency_gate_failures(threshold)` returns the tripping
+cases worst first, and `latency_gate_passed(threshold)` is the
+boolean form.
+
 ## Eval-set versioning
 
 A suite file may carry an optional `"version"` label, e.g.
@@ -504,3 +537,8 @@ make demo    # run both example suites through the CLI
   least-squares slope per run, and a slowest-growing list, so a case
   that keeps passing but gets steadily slower is visible before it
   trips its latency budget.~~ (done in v0.9.0)
+- ~~Latency-trend CI gate: `--fail-on-trend N` fails the trend run
+  when any case's latency slope exceeds N ms per run, and
+  `--fail-on-slowing` fails it when any case is labelled slowing,
+  so latency creep can gate CI before a case trips its latency
+  budget.~~ (done in v0.10.0)

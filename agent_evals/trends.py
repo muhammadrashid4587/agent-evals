@@ -32,12 +32,17 @@ returned by ``load_report``), ordered oldest first, and builds a
 Usage:
     python -m agent_evals.trends --reports-dir reports/
     python -m agent_evals.trends --reports-dir reports/ --json trends.json
+    python -m agent_evals.trends --reports-dir reports/ --fail-on-trend 2.0
 
 The CLI loads every ``*.json`` file in the directory (sorted by the
 report's ``started_at``, falling back to filename order) and skips
 files that are not run reports. Exit code is 0 when nothing newly
 failed in the latest run, 1 when at least one case newly failed —
-the same gating rule as the two-run comparison.
+the same gating rule as the two-run comparison. ``--fail-on-trend
+N`` additionally fails the run when any case's latency slope exceeds
+N ms per run, and ``--fail-on-slowing`` fails it when any case is
+labelled ``"slowing"`` — so the trend report can gate a CI step on
+latency creep, not just on failures.
 """
 
 from __future__ import annotations
@@ -401,6 +406,39 @@ class TrendReport:
     def has_new_failure(self) -> bool:
         return bool(self.newly_failing)
 
+    def latency_gate_failures(
+        self, threshold_ms_per_run: float
+    ) -> list:
+        """Cases whose latency slope exceeds ``threshold_ms_per_run``
+        (ms per run), worst first: ranked by slope descending, ties
+        break on case_id. A case with fewer than two latency samples
+        has no slope and never trips the gate; a flat or improving
+        case has a slope at or below zero and never trips it either,
+        so the gate only fires on real, sustained slowing. The
+        comparison is strict — a slope exactly at the threshold
+        passes, so the threshold is a budget, not a tripwire."""
+        failures = [
+            c
+            for c in self.cases
+            if c.latency_slope_ms_per_run is not None
+            and c.latency_slope_ms_per_run > threshold_ms_per_run
+        ]
+        return sorted(
+            failures,
+            key=lambda c: (-c.latency_slope_ms_per_run, c.case_id),
+        )
+
+    def latency_gate_passed(self, threshold_ms_per_run: float) -> bool:
+        """True when no case's latency slope exceeds the threshold."""
+        return not self.latency_gate_failures(threshold_ms_per_run)
+
+    @property
+    def slowing_cases(self) -> list:
+        """Cases labelled ``"slowing"`` — slope bigger than 10% of
+        the case's mean latency per run — worst first, same ranking
+        as :attr:`slowest_growing`."""
+        return self.slowest_growing
+
     @property
     def slowest_growing(self) -> list:
         """Cases whose latency is trending up, worst first: ranked
@@ -447,8 +485,12 @@ class TrendReport:
             self.runs[-1].weighted_score - self.runs[0].weighted_score, 4
         )
 
-    def to_dict(self) -> dict:
-        return {
+    def to_dict(
+        self,
+        latency_gate_threshold_ms_per_run: Optional[float] = None,
+        fail_on_slowing: bool = False,
+    ) -> dict:
+        data = {
             "n_reports": self.n_reports,
             "pass_rate_delta": self.pass_rate_delta,
             "weighted_score_delta": self.weighted_score_delta,
@@ -460,6 +502,20 @@ class TrendReport:
             "runs": [r.to_dict() for r in self.runs],
             "cases": [c.to_dict() for c in self.cases],
         }
+        if latency_gate_threshold_ms_per_run is not None:
+            failures = self.latency_gate_failures(
+                latency_gate_threshold_ms_per_run
+            )
+            data["latency_gate_threshold_ms_per_run"] = (
+                latency_gate_threshold_ms_per_run
+            )
+            data["latency_gate_failures"] = [c.case_id for c in failures]
+            data["latency_gate_passed"] = not failures
+        if fail_on_slowing:
+            data["slowing_cases"] = [
+                c.case_id for c in self.slowing_cases
+            ]
+        return data
 
 
 def _results_by_id(report: dict) -> dict:
@@ -574,8 +630,17 @@ def load_reports_dir(directory: str) -> list:
     return loaded
 
 
-def format_trend(trend: TrendReport) -> str:
-    """Render a trend report as a plain-text summary."""
+def format_trend(
+    trend: TrendReport,
+    latency_gate_threshold_ms_per_run: Optional[float] = None,
+    fail_on_slowing: bool = False,
+) -> str:
+    """Render a trend report as a plain-text summary.
+
+    When ``latency_gate_threshold_ms_per_run`` is given, a section
+    lists the cases whose slope tripped the gate (or says the gate
+    passed); when ``fail_on_slowing`` is given, the slowing cases
+    are called out the same way."""
     lines = [f"Reports: {trend.n_reports}"]
     if trend.runs:
         first = trend.runs[0]
@@ -665,6 +730,48 @@ def format_trend(trend: TrendReport) -> str:
             f"mean {c.mean_latency_ms:.1f} ms)"
         ),
     )
+    if latency_gate_threshold_ms_per_run is not None:
+        failures = trend.latency_gate_failures(
+            latency_gate_threshold_ms_per_run
+        )
+        if failures:
+            lines.append(
+                f"Latency gate FAILED "
+                f"(threshold +{latency_gate_threshold_ms_per_run:.2f} "
+                f"ms/run, {len(failures)} case(s) over):"
+            )
+            for case in failures:
+                lines.append(
+                    f"  {case.case_id} "
+                    f"(+{case.latency_slope_ms_per_run:.2f} ms/run, "
+                    f"mean {case.mean_latency_ms:.1f} ms, "
+                    f"trend {case.latency_trend})"
+                )
+            lines.append("")
+        else:
+            lines.append(
+                f"Latency gate passed "
+                f"(no case over +{latency_gate_threshold_ms_per_run:.2f} "
+                f"ms/run)"
+            )
+            lines.append("")
+    if fail_on_slowing:
+        slowing = trend.slowing_cases
+        if slowing:
+            lines.append(
+                f"Slowing cases ({len(slowing)}): "
+                f"the gate fails on any case labelled slowing:"
+            )
+            for case in slowing:
+                lines.append(
+                    f"  {case.case_id} "
+                    f"(+{case.latency_slope_ms_per_run:.2f} ms/run, "
+                    f"mean {case.mean_latency_ms:.1f} ms)"
+                )
+            lines.append("")
+        else:
+            lines.append("Slowing cases (0): none labelled slowing")
+            lines.append("")
     lines.append("Per-case trend:")
     lines.append(
         f"{'case':<22} {'runs':>4} {'pass rate':>10} "
@@ -715,7 +822,27 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--json", help="optional path to write the trend report as JSON"
     )
+    parser.add_argument(
+        "--fail-on-trend",
+        type=float,
+        default=None,
+        metavar="MS_PER_RUN",
+        help="fail (exit 1) when any case's latency slope exceeds "
+        "this many ms per run — a CI gate on latency creep, so a "
+        "case that keeps passing but gets steadily slower fails "
+        "the build before it trips its latency budget",
+    )
+    parser.add_argument(
+        "--fail-on-slowing",
+        action="store_true",
+        help="fail (exit 1) when any case is labelled \"slowing\" "
+        "(slope bigger than 10% of the case's mean latency per "
+        "run); catches slow creep on fast cases whose absolute "
+        "slope is too small for --fail-on-trend to notice",
+    )
     args = parser.parse_args(argv)
+    if args.fail_on_trend is not None and args.fail_on_trend < 0:
+        parser.error("--fail-on-trend must not be negative")
 
     try:
         reports = load_reports_dir(args.reports_dir)
@@ -728,13 +855,45 @@ def main(argv=None) -> int:
         )
         return 2
     trend = compare_history(reports)
-    print(format_trend(trend))
+    gate_failures = (
+        trend.latency_gate_failures(args.fail_on_trend)
+        if args.fail_on_trend is not None
+        else []
+    )
+    slowing = trend.slowing_cases if args.fail_on_slowing else []
+    print(
+        format_trend(
+            trend,
+            latency_gate_threshold_ms_per_run=args.fail_on_trend,
+            fail_on_slowing=args.fail_on_slowing,
+        )
+    )
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:
-            json.dump(trend.to_dict(), f, indent=2)
+            json.dump(
+                trend.to_dict(
+                    latency_gate_threshold_ms_per_run=args.fail_on_trend,
+                    fail_on_slowing=args.fail_on_slowing,
+                ),
+                f,
+                indent=2,
+            )
             f.write("\n")
         print(f"\nTrend report written to {args.json}")
-    return 1 if trend.has_new_failure else 0
+    if gate_failures:
+        print(
+            f"\nLatency gate FAILED: {len(gate_failures)} case(s) over "
+            f"+{args.fail_on_trend:.2f} ms/run: "
+            + ", ".join(c.case_id for c in gate_failures),
+            file=sys.stderr,
+        )
+    if slowing:
+        print(
+            f"\nSlowing gate FAILED: {len(slowing)} case(s) labelled "
+            f"slowing: " + ", ".join(c.case_id for c in slowing),
+            file=sys.stderr,
+        )
+    return 1 if (trend.has_new_failure or gate_failures or slowing) else 0
 
 
 if __name__ == "__main__":
