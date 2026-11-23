@@ -5,7 +5,7 @@ unless you register a judge that calls one (see ``agent_evals.judge``).
 The agent under test is a plain Python callable.
 """
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 from .evals import (
     Case,
@@ -26,6 +26,7 @@ from .judge import (
     make_http_judge,
     stub_judge,
 )
+from .junit import to_junit_xml
 from .stability import (
     CaseStability,
     StabilityReport,
@@ -62,6 +63,7 @@ __all__ = [
     "run_suite",
     "score_case",
     "stub_judge",
+    "to_junit_xml",
 ]
 
 

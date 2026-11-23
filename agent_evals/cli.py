@@ -10,8 +10,9 @@ The agent is named as ``module:attribute`` and must be a callable taking a
 prompt string. Exit code is 0 when every case passes, 1 otherwise. A case
 that passes its checks but exceeds its ``max_latency_ms`` budget is
 reported as a budget violation, not a pass, but does not fail the run
-unless ``--fail-on-budget`` is given. ``--workers N`` runs cases
-concurrently on a thread pool (default 1); the agent must be
+unless ``--fail-on-budget`` is given. ``--report`` writes the JSON
+report; ``--junit`` writes the same run as JUnit XML for CI ingestion.
+``--workers N`` runs cases concurrently on a thread pool (default 1); the agent must be
 thread-safe for more than 1. ``--repeat N`` runs the whole suite N
 times and reports per-case pass rates, flagging flaky cases; the run
 only passes when every case passed every time. Cases with a ``judge``
@@ -66,6 +67,12 @@ def main(argv=None) -> int:
         "--report", help="optional path to write the JSON report to"
     )
     parser.add_argument(
+        "--junit",
+        help="optional path to write the report as JUnit XML, so CI "
+        "systems can ingest eval results (not supported with "
+        "--repeat, which reports stability, not a single run)",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -113,6 +120,8 @@ def main(argv=None) -> int:
     if args.judge_url:
         judges["http"] = make_http_judge(args.judge_url)
     if args.repeat > 1:
+        if args.junit:
+            parser.error("--junit is not supported with --repeat")
         stability = repeat_suite(
             suite, agent, args.repeat, workers=args.workers, judges=judges
         )
@@ -127,6 +136,9 @@ def main(argv=None) -> int:
     if args.report:
         report.save(args.report)
         print(f"\nReport written to {args.report}")
+    if args.junit:
+        report.save_junit(args.junit)
+        print(f"JUnit report written to {args.junit}")
     if args.fail_on_budget:
         return 0 if report.passed == report.total else 1
     # Without --fail-on-budget, only genuine check failures fail the run;

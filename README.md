@@ -25,7 +25,8 @@ cases count more than others, and some scorers give partial credit.
   that passes its checks but exceeds its latency budget does not fail
   the run unless `--fail-on-budget` is given). With `--repeat N` it
   runs the suite N times and flags flaky cases that pass sometimes
-  and fail other times.
+  and fail other times. With `--junit results.xml` it also writes the
+  run as JUnit XML, so CI systems can ingest the results.
 
 ## What it is not
 
@@ -397,6 +398,41 @@ which cases are getting slower and by how much. From Python,
 cases worst first, and `latency_gate_passed(threshold)` is the
 boolean form.
 
+## JUnit XML export
+
+Most CI systems understand JUnit XML even though they know nothing
+about eval harnesses. `--junit results.xml` writes the same run as
+one `<testsuite>` (named after the suite), with one `<testcase>` per
+case and the latency in seconds:
+
+```bash
+python -m agent_evals.cli --suite examples/calculator.json \
+    --agent examples.calculator_agent:agent --junit results.xml
+```
+
+Or from Python:
+
+```python
+from agent_evals import to_junit_xml
+
+xml = to_junit_xml(report)
+report.save_junit("results.xml")
+```
+
+A case that failed its checks becomes a `<failure>` whose message is
+the result's detail; a case that could not be scored at all — a
+timeout, an agent crash, or a scorer error — becomes an `<error>`
+instead, because the failure was in the harness or the agent, not in
+the answer. A budget violation is a `<failure>`: the answer was
+right but too slow, and the detail says by how much. The suite
+version, fingerprint, and weighted score ride along as
+`<properties>`, so a CI job can tell which eval set a run was
+measured against. Agent output can contain control characters that
+are illegal in XML 1.0, so details are sanitised before they are
+written (anything below U+0020 other than tab, newline, and carriage
+return becomes U+FFFD). `--junit` is not supported with `--repeat`,
+which reports stability across runs rather than a single run.
+
 ## Eval-set versioning
 
 A suite file may carry an optional `"version"` label, e.g.
@@ -542,3 +578,8 @@ make demo    # run both example suites through the CLI
   `--fail-on-slowing` fails it when any case is labelled slowing,
   so latency creep can gate CI before a case trips its latency
   budget.~~ (done in v0.10.0)
+- ~~JUnit XML export: `--junit results.xml` writes a run as JUnit
+  XML — check failures as `<failure>`, timeouts, agent crashes,
+  and scorer errors as `<error>`, budget violations as
+  `<failure>` — so CI systems can ingest eval results.~~ (done in
+  v0.11.0)

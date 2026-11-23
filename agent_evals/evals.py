@@ -768,6 +768,15 @@ class RunReport:
             json.dump(self.to_dict(), f, indent=2)
             f.write("\n")
 
+    def save_junit(self, path: str) -> None:
+        """Write this report as JUnit XML (see :mod:`agent_evals.junit`),
+        so CI systems can ingest eval results."""
+        from .junit import to_junit_xml
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(to_junit_xml(self))
+            f.write("\n")
+
 
 def load_report(path: str) -> dict:
     """Load a saved JSON report back as a dict."""
