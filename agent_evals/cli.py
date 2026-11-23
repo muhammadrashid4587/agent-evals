@@ -22,7 +22,9 @@ under the name ``"custom"``, and ``--judge-url URL`` registers an HTTP
 judge under the name ``"http"``. ``--tag TAG`` (repeatable) runs only
 the cases carrying that tag, so a smoke run is ``--tag smoke``;
 ``--tag-mode all`` requires a case to carry every given tag instead
-of any one of them.
+of any one of them. ``--exclude-tag TAG`` (repeatable) skips the
+cases carrying that tag, and combines with ``--tag`` (select first,
+then exclude).
 """
 
 from __future__ import annotations
@@ -126,19 +128,50 @@ def main(argv=None) -> int:
         "carrying at least one of them (default), 'all' runs only a "
         "case carrying every one of them",
     )
+    parser.add_argument(
+        "--exclude-tag",
+        action="append",
+        default=[],
+        metavar="TAG",
+        help="skip cases carrying this tag; repeatable, e.g. "
+        "--exclude-tag slow skips the slow cases, and it combines "
+        "with --tag (select first, then exclude)",
+    )
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be a positive integer")
     if args.repeat < 1:
         parser.error("--repeat must be a positive integer")
 
-    suite = load_suite(args.suite)
+    loaded = load_suite(args.suite)
+    suite = loaded
     if args.tag:
         suite = suite.select(args.tag, match=args.tag_mode)
         if not suite.cases:
             print(
                 f"no cases match tag(s) {', '.join(args.tag)} "
                 f"(mode {args.tag_mode}) in {args.suite}",
+                file=sys.stderr,
+            )
+            return 2
+    if args.exclude_tag:
+        # A typo in an excluded tag would silently exclude nothing,
+        # so an excluded tag that matches no case in the loaded suite
+        # is an error, same as a --tag that matches nothing.
+        known = {t for c in loaded.cases for t in c.tags}
+        unknown = [t for t in args.exclude_tag if t not in known]
+        if unknown:
+            print(
+                f"no cases carry excluded tag(s) {', '.join(unknown)} "
+                f"in {args.suite}",
+                file=sys.stderr,
+            )
+            return 2
+        suite = suite.exclude(args.exclude_tag)
+        if not suite.cases:
+            print(
+                f"no cases remain after excluding tag(s) "
+                f"{', '.join(args.exclude_tag)} in {args.suite}",
                 file=sys.stderr,
             )
             return 2

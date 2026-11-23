@@ -305,6 +305,22 @@ class Suite:
             kept = [c for c in self.cases if all(t in c.tags for t in wanted)]
         return Suite(name=self.name, cases=kept, version=self.version)
 
+    def exclude(self, tags: list) -> "Suite":
+        """Return a new suite without the cases carrying any of ``tags``.
+
+        A case is dropped when it carries at least one of the given
+        tags, whatever its other tags are. An empty tag list returns
+        the whole suite unchanged. The original suite is not modified,
+        and the version label carries over. Pairs with
+        :meth:`select`: select first, then exclude, so ``--tag smoke
+        --exclude-tag slow`` runs the smoke cases that are not slow.
+        """
+        dropped = [str(t) for t in tags]
+        if not dropped:
+            return Suite(name=self.name, cases=list(self.cases), version=self.version)
+        kept = [c for c in self.cases if not any(t in c.tags for t in dropped)]
+        return Suite(name=self.name, cases=kept, version=self.version)
+
     def fingerprint(self) -> str:
         """A short content hash of this eval set: its name and every
         case. Two suites with the same fingerprint contain the same

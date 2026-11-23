@@ -104,6 +104,43 @@ class TestSuiteSelect(unittest.TestCase):
             _suite().select(["smoke"], match="xor")
 
 
+class TestSuiteExclude(unittest.TestCase):
+    def test_exclude_drops_cases_carrying_the_tag(self):
+        excluded = _suite().exclude(["slow"])
+        self.assertEqual(
+            [c.id for c in excluded.cases],
+            ["smoke-fast", "fast-only", "untagged"],
+        )
+
+    def test_exclude_multiple_tags(self):
+        excluded = _suite().exclude(["slow", "fast"])
+        self.assertEqual([c.id for c in excluded.cases], ["untagged"])
+
+    def test_exclude_unknown_tag_drops_nothing(self):
+        excluded = _suite().exclude(["nope"])
+        self.assertEqual(len(excluded.cases), 4)
+
+    def test_empty_exclude_list_returns_whole_suite(self):
+        excluded = _suite().exclude([])
+        self.assertEqual(
+            [c.id for c in excluded.cases], [c.id for c in _suite().cases]
+        )
+
+    def test_exclude_does_not_mutate_original(self):
+        suite = _suite()
+        suite.exclude(["smoke"])
+        self.assertEqual(len(suite.cases), 4)
+
+    def test_exclude_keeps_version(self):
+        suite = Suite(name="v", cases=[_case("a", ["smoke"])], version="1.1")
+        self.assertEqual(suite.exclude(["smoke"]).version, "1.1")
+
+    def test_select_then_exclude(self):
+        # --tag smoke --exclude-tag slow: the smoke cases that are not slow.
+        selected = _suite().select(["smoke"]).exclude(["slow"])
+        self.assertEqual([c.id for c in selected.cases], ["smoke-fast"])
+
+
 class TestTagsInReports(unittest.TestCase):
     def test_results_carry_case_tags(self):
         report = run_suite(_suite(), lambda prompt: "yes")
@@ -211,6 +248,73 @@ class TestCliTagFlag(unittest.TestCase):
                 sorted(c["case_id"] for c in stability["cases"]),
                 ["smoke-fast", "smoke-slow"],
             )
+
+    def test_cli_exclude_tag_skips_matching_cases(self):
+        from agent_evals.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_suite(tmp)
+            report_path = os.path.join(tmp, "report.json")
+            code = main([
+                "--suite", path,
+                "--agent", "examples.calculator_agent:agent",
+                "--exclude-tag", "slow",
+                "--report", report_path,
+            ])
+            self.assertEqual(code, 0)
+            with open(report_path, encoding="utf-8") as f:
+                report = json.load(f)
+            self.assertEqual(
+                [r["case_id"] for r in report["results"]],
+                ["smoke-fast", "fast-only", "untagged"],
+            )
+
+    def test_cli_exclude_tag_combines_with_tag(self):
+        from agent_evals.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_suite(tmp)
+            report_path = os.path.join(tmp, "report.json")
+            code = main([
+                "--suite", path,
+                "--agent", "examples.calculator_agent:agent",
+                "--tag", "smoke",
+                "--exclude-tag", "slow",
+                "--report", report_path,
+            ])
+            self.assertEqual(code, 0)
+            with open(report_path, encoding="utf-8") as f:
+                report = json.load(f)
+            self.assertEqual(
+                [r["case_id"] for r in report["results"]], ["smoke-fast"]
+            )
+
+    def test_cli_exclude_unknown_tag_exits_2(self):
+        from agent_evals.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_suite(tmp)
+            code = main([
+                "--suite", path,
+                "--agent", "examples.calculator_agent:agent",
+                "--exclude-tag", "nope",
+            ])
+        self.assertEqual(code, 2)
+
+    def test_cli_exclude_everything_exits_2(self):
+        # --tag smoke selects two cases; excluding smoke as well
+        # leaves none, which is an error, not a silent empty pass.
+        from agent_evals.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_suite(tmp)
+            code = main([
+                "--suite", path,
+                "--agent", "examples.calculator_agent:agent",
+                "--tag", "smoke",
+                "--exclude-tag", "smoke",
+            ])
+        self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":

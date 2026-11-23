@@ -252,6 +252,15 @@ no cases exits 2 with a message naming the tags and the mode, so a
 typo fails loudly instead of silently passing an empty run. Tags
 also work with `--repeat` and `--workers`.
 
+To skip cases instead of selecting them, `--exclude-tag slow` drops
+every case carrying `slow` (repeatable), and it combines with
+`--tag`: select first, then exclude, so `--tag smoke --exclude-tag
+slow` runs the smoke cases that are not slow. From Python,
+`suite.exclude(["slow"])` returns the suite without the slow cases.
+An excluded tag that matches no case in the suite is the same clean
+error as an unmatched `--tag` — a typo that would otherwise silently
+exclude nothing — and excluding every case exits 2 as well.
+
 Tags are recorded per result in the JSON report (`"tags"`) and shown
 in the summary after the detail, e.g. `exact match  [arithmetic,
 smoke]`. Tags are part of a case's fingerprint, so retagging a case
@@ -621,3 +630,8 @@ make demo    # run both example suites through the CLI
   `--tag smoke` runs only the matching cases (`--tag-mode all`
   requires every tag), with tags recorded per result in the JSON
   report and shown in the summary.~~ (done in v0.12.0)
+- ~~`--exclude-tag` filtering: skip the cases carrying a tag
+  (`--exclude-tag slow`), repeatable, combining with `--tag`
+  (select first, then exclude); an excluded tag that matches no
+  case is a clean error, same as an unmatched `--tag`.~~ (done in
+  v0.13.0)
