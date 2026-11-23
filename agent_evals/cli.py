@@ -24,7 +24,10 @@ the cases carrying that tag, so a smoke run is ``--tag smoke``;
 ``--tag-mode all`` requires a case to carry every given tag instead
 of any one of them. ``--exclude-tag TAG`` (repeatable) skips the
 cases carrying that tag, and combines with ``--tag`` (select first,
-then exclude).
+then exclude). ``--list-tags`` lists the tags used in the suite with
+their per-tag case counts and exits without running the agent, and a
+run report carries a per-tag pass-rate breakdown (see
+``RunReport.tag_breakdown``).
 """
 
 from __future__ import annotations
@@ -65,8 +68,8 @@ def main(argv=None) -> int:
     parser.add_argument("--suite", required=True, help="path to a suite JSON file")
     parser.add_argument(
         "--agent",
-        required=True,
-        help="agent to test, as module:attribute (e.g. examples.calculator_agent:agent)",
+        help="agent to test, as module:attribute (e.g. examples.calculator_agent:agent); "
+        "required unless --list-tags is given, which never runs the agent",
     )
     parser.add_argument(
         "--report", help="optional path to write the JSON report to"
@@ -137,7 +140,17 @@ def main(argv=None) -> int:
         "--exclude-tag slow skips the slow cases, and it combines "
         "with --tag (select first, then exclude)",
     )
+    parser.add_argument(
+        "--list-tags",
+        action="store_true",
+        help="list the tags used in the suite with their per-tag case "
+        "counts and exit, without running the agent (applies --tag "
+        "and --exclude-tag first, so it lists the tags of the "
+        "selected set)",
+    )
     args = parser.parse_args(argv)
+    if not args.list_tags and not args.agent:
+        parser.error("--agent is required unless --list-tags is given")
     if args.workers < 1:
         parser.error("--workers must be a positive integer")
     if args.repeat < 1:
@@ -175,6 +188,19 @@ def main(argv=None) -> int:
                 file=sys.stderr,
             )
             return 2
+    if args.list_tags:
+        # Listing never runs the agent, so --agent is not needed and
+        # is never imported here.
+        counts = suite.tag_counts()
+        if not counts:
+            print(f"no tags in {args.suite}")
+        else:
+            print(f"Tags in {args.suite}:")
+            width = max(len(tag) for tag, _ in counts)
+            for tag, count in counts:
+                noun = "case" if count == 1 else "cases"
+                print(f"  {tag:<{width}}  {count} {noun}")
+        return 0
     agent = load_agent(args.agent)
     judges = dict(DEFAULT_JUDGES)
     if args.judge:

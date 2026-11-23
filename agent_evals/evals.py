@@ -35,7 +35,10 @@ Design
   ``"slow"``. Tags are recorded per result in the report and shown in
   the summary, and a suite can be filtered to the cases carrying a
   tag (see :meth:`Suite.select`) — so a quick smoke run or a
-  slow-only run is one flag away.
+  slow-only run is one flag away. :meth:`Suite.tag_counts` lists
+  every tag with its case count, and a run report carries a
+  per-tag pass-rate breakdown (``RunReport.tag_breakdown``), so a
+  tag that keeps failing is visible without digging through rows.
 
 * When an ``exact`` case fails, the result carries a unified diff of
   the expected output vs the actual output (``Result.diff``, also in
@@ -320,6 +323,20 @@ class Suite:
             return Suite(name=self.name, cases=list(self.cases), version=self.version)
         kept = [c for c in self.cases if not any(t in c.tags for t in dropped)]
         return Suite(name=self.name, cases=kept, version=self.version)
+
+    def tag_counts(self) -> list:
+        """Count cases per tag: a sorted list of ``(tag, count)`` pairs.
+
+        A case carrying several tags counts once under each of them;
+        untagged cases appear under no tag. An empty list means the
+        suite uses no tags at all. This is what the CLI's
+        ``--list-tags`` prints.
+        """
+        counts: dict = {}
+        for case in self.cases:
+            for tag in case.tags:
+                counts[tag] = counts.get(tag, 0) + 1
+        return sorted(counts.items())
 
     def fingerprint(self) -> str:
         """A short content hash of this eval set: its name and every
@@ -818,6 +835,44 @@ class RunReport:
     def budget_violations(self) -> int:
         return sum(1 for r in self.results if r.budget_violated)
 
+    @property
+    def tag_breakdown(self) -> dict:
+        """Per-tag pass rates: tag -> ``{"cases", "passed",
+        "pass_rate", "weighted_score"}``.
+
+        A result carrying several tags counts under each of them, so
+        a case tagged both ``"smoke"`` and ``"fast"`` counts toward
+        both tags' pass rates; untagged results appear under no tag.
+        ``weighted_score`` is the tag's earned weight over its total
+        weight, so a heavy case counts more, the same as in the
+        run-wide weighted score. An empty dict means no case in the
+        run carried a tag.
+        """
+        stats: dict = {}
+        for r in self.results:
+            for tag in r.tags:
+                entry = stats.setdefault(
+                    tag,
+                    {"cases": 0, "passed": 0, "earned": 0.0, "total": 0.0},
+                )
+                entry["cases"] += 1
+                entry["passed"] += 1 if r.passed else 0
+                entry["earned"] += r.score * r.weight
+                entry["total"] += r.weight
+        return {
+            tag: {
+                "cases": entry["cases"],
+                "passed": entry["passed"],
+                "pass_rate": (
+                    entry["passed"] / entry["cases"] if entry["cases"] else 0.0
+                ),
+                "weighted_score": (
+                    entry["earned"] / entry["total"] if entry["total"] else 0.0
+                ),
+            }
+            for tag, entry in sorted(stats.items())
+        }
+
     def to_dict(self) -> dict:
         return {
             "suite": self.suite,
@@ -832,6 +887,15 @@ class RunReport:
             "earned_weight": round(self.earned_weight, 4),
             "weighted_score": round(self.weighted_score, 4),
             "budget_violations": self.budget_violations,
+            "tag_breakdown": {
+                tag: {
+                    "cases": entry["cases"],
+                    "passed": entry["passed"],
+                    "pass_rate": round(entry["pass_rate"], 4),
+                    "weighted_score": round(entry["weighted_score"], 4),
+                }
+                for tag, entry in self.tag_breakdown.items()
+            },
             "total_latency_ms": round(self.total_latency_ms, 3),
             "total_tokens": self.total_tokens,
             "results": [r.to_dict() for r in self.results],
@@ -1074,4 +1138,16 @@ def format_summary(report: RunReport) -> str:
                 lines.append(
                     f"    ... ({len(r.diff.splitlines()) - 30} more diff lines)"
                 )
+    breakdown = report.tag_breakdown
+    if breakdown:
+        # A tag that keeps failing is visible at a glance, without
+        # digging through the per-case rows.
+        lines.append("")
+        lines.append("Per-tag pass rates:")
+        width = max(len(tag) for tag in breakdown)
+        for tag, stats in breakdown.items():
+            lines.append(
+                f"  {tag:<{width}}  {stats['passed']}/{stats['cases']} "
+                f"({stats['pass_rate'] * 100:.1f}%)"
+            )
     return "\n".join(lines)

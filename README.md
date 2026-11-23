@@ -268,6 +268,30 @@ changes it — but only the set of tags matters, not their order, and
 duplicates are dropped when the suite loads. A non-list `tags`, or a
 tag that is not a non-empty string, is rejected when the suite loads.
 
+To see which tags a suite uses before running it, `--list-tags`
+prints every tag with its case count and exits without running the
+agent (`--agent` is not needed for it), and it applies `--tag` and
+`--exclude-tag` first, so it lists the tags of the selected set:
+
+```bash
+python -m agent_evals.cli --suite examples/calculator.json --list-tags
+# Tags in examples/calculator.json:
+#   arithmetic  5 cases
+#   negative    1 case
+#   smoke       2 cases
+```
+
+Or from Python: `suite.tag_counts()` returns the same list of
+`(tag, count)` pairs, sorted by tag.
+
+A run report also carries a per-tag pass-rate breakdown, so a tag
+that keeps failing is visible without digging through the rows: the
+JSON report has a `tag_breakdown` object mapping each tag to its
+case count, pass count, pass rate, and weighted score, and the text
+summary ends with a `Per-tag pass rates:` section. A case carrying
+several tags counts under each of them; untagged cases appear under
+no tag.
+
 ## Parallel execution
 
 `run_suite(suite, agent, workers=N)` runs cases concurrently on a
@@ -557,6 +581,10 @@ as JSON. `repetitions` must be a positive integer.
   "earned_weight": 9.0,
   "weighted_score": 1.0,
   "budget_violations": 0,
+  "tag_breakdown": {
+    "smoke": {"cases": 2, "passed": 2, "pass_rate": 1.0,
+              "weighted_score": 1.0}
+  },
   "total_latency_ms": 1.234,
   "total_tokens": null,
   "results": [
@@ -635,3 +663,9 @@ make demo    # run both example suites through the CLI
   (select first, then exclude); an excluded tag that matches no
   case is a clean error, same as an unmatched `--tag`.~~ (done in
   v0.13.0)
+- ~~`--list-tags` and per-tag pass rates: `--list-tags` lists every
+  tag in the suite with its case count and exits without running
+  the agent, and a run report carries a per-tag pass-rate
+  breakdown (`tag_breakdown` in JSON, a `Per-tag pass rates:`
+  section in the text summary), so a tag that keeps failing is
+  visible at a glance.~~ (done in v0.14.0)
