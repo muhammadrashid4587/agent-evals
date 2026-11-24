@@ -57,7 +57,12 @@ run when a case's token slope exceeds N tokens per run, or when any
 case is labelled ``"rising"`` on tokens. Token trends only cover
 cases whose agent reported a token count; an agent that returns a
 plain string reports no tokens, so its cases have no token history
-at all.
+at all. ``--fail-on-lose-per-tag RUN`` fails the run when the named
+baseline run won strictly more cases under any tag than any other
+run in the history — the per-tag variant of the per-case gate, using
+the ``case_wins_by_tag`` breakdown, so a run that keeps losing a
+whole tag case by case fails CI even if it wins the aggregate. A tie
+in wins under a tag is not a loss.
 """
 
 from __future__ import annotations
@@ -730,6 +735,50 @@ class TrendReport:
                     entry["wins"][run_paths[case.winner_run_index]] += 1
         return dict(sorted(breakdown.items()))
 
+    def per_tag_losers_to(self, baseline: str) -> list:
+        """The (tag, run) pairs the named baseline run beats on
+        case wins under that tag.
+
+        Returns a list of ``{"tag": tag, "run": run_path,
+        "baseline_wins": n, "run_wins": n}`` dicts, sorted by tag
+        then run order. A run loses to the baseline under a tag
+        when the baseline won strictly more cases under that tag
+        than it did — a tie in wins under a tag is not a loss,
+        mirroring the per-case gate: a run can win the aggregate
+        while losing a whole tag case by case, and this gate is
+        what catches that. The baseline is matched by run path,
+        the same identifier the per-run table and
+        :meth:`case_wins_by_tag` use. Raises ``ValueError`` when
+        ``baseline`` is not one of the runs in the history.
+        """
+        run_paths = [run.path for run in self.runs]
+        if baseline not in run_paths:
+            raise ValueError(
+                f"baseline {baseline!r} is not one of the runs in "
+                f"the history: {', '.join(run_paths)}"
+            )
+        losers = []
+        for tag, entry in self.case_wins_by_tag().items():
+            baseline_wins = entry["wins"][baseline]
+            for path in run_paths:
+                if path == baseline:
+                    continue
+                if baseline_wins > entry["wins"][path]:
+                    losers.append(
+                        {
+                            "tag": tag,
+                            "run": path,
+                            "baseline_wins": baseline_wins,
+                            "run_wins": entry["wins"][path],
+                        }
+                    )
+        return losers
+
+    def per_tag_gate_passed(self, baseline: str) -> bool:
+        """True when the named baseline run beat no other run on
+        case wins under any tag."""
+        return not self.per_tag_losers_to(baseline)
+
     @property
     def slowest_growing(self) -> list:
         """Cases whose latency is trending up, worst first: ranked
@@ -782,6 +831,7 @@ class TrendReport:
         fail_on_slowing: bool = False,
         cost_gate_threshold_tokens_per_run: Optional[float] = None,
         fail_on_rising_cost: bool = False,
+        fail_on_lose_per_tag: Optional[str] = None,
     ) -> dict:
         data = {
             "n_reports": self.n_reports,
@@ -826,6 +876,11 @@ class TrendReport:
             data["rising_cost_cases"] = [
                 c.case_id for c in self.rising_cost_cases
             ]
+        if fail_on_lose_per_tag is not None:
+            failures = self.per_tag_losers_to(fail_on_lose_per_tag)
+            data["per_tag_gate_baseline"] = fail_on_lose_per_tag
+            data["per_tag_gate_failures"] = failures
+            data["per_tag_gate_passed"] = not failures
         return data
 
 
@@ -971,6 +1026,7 @@ def format_trend(
     fail_on_slowing: bool = False,
     cost_gate_threshold_tokens_per_run: Optional[float] = None,
     fail_on_rising_cost: bool = False,
+    fail_on_lose_per_tag: Optional[str] = None,
 ) -> str:
     """Render a trend report as a plain-text summary.
 
@@ -981,7 +1037,10 @@ def format_trend(
     lists the cases whose slope tripped the gate (or says the gate
     passed); when ``fail_on_slowing`` is given, the slowing cases
     are called out the same way. ``cost_gate_threshold_tokens_per_run``
-    and ``fail_on_rising_cost`` do the same for token cost."""
+    and ``fail_on_rising_cost`` do the same for token cost. When
+    ``fail_on_lose_per_tag`` names a baseline run, a section lists
+    the tags under which that run beat another run on case wins
+    (or says the gate passed)."""
     lines = [f"Reports: {trend.n_reports}"]
     if trend.runs:
         first = trend.runs[0]
@@ -1116,6 +1175,28 @@ def format_trend(
                 f"ties {entry['ties']}"
             )
         lines.append("")
+    if fail_on_lose_per_tag is not None:
+        failures = trend.per_tag_losers_to(fail_on_lose_per_tag)
+        if failures:
+            lines.append(
+                f"Per-tag gate FAILED "
+                f"(baseline {fail_on_lose_per_tag!r} won more cases "
+                f"than another run under a tag):"
+            )
+            for failure in failures:
+                lines.append(
+                    f"  {failure['tag']}: {fail_on_lose_per_tag!r} "
+                    f"{failure['baseline_wins']} vs "
+                    f"{failure['run']!r} {failure['run_wins']}"
+                )
+            lines.append("")
+        else:
+            lines.append(
+                f"Per-tag gate passed "
+                f"(baseline {fail_on_lose_per_tag!r} beat no other "
+                f"run under any tag)"
+            )
+            lines.append("")
     if latency_gate_threshold_ms_per_run is not None:
         failures = trend.latency_gate_failures(
             latency_gate_threshold_ms_per_run
@@ -1274,7 +1355,7 @@ def main(argv=None) -> int:
         "--fail-on-slowing",
         action="store_true",
         help="fail (exit 1) when any case is labelled \"slowing\" "
-        "(slope bigger than 10% of the case's mean latency per "
+        "(slope bigger than 10%% of the case's mean latency per "
         "run); catches slow creep on fast cases whose absolute "
         "slope is too small for --fail-on-trend to notice",
     )
@@ -1292,10 +1373,21 @@ def main(argv=None) -> int:
         "--fail-on-rising-cost",
         action="store_true",
         help="fail (exit 1) when any case is labelled \"rising\" "
-        "on tokens (slope bigger than 10% of the case's mean "
+        "on tokens (slope bigger than 10%% of the case's mean "
         "token count per run); catches cost creep on cheap cases "
         "whose absolute slope is too small for "
         "--fail-on-cost-trend to notice",
+    )
+    parser.add_argument(
+        "--fail-on-lose-per-tag",
+        metavar="RUN",
+        help="fail (exit 1) when the named baseline run (by path, "
+        "as shown in the per-run table) won strictly more cases "
+        "under any tag than any other run in the history — the "
+        "per-tag variant of the per-case gate, using the \"Case "
+        "wins by tag\" breakdown, so a run that keeps losing a "
+        "whole tag case by case fails CI even if it wins the "
+        "aggregate; a tie in wins under a tag is not a loss",
     )
     args = parser.parse_args(argv)
     if args.fail_on_trend is not None and args.fail_on_trend < 0:
@@ -1314,6 +1406,15 @@ def main(argv=None) -> int:
         )
         return 2
     trend = compare_history(reports)
+    if args.fail_on_lose_per_tag and args.fail_on_lose_per_tag not in [
+        run.path for run in trend.runs
+    ]:
+        parser.error(
+            f"--fail-on-lose-per-tag baseline "
+            f"{args.fail_on_lose_per_tag!r} is not one of the runs "
+            f"in the history: "
+            f"{', '.join(run.path for run in trend.runs)}"
+        )
     gate_failures = (
         trend.latency_gate_failures(args.fail_on_trend)
         if args.fail_on_trend is not None
@@ -1326,6 +1427,11 @@ def main(argv=None) -> int:
         else []
     )
     rising = trend.rising_cost_cases if args.fail_on_rising_cost else []
+    per_tag_losers = (
+        trend.per_tag_losers_to(args.fail_on_lose_per_tag)
+        if args.fail_on_lose_per_tag
+        else []
+    )
     print(
         format_trend(
             trend,
@@ -1333,6 +1439,7 @@ def main(argv=None) -> int:
             fail_on_slowing=args.fail_on_slowing,
             cost_gate_threshold_tokens_per_run=args.fail_on_cost_trend,
             fail_on_rising_cost=args.fail_on_rising_cost,
+            fail_on_lose_per_tag=args.fail_on_lose_per_tag,
         )
     )
     if args.json:
@@ -1345,6 +1452,7 @@ def main(argv=None) -> int:
                         args.fail_on_cost_trend
                     ),
                     fail_on_rising_cost=args.fail_on_rising_cost,
+                    fail_on_lose_per_tag=args.fail_on_lose_per_tag,
                 ),
                 f,
                 indent=2,
@@ -1377,6 +1485,17 @@ def main(argv=None) -> int:
             f"rising: " + ", ".join(c.case_id for c in rising),
             file=sys.stderr,
         )
+    if per_tag_losers:
+        beaten = ", ".join(
+            f"{failure['run']} under {failure['tag']!r} "
+            f"({failure['baseline_wins']} vs {failure['run_wins']})"
+            for failure in per_tag_losers
+        )
+        print(
+            f"\nPer-tag gate FAILED: baseline "
+            f"{args.fail_on_lose_per_tag!r} beat {beaten}",
+            file=sys.stderr,
+        )
     return (
         1
         if (
@@ -1385,6 +1504,7 @@ def main(argv=None) -> int:
             or slowing
             or cost_gate_failures
             or rising
+            or per_tag_losers
         )
         else 0
     )

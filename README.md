@@ -654,6 +654,35 @@ and mean token count, and the JSON output carries
 cases worst first, and `cost_gate_passed(threshold)` is the boolean
 form.
 
+### Per-tag case-wins CI gate
+
+A run can win the aggregate while losing a whole tag case by case —
+the tag one run keeps losing on is visible in the `Case wins by
+tag:` breakdown, and `--fail-on-lose-per-tag RUN` turns it into a
+gate:
+
+```bash
+python -m agent_evals.trends --reports-dir reports/ \
+    --fail-on-lose-per-tag baseline.json
+```
+
+It fails (exit 1) when the named baseline run won strictly more
+cases under any tag than any other run in the history (a tie in wins
+under a tag is not a loss), mirroring the `--fail-on-lose-per-case`
+gate on the two-run comparison but per tag, using the
+`case_wins_by_tag` breakdown. The run is named by its path, the
+same identifier the per-run table uses (usually the report
+filename); naming a run that is not in the history is a clean
+error. It combines with the existing newly-failing, latency-gate,
+slowing, cost-gate, and rising-cost rules: the exit code is 1 when
+any of them trips, and 0 otherwise. The text report names the tags
+and runs that tripped the gate with their win counts, and the JSON
+output carries `per_tag_gate_baseline`, `per_tag_gate_failures`,
+and `per_tag_gate_passed`. From Python,
+`TrendReport.per_tag_losers_to(baseline)` returns the tripping
+(tag, run) pairs, and `per_tag_gate_passed(baseline)` is the
+boolean form.
+
 ## JUnit XML export
 
 Most CI systems understand JUnit XML even though they know nothing
@@ -1019,3 +1048,10 @@ make demo    # run both example suites through the CLI
   over the history, ties broken by lowest latency; a case every
   run scored 0 on, an exact tie, or a case present in only one run
   has no winner.~~ (done in v0.27.0)
+- ~~Per-tag case-wins CI gate for the trend report:
+  `--fail-on-lose-per-tag RUN` exits 1 when the named baseline run
+  won strictly more cases under any tag than any other run in the
+  history (a tie in wins under a tag is not a loss), so a run that
+  loses a whole tag case by case fails CI even if it wins the
+  aggregate — the per-tag variant of the `--fail-on-lose-per-case`
+  gate, using the `case_wins_by_tag` breakdown.~~ (done in v0.28.0)

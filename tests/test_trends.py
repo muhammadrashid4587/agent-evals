@@ -261,6 +261,99 @@ class TestTrendCaseWinsByTag(unittest.TestCase):
         self.assertNotIn("Case wins by tag", text)
 
 
+class TestPerTagGate(unittest.TestCase):
+    def setUp(self):
+        self.trend = compare_history(_tagged_history())
+
+    def test_per_tag_losers_to_names_winning_baseline_pairs(self):
+        # "run-2.json" won the smoke tag outright (alpha, 1 vs 0
+        # for each other run); it won nothing under fast, slow, or
+        # new, so only the smoke pairs trip.
+        self.assertEqual(
+            self.trend.per_tag_losers_to("run-2.json"),
+            [
+                {
+                    "tag": "smoke",
+                    "run": "run-0.json",
+                    "baseline_wins": 1,
+                    "run_wins": 0,
+                },
+                {
+                    "tag": "smoke",
+                    "run": "run-1.json",
+                    "baseline_wins": 1,
+                    "run_wins": 0,
+                },
+            ],
+        )
+        # "run-0.json" won the new tag outright (epsilon, 1 vs 0);
+        # under smoke it lost to run-2, so only the new pairs trip.
+        self.assertEqual(
+            self.trend.per_tag_losers_to("run-0.json"),
+            [
+                {
+                    "tag": "new",
+                    "run": "run-1.json",
+                    "baseline_wins": 1,
+                    "run_wins": 0,
+                },
+                {
+                    "tag": "new",
+                    "run": "run-2.json",
+                    "baseline_wins": 1,
+                    "run_wins": 0,
+                },
+            ],
+        )
+
+    def test_tie_in_wins_under_a_tag_is_not_a_loss(self):
+        # "run-1.json" won no case under any tag, and every tag it
+        # ties on (fast and slow are all ties) is not a loss.
+        self.assertEqual(self.trend.per_tag_losers_to("run-1.json"), [])
+        self.assertTrue(self.trend.per_tag_gate_passed("run-1.json"))
+        self.assertFalse(self.trend.per_tag_gate_passed("run-2.json"))
+
+    def test_unknown_baseline_raises(self):
+        with self.assertRaises(ValueError):
+            self.trend.per_tag_losers_to("run-9.json")
+
+    def test_no_tags_means_no_losers(self):
+        trend = compare_history(_history())
+        self.assertEqual(trend.per_tag_losers_to("?"), [])
+        self.assertTrue(trend.per_tag_gate_passed("?"))
+
+    def test_format_shows_per_tag_gate_section(self):
+        text = format_trend(
+            self.trend, fail_on_lose_per_tag="run-2.json"
+        )
+        self.assertIn("Per-tag gate FAILED", text)
+        self.assertIn(
+            "  smoke: 'run-2.json' 1 vs 'run-0.json' 0", text
+        )
+        self.assertIn(
+            "  smoke: 'run-2.json' 1 vs 'run-1.json' 0", text
+        )
+        passing = format_trend(
+            self.trend, fail_on_lose_per_tag="run-1.json"
+        )
+        self.assertIn("Per-tag gate passed", passing)
+        self.assertIn("beat no other run under any tag", passing)
+        self.assertNotIn("Per-tag gate", format_trend(self.trend))
+
+    def test_to_dict_carries_per_tag_gate_results(self):
+        data = self.trend.to_dict(fail_on_lose_per_tag="run-2.json")
+        self.assertEqual(data["per_tag_gate_baseline"], "run-2.json")
+        self.assertEqual(
+            data["per_tag_gate_failures"],
+            self.trend.per_tag_losers_to("run-2.json"),
+        )
+        self.assertFalse(data["per_tag_gate_passed"])
+        self.assertNotIn(
+            "per_tag_gate_failures",
+            self.trend.to_dict(),
+        )
+
+
 class TestCaseTrend(unittest.TestCase):
     def setUp(self):
         self.trend = compare_history(_history())
@@ -959,6 +1052,111 @@ class TestLatencyGateCli(unittest.TestCase):
             proc = self._run_cli(tmp, "--fail-on-trend", "-1")
             self.assertEqual(proc.returncode, 2)
             self.assertIn("--fail-on-trend must not be negative", proc.stderr)
+
+
+class TestPerTagGateCli(unittest.TestCase):
+    def _write_reports(self, tmp, reports):
+        for i, report in enumerate(reports):
+            with open(os.path.join(tmp, f"run-{i}.json"), "w") as f:
+                json.dump(report, f)
+
+    def _run_cli(self, tmp, *extra):
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agent_evals.trends",
+                "--reports-dir",
+                tmp,
+                *extra,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=os.path.join(os.path.dirname(__file__), ".."),
+        )
+
+    def test_cli_fail_on_lose_per_tag_trips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _tagged_history())
+            proc = self._run_cli(
+                tmp, "--fail-on-lose-per-tag", "run-2.json"
+            )
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("Per-tag gate FAILED", proc.stdout)
+            self.assertIn("smoke", proc.stdout)
+            self.assertIn("Per-tag gate FAILED", proc.stderr)
+            self.assertIn("run-0.json", proc.stderr)
+
+    def test_cli_fail_on_lose_per_tag_passes_on_tie(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Two runs, one tagged case each won: the smoke wins
+            # tie 1-1, so no baseline beats the other under a tag,
+            # and nothing newly fails either.
+            tied = [
+                _report(
+                    "2026-11-22T10:00:00+00:00",
+                    [
+                        {"case_id": "one", "passed": True, "score": 1.0, "latency_ms": 10.0, "tags": ["smoke"]},
+                        {"case_id": "two", "passed": True, "score": 0.5, "latency_ms": 5.0, "tags": ["smoke"]},
+                    ],
+                ),
+                _report(
+                    "2026-11-22T11:00:00+00:00",
+                    [
+                        {"case_id": "one", "passed": True, "score": 0.5, "latency_ms": 12.0, "tags": ["smoke"]},
+                        {"case_id": "two", "passed": True, "score": 1.0, "latency_ms": 5.0, "tags": ["smoke"]},
+                    ],
+                ),
+            ]
+            self._write_reports(tmp, tied)
+            proc = self._run_cli(
+                tmp, "--fail-on-lose-per-tag", "run-0.json"
+            )
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn("Per-tag gate passed", proc.stdout)
+
+    def test_cli_json_carries_per_tag_gate_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _tagged_history())
+            out = os.path.join(tmp, "trend.json")
+            proc = self._run_cli(
+                tmp,
+                "--fail-on-lose-per-tag",
+                "run-2.json",
+                "--json",
+                out,
+            )
+            self.assertEqual(proc.returncode, 1)
+            with open(out) as f:
+                data = json.load(f)
+            self.assertEqual(data["per_tag_gate_baseline"], "run-2.json")
+            self.assertEqual(
+                data["per_tag_gate_failures"],
+                [
+                    {
+                        "tag": "smoke",
+                        "run": "run-0.json",
+                        "baseline_wins": 1,
+                        "run_wins": 0,
+                    },
+                    {
+                        "tag": "smoke",
+                        "run": "run-1.json",
+                        "baseline_wins": 1,
+                        "run_wins": 0,
+                    },
+                ],
+            )
+            self.assertFalse(data["per_tag_gate_passed"])
+
+    def test_cli_rejects_unknown_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _tagged_history())
+            proc = self._run_cli(
+                tmp, "--fail-on-lose-per-tag", "run-9.json"
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("is not one of the runs", proc.stderr)
 
 
 class TestSingleReport(unittest.TestCase):
