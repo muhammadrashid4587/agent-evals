@@ -1066,7 +1066,23 @@ just started flipping (stable in every earlier report, flaky in the
 latest one) and 0 otherwise, so a case that was already known-flaky
 does not block the run — only a new regression fails CI. A case that
 first appears flaky in the latest report was never stable before, so
-it is not newly flaky and passes the narrow gate. Files in the
+it is not newly flaky and passes the narrow gate. `--fail-on-persistent-flaky N`
+is the other narrow gate: it exits 1 only when a case has been flaky
+in each of the last N consecutive stability reports — a genuinely
+stuck-flaky case — and 0 otherwise, so a case that just started
+flipping, one that first appeared flaky in the latest report, and
+one whose flakiness was interrupted by a stable report all pass it;
+the streak has to be unbroken, so a case that flips on and off does
+not count however many reports it was flaky in. From Python,
+`CaseFlakyHistory.flaky_streak` is the trailing run of flaky
+reports and `FlakyHistoryReport.stuck_flaky_cases(N)` lists the
+cases at or past it, longest streak first, and the per-case JSON
+carries `"flaky_streak"` alongside `"flaky_reports"`; the text
+summary adds a `Stuck flaky` section when the flag is given. N must
+be at least 2: one flaky report is a single burst, not a stuck case.
+The two narrow gates combine — either one tripping fails the run —
+and with either given the default gate (any case flaky in the latest
+report) does not apply. Files in the
 directory that are not stability reports (single-run reports, bad
 JSON) are skipped with a warning, not an error.
 
@@ -1417,3 +1433,19 @@ make demo    # run both example suites through the CLI
   stable before, so it is not newly flaky and passes the narrow
   gate, while the default gate (any case flaky in the latest
   report) is unchanged without the flag.~~ (done in v0.47.0)
+- ~~`--fail-on-persistent-flaky` CI gate for the flaky-history CLI:
+  `python -m agent_evals.flaky_history --reports-dir stability/
+  --fail-on-persistent-flaky 3` exits 1 only when a case has been
+  flaky in each of the last 3 consecutive stability reports — a
+  genuinely stuck-flaky case — and 0 otherwise, so a case that
+  just started flipping, one that first appeared flaky in the
+  latest report, and one whose flakiness was interrupted by a
+  stable report all pass the gate; the streak has to be unbroken,
+  and N must be at least 2. From Python,
+  `CaseFlakyHistory.flaky_streak` is the trailing run of flaky
+  reports, `FlakyHistoryReport.stuck_flaky_cases(N)` lists the
+  cases at or past it longest streak first, and the per-case JSON
+  carries `"flaky_streak"`; the text summary adds a `Stuck flaky`
+  section when the flag is given, and the two narrow gates
+  combine, while the default gate (any case flaky in the latest
+  report) is unchanged without the flags.~~ (done in v0.48.0)

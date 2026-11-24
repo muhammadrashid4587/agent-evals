@@ -249,6 +249,122 @@ class TestCompareFlakyHistory(unittest.TestCase):
         )
 
 
+class TestFlakyStreak(unittest.TestCase):
+    """Consecutive-flaky streaks (v0.48.0).
+
+    ``flaky_streak`` is the trailing run of flaky reports: a stable
+    report, or a report the case was absent from, breaks it. Only
+    an unbroken run up to the latest report counts — that is what
+    makes a case stuck-flaky rather than merely flaky before.
+    """
+
+    def _streak_reports(self):
+        return [
+            _stability_dict(
+                started_at="2026-11-20T00:00:00+00:00",
+                cases=[
+                    _case("stuck", 4, 2),
+                    _case("broken", 4, 2),
+                    _case("gap", 4, 2),
+                    _case("fresh", 4, 4),
+                    _case("stopped", 4, 2),
+                    _case("gone", 4, 2),
+                ],
+                path="r1.json",
+            ),
+            _stability_dict(
+                started_at="2026-11-21T00:00:00+00:00",
+                cases=[
+                    _case("stuck", 4, 3),
+                    _case("broken", 4, 4),
+                    _case("fresh", 4, 4),
+                    _case("stopped", 4, 3),
+                    _case("gone", 4, 3),
+                ],
+                path="r2.json",
+            ),
+            _stability_dict(
+                started_at="2026-11-22T00:00:00+00:00",
+                cases=[
+                    _case("stuck", 4, 1),
+                    _case("broken", 4, 2),
+                    _case("gap", 4, 2),
+                    _case("fresh", 4, 2),
+                    _case("stopped", 4, 4),
+                ],
+                path="r3.json",
+            ),
+        ]
+
+    def test_streak_counts_trailing_consecutive_flaky_reports(self):
+        history = compare_flaky_history(self._streak_reports())
+        by_id = {c.case_id: c for c in history.cases}
+        self.assertEqual(by_id["stuck"].flaky_streak, 3)
+        # Flaky, then stable, then flaky again: the run is 1.
+        self.assertEqual(by_id["broken"].flaky_streak, 1)
+        # Absent from the middle report: the gap breaks the run.
+        self.assertEqual(by_id["gap"].flaky_streak, 1)
+        # Just started flipping: streak 1, however stable before.
+        self.assertEqual(by_id["fresh"].flaky_streak, 1)
+        # Stable in the latest report: no streak at all.
+        self.assertEqual(by_id["stopped"].flaky_streak, 0)
+        # Absent from the latest report: no streak at all.
+        self.assertEqual(by_id["gone"].flaky_streak, 0)
+
+    def test_is_stuck_flaky_needs_n_consecutive_reports(self):
+        history = compare_flaky_history(self._streak_reports())
+        by_id = {c.case_id: c for c in history.cases}
+        self.assertTrue(by_id["stuck"].is_stuck_flaky(2))
+        self.assertTrue(by_id["stuck"].is_stuck_flaky(3))
+        self.assertFalse(by_id["stuck"].is_stuck_flaky(4))
+        self.assertFalse(by_id["broken"].is_stuck_flaky(2))
+        self.assertFalse(by_id["fresh"].is_stuck_flaky(2))
+        self.assertFalse(by_id["stopped"].is_stuck_flaky(2))
+
+    def test_stuck_flaky_cases_longest_streak_first(self):
+        reports = [
+            _stability_dict(
+                started_at="2026-11-20T00:00:00+00:00",
+                cases=[_case("a", 4, 4), _case("b", 4, 2)],
+                path="r1.json",
+            ),
+            _stability_dict(
+                started_at="2026-11-21T00:00:00+00:00",
+                cases=[_case("a", 4, 3), _case("b", 4, 2)],
+                path="r2.json",
+            ),
+            _stability_dict(
+                started_at="2026-11-22T00:00:00+00:00",
+                cases=[_case("a", 4, 1), _case("b", 4, 2)],
+                path="r3.json",
+            ),
+            _stability_dict(
+                started_at="2026-11-23T00:00:00+00:00",
+                cases=[_case("a", 4, 3), _case("b", 4, 3)],
+                path="r4.json",
+            ),
+        ]
+        history = compare_flaky_history(reports)
+        # "a" has a 3-report streak, "b" a 4-report streak: the
+        # longer streak sorts first, and a higher N drops "a".
+        self.assertEqual(
+            [c.case_id for c in history.stuck_flaky_cases(2)],
+            ["b", "a"],
+        )
+        self.assertEqual(
+            [c.case_id for c in history.stuck_flaky_cases(4)], ["b"]
+        )
+        self.assertEqual(history.stuck_flaky_cases(5), [])
+
+    def test_streak_in_to_dict(self):
+        history = compare_flaky_history(self._streak_reports())
+        data = json.loads(json.dumps(history.to_dict()))
+        by_id = {c["case_id"]: c for c in data["cases"]}
+        self.assertEqual(by_id["stuck"]["flaky_streak"], 3)
+        self.assertEqual(by_id["broken"]["flaky_streak"], 1)
+        self.assertEqual(by_id["stopped"]["flaky_streak"], 0)
+
+
 class TestThresholdAwareFlakyHistory(unittest.TestCase):
     """Threshold-aware flaky history (v0.45.0).
 
@@ -542,6 +658,39 @@ class TestFormatFlakyHistory(unittest.TestCase):
         self.assertNotIn("Persistently flaky (", text)
         self.assertNotIn("Flaky in latest report (", text)
 
+    def test_stuck_flaky_section_only_with_stuck_n(self):
+        reports = [
+            _stability_dict(
+                started_at="2026-11-20T00:00:00+00:00",
+                cases=[_case("flaky", 4, 2), _case("ok", 4, 4)],
+                path="r1.json",
+            ),
+            _stability_dict(
+                started_at="2026-11-21T00:00:00+00:00",
+                cases=[_case("flaky", 4, 3), _case("ok", 4, 4)],
+                path="r2.json",
+            ),
+        ]
+        history = compare_flaky_history(reports)
+        # No N given: no stuck section at all.
+        self.assertNotIn(
+            "Stuck flaky", format_flaky_history(history)
+        )
+        text = format_flaky_history(history, stuck_n=2)
+        self.assertIn(
+            "Stuck flaky (flaky in at least 2 consecutive reports) (1):",
+            text,
+        )
+        self.assertIn(
+            "flaky (flaky in the last 2 consecutive reports: 50%F 75%F)",
+            text,
+        )
+        # At N=3 the streak is too short: the section is omitted.
+        self.assertNotIn(
+            "Stuck flaky",
+            format_flaky_history(history, stuck_n=3),
+        )
+
 
 class TestFlakyHistoryCLI(unittest.TestCase):
     def _write_reports(self, tmp, reports):
@@ -612,6 +761,152 @@ class TestFlakyHistoryCLI(unittest.TestCase):
             self._write_reports(tmp, reports)
             self.assertEqual(
                 main(["--reports-dir", tmp, "--fail-on-newly-flaky"]), 0
+            )
+
+    def test_cli_fail_on_persistent_flaky_exits_1_when_stuck(self):
+        from agent_evals.flaky_history import main
+
+        reports = [
+            _stability_dict(cases=[_case("stuck", 4, 2)]),
+            _stability_dict(cases=[_case("stuck", 4, 3)]),
+            _stability_dict(cases=[_case("stuck", 4, 1)]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(
+                main(
+                    ["--reports-dir", tmp, "--fail-on-persistent-flaky", "3"]
+                ),
+                1,
+            )
+
+    def test_cli_fail_on_persistent_flaky_exits_0_when_newly_flaky(self):
+        from agent_evals.flaky_history import main
+
+        # Flaky only in the latest report (streak 1): a fresh
+        # regression, not a stuck case, so the persistent gate
+        # passes — the default gate would still fail this history.
+        reports = [
+            _stability_dict(cases=[_case("fresh", 4, 4)]),
+            _stability_dict(cases=[_case("fresh", 4, 2)]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(
+                main(
+                    ["--reports-dir", tmp, "--fail-on-persistent-flaky", "2"]
+                ),
+                0,
+            )
+
+    def test_cli_fail_on_persistent_flaky_exits_0_when_first_seen(self):
+        from agent_evals.flaky_history import main
+
+        # One report, flaky in it: streak 1, below any N >= 2.
+        reports = [_stability_dict(cases=[_case("new", 4, 2)])]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(
+                main(
+                    ["--reports-dir", tmp, "--fail-on-persistent-flaky", "2"]
+                ),
+                0,
+            )
+
+    def test_cli_fail_on_persistent_flaky_exits_0_when_streak_broken(self):
+        from agent_evals.flaky_history import main
+
+        # Flaky, stable, flaky: flaky in two reports, but not
+        # consecutively, so the streak is 1 and the gate passes.
+        reports = [
+            _stability_dict(cases=[_case("flip", 4, 2)]),
+            _stability_dict(cases=[_case("flip", 4, 4)]),
+            _stability_dict(cases=[_case("flip", 4, 3)]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(
+                main(
+                    ["--reports-dir", tmp, "--fail-on-persistent-flaky", "2"]
+                ),
+                0,
+            )
+
+    def test_cli_fail_on_persistent_flaky_exits_0_when_streak_short(self):
+        from agent_evals.flaky_history import main
+
+        # Streak 2, but the gate asks for 3 consecutive reports.
+        reports = [
+            _stability_dict(cases=[_case("stuck", 4, 4)]),
+            _stability_dict(cases=[_case("stuck", 4, 2)]),
+            _stability_dict(cases=[_case("stuck", 4, 3)]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(
+                main(
+                    ["--reports-dir", tmp, "--fail-on-persistent-flaky", "3"]
+                ),
+                0,
+            )
+
+    def test_cli_fail_on_persistent_flaky_rejects_n_below_2(self):
+        from agent_evals.flaky_history import main
+
+        reports = [_stability_dict(cases=[_case("ok", 4, 4)])]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            with self.assertRaises(SystemExit) as ctx:
+                main(
+                    ["--reports-dir", tmp, "--fail-on-persistent-flaky", "1"]
+                )
+            self.assertEqual(ctx.exception.code, 2)
+
+    def test_cli_both_narrow_gates_either_can_fail(self):
+        from agent_evals.flaky_history import main
+
+        # "fresh" just started flipping (newly-flaky gate trips);
+        # "stuck" is flaky in both reports (persistent gate trips).
+        reports = [
+            _stability_dict(
+                cases=[_case("fresh", 4, 4), _case("stuck", 4, 2)]
+            ),
+            _stability_dict(
+                cases=[_case("fresh", 4, 2), _case("stuck", 4, 3)]
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(
+                main(
+                    [
+                        "--reports-dir",
+                        tmp,
+                        "--fail-on-newly-flaky",
+                        "--fail-on-persistent-flaky",
+                        "2",
+                    ]
+                ),
+                1,
+            )
+        # Neither trips when the history is clean of both.
+        reports = [
+            _stability_dict(cases=[_case("ok", 4, 4)]),
+            _stability_dict(cases=[_case("ok", 4, 4)]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(
+                main(
+                    [
+                        "--reports-dir",
+                        tmp,
+                        "--fail-on-newly-flaky",
+                        "--fail-on-persistent-flaky",
+                        "2",
+                    ]
+                ),
+                0,
             )
 
     def test_cli_default_gate_still_fails_on_newly_flaky(self):

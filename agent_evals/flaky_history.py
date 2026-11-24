@@ -31,7 +31,12 @@ first, and builds a :class:`FlakyHistoryReport`:
   to cases that just started flipping (stable in every earlier
   report, flaky in the latest one), so a case that was already
   known-flaky does not block the run — only fresh instability
-  fails CI.
+  fails CI. ``--fail-on-persistent-flaky N`` is the other narrow
+  gate: it exits 1 only when a case has been flaky in each of the
+  last N consecutive stability reports — a genuinely stuck-flaky
+  case — so a case that just started flipping, one that first
+  appeared flaky in the latest report, and one whose flakiness
+  was interrupted by a stable report all pass it.
 
 Usage:
     python -m agent_evals.flaky_history --reports-dir stability/
@@ -228,6 +233,30 @@ class CaseFlakyHistory:
         return False
 
     @property
+    def flaky_streak(self) -> int:
+        """How many consecutive stability reports, ending with
+        the latest one, flagged this case flaky — the trailing run
+        of ``True`` in ``flaky_history``. A stable report, or a
+        report the case was absent from, breaks the streak, so
+        the count only ever measures unbroken flakiness up to
+        now. A case that just started flipping has a streak of 1,
+        however many reports it was stable in before, and a case
+        that stopped flipping has a streak of 0."""
+        streak = 0
+        for f in reversed(self.flaky_history):
+            if f is not True:
+                break
+            streak += 1
+        return streak
+
+    def is_stuck_flaky(self, n: int) -> bool:
+        """True when the case has been flaky in each of the last
+        ``n`` consecutive stability reports — a genuinely
+        stuck-flaky case, not one that flipped once or that flips
+        on and off."""
+        return self.flaky_streak >= n
+
+    @property
     def newly_flaky(self) -> bool:
         """Stable in every earlier report that contained the case,
         flaky in the latest one — something just got unstable."""
@@ -281,6 +310,7 @@ class CaseFlakyHistory:
             "total_passes": self.total_passes,
             "total_fails": self.total_fails,
             "flaky_reports": self.flaky_reports,
+            "flaky_streak": self.flaky_streak,
             "flaky": self.flaky,
             "persistently_flaky": self.persistently_flaky,
             "flaky_in_latest": self.flaky_in_latest,
@@ -363,6 +393,20 @@ class FlakyHistoryReport:
     @property
     def flaky_in_latest(self) -> list:
         return [c for c in self.cases if c.flaky_in_latest]
+
+    def stuck_flaky_cases(self, n: int) -> list:
+        """Cases flaky in each of the last ``n`` consecutive
+        stability reports — the genuinely stuck-flaky ones —
+        longest streak first; ties break on the lowest latest pass
+        rate, then case_id."""
+        return sorted(
+            (c for c in self.cases if c.is_stuck_flaky(n)),
+            key=lambda c: (
+                -c.flaky_streak,
+                c.last_pass_rate or 0.0,
+                c.case_id,
+            ),
+        )
 
     @property
     def newly_flaky(self) -> list:
@@ -569,8 +613,14 @@ def load_stability_reports_dir(directory: str) -> list:
     return loaded
 
 
-def format_flaky_history(history: FlakyHistoryReport) -> str:
-    """Render a flaky-case history as a plain-text summary."""
+def format_flaky_history(
+    history: FlakyHistoryReport, stuck_n: Optional[int] = None
+) -> str:
+    """Render a flaky-case history as a plain-text summary.
+
+    ``stuck_n`` adds a "Stuck flaky" section listing the cases
+    flaky in each of the last ``stuck_n`` consecutive reports —
+    the same gate ``--fail-on-persistent-flaky N`` enforces."""
     lines = [f"Stability reports: {history.n_reports}"]
     if history.runs:
         first = history.runs[0]
@@ -674,6 +724,15 @@ def format_flaky_history(history: FlakyHistoryReport) -> str:
             f"{c.reports_present} reports: {_history_text(c)})"
         ),
     )
+    if stuck_n is not None:
+        _section(
+            f"Stuck flaky (flaky in at least {stuck_n} consecutive reports)",
+            history.stuck_flaky_cases(stuck_n),
+            lambda c: (
+                f"{c.case_id} (flaky in the last {c.flaky_streak} "
+                f"consecutive reports: {_history_text(c)})"
+            ),
+        )
     _section(
         "Flaky in latest report",
         history.flaky_in_latest,
@@ -746,7 +805,27 @@ def main(argv=None) -> int:
         "latest report, so a case that was already known-flaky "
         "passes this narrower gate",
     )
+    parser.add_argument(
+        "--fail-on-persistent-flaky",
+        type=int,
+        metavar="N",
+        default=None,
+        help="exit 1 only when a case has been flaky in each of the "
+        "last N consecutive stability reports (a genuinely "
+        "stuck-flaky case); a case that just started flipping, one "
+        "that first appeared flaky in the latest report, and one "
+        "whose flakiness was interrupted by a stable report all "
+        "pass this gate",
+    )
     args = parser.parse_args(argv)
+    if (
+        args.fail_on_persistent_flaky is not None
+        and args.fail_on_persistent_flaky < 2
+    ):
+        parser.error(
+            "--fail-on-persistent-flaky N must be at least 2: one "
+            "flaky report is a single burst, not a stuck case"
+        )
 
     try:
         reports = load_stability_reports_dir(args.reports_dir)
@@ -759,10 +838,20 @@ def main(argv=None) -> int:
         )
         return 2
     history = compare_flaky_history(reports)
-    print(format_flaky_history(history))
+    print(
+        format_flaky_history(
+            history, stuck_n=args.fail_on_persistent_flaky
+        )
+    )
     if args.json:
         history.save(args.json)
         print(f"\nFlaky history written to {args.json}")
+    # A narrow gate replaces the default one: with either narrow
+    # flag given, only the gates asked for can fail the run.
+    narrow_gate = (
+        args.fail_on_newly_flaky
+        or args.fail_on_persistent_flaky is not None
+    )
     if args.fail_on_newly_flaky:
         # The narrow gate: only fresh instability fails the run.
         # A case that was already flaky in an earlier report is
@@ -776,6 +865,26 @@ def main(argv=None) -> int:
                 file=sys.stderr,
             )
             return 1
+    if args.fail_on_persistent_flaky is not None:
+        # The stuck-flaky gate: only a case flaky in each of the
+        # last N consecutive reports fails the run. A case that
+        # just started flipping (streak 1), one that first
+        # appeared flaky in the latest report, and one whose
+        # flakiness was interrupted by a stable report all pass.
+        stuck = history.stuck_flaky_cases(
+            args.fail_on_persistent_flaky
+        )
+        if stuck:
+            print(
+                f"\nPersistent-flaky gate FAILED: "
+                f"{len(stuck)} case(s) flaky in the last "
+                f"{args.fail_on_persistent_flaky} consecutive "
+                f"stability reports: "
+                + ", ".join(c.case_id for c in stuck),
+                file=sys.stderr,
+            )
+            return 1
+    if narrow_gate:
         return 0
     if history.has_flaky_in_latest:
         print(
