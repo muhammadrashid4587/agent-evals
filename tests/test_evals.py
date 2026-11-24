@@ -1227,6 +1227,174 @@ class TestRangeScorer(unittest.TestCase):
         with self.assertRaises(ValueError):
             score_case(_case({"type": "range", "max": True}), "42")
 
+    def test_tolerance_widens_band_passes(self):
+        # The band [0, 100] with tolerance 10 accepts [-10, 110].
+        ok, detail, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100, "tolerance": 10}),
+            "105",
+        )
+        self.assertTrue(ok)
+        self.assertIn("within [min -10.0, max 110.0]", detail)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100, "tolerance": 10}),
+            "-5",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        # The widened boundary itself passes.
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100, "tolerance": 10}),
+            "110",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_tolerance_outside_widened_band_partial_credit(self):
+        # 150 against a widened maximum of 110, widened width 120:
+        # 1 - 40/120 = 2/3.
+        ok, detail, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100, "tolerance": 10}),
+            "150",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 110.0", detail)
+        self.assertAlmostEqual(score, 2.0 / 3.0)
+        # One widened scale outside scores 0.
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100, "tolerance": 10}),
+            "230",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_tolerance_with_single_bound(self):
+        # A lone minimum of 10 with tolerance 5 accepts from 5 up.
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 10, "tolerance": 5}), "5"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        # 4 is 1 below the widened minimum of 5, scale 5: 1 - 1/5.
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 10, "tolerance": 5}), "4"
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.8)
+        # A lone maximum of 10 with tolerance 5 accepts up to 15.
+        ok, _, score = score_case(
+            _case({"type": "range", "max": 10, "tolerance": 5}), "15"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        # 16 is 1 above the widened maximum of 15, scale 15: 1 - 1/15.
+        ok, _, score = score_case(
+            _case({"type": "range", "max": 10, "tolerance": 5}), "16"
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 1.0 - 1.0 / 15.0)
+
+    def test_tolerance_gives_zero_width_range_partial_credit(self):
+        # min == max == 42 with tolerance 5 accepts [37, 47]; the
+        # widened width of 10 is the falloff scale, so a zero-width
+        # range with tolerance finally has partial credit.
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 42, "max": 42, "tolerance": 5}),
+            "45",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        # 50 is 3 above the widened maximum of 47: 1 - 3/10.
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 42, "max": 42, "tolerance": 5}),
+            "50",
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.7)
+
+    def test_tolerance_zero_keeps_old_path(self):
+        ok, detail, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100, "tolerance": 0}),
+            "105",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 100.0", detail)
+        self.assertAlmostEqual(score, 0.95)
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100, "tolerance": 0}),
+            "150",
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_negative_tolerance_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "range", "min": 0, "max": 100,
+                     "tolerance": -1}
+                ),
+                "50",
+            )
+
+    def test_non_numeric_tolerance_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "range", "min": 0, "max": 100,
+                     "tolerance": "10"}
+                ),
+                "50",
+            )
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "range", "min": 0, "max": 100,
+                     "tolerance": True}
+                ),
+                "50",
+            )
+
+    def test_nan_and_infinite_tolerance_raise(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "range", "min": 0, "max": 100,
+                     "tolerance": float("nan")}
+                ),
+                "50",
+            )
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "range", "min": 0, "max": 100,
+                     "tolerance": float("inf")}
+                ),
+                "50",
+            )
+
+    def test_tolerance_flows_through_suite_json(self):
+        suite = Suite.from_dict(
+            {
+                "name": "range-tolerance-demo",
+                "cases": [
+                    {
+                        "id": "close-enough",
+                        "prompt": "What is 6 times 7, roughly?",
+                        "scorer": {
+                            "type": "range",
+                            "min": 0,
+                            "max": 100,
+                            "tolerance": 10,
+                        },
+                    }
+                ],
+            }
+        )
+        report = run_suite(suite, lambda prompt: "105")
+        self.assertEqual(report.passed, 1)
+        self.assertEqual(report.results[0].score, 1.0)
+
     def test_flows_through_suite_json(self):
         suite = Suite.from_dict(
             {

@@ -101,7 +101,7 @@ detail; the run continues with the remaining cases.
 | `starts_with` | `{"prefix": "The answer is"}` | the output starts with the prefix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `ends_with` | `{"suffix": "is 42"}` | the output ends with the suffix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `length` | `{"min_length": 10, "max_length": 100}` | the output's length falls in the range (at least one bound required; optional `"unit": "words"` for word count instead of characters) |
-| `range` | `{"min": 0, "max": 100}` | the first number in the output falls in the range (at least one bound required) |
+| `range` | `{"min": 0, "max": 100}` | the first number in the output falls in the range (at least one bound required; optional `"tolerance"` widens the accepted band) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
@@ -223,15 +223,22 @@ sets a ceiling; bounds may be negative, and may be integers or
 floats. The number is parsed the same way as the `numeric` scorer
 (the first number in the output, which may be embedded in
 surrounding text), and an output with no number fails with a score
-of 0.0. It gives partial credit like `length`: the score falls
-linearly from 1.0 at the bound to 0.0 one scale away, where the
-scale is the range width when both bounds are present (`max - min`)
-or the magnitude of the single bound otherwise, so a value just
-outside the range still earns most of its weight and one a full
-scale outside earns nothing. A zero scale (`min == max`, or a lone
-bound of 0) gives no partial credit: any value outside the range
-scores 0.0. A non-numeric bound, or `min` above `max`, is a scorer
-error.
+of 0.0. An optional `tolerance` widens the accepted band by that
+amount on each bounded side, so `{"min": 0, "max": 100,
+"tolerance": 10}` accepts any value in [-10, 110] — a float answer
+that is close but just outside the range still passes. It gives
+partial credit like `length`: the score falls linearly from 1.0 at
+the widened bound to 0.0 one scale away, where the scale is the
+widened range width when both bounds are present (`max - min`
+plus twice the tolerance) or the magnitude of the single widened
+bound otherwise, so a value just outside the widened range still
+earns most of its weight and one a full scale outside earns
+nothing. A zero scale (`min == max` with no tolerance, or a lone
+bound of 0 with no tolerance) gives no partial credit: any value
+outside the range scores 0.0. A non-numeric bound, `min` above
+`max`, or a non-numeric, negative, NaN, or infinite `tolerance`
+is a scorer error, and a tolerance of 0 keeps the old behaviour
+exactly.
 
 The `exact` scorer and the six string scorers — `contains`, `contains_all`,
 `contains_any`, `not_contains`, `starts_with`, `ends_with` — and the
@@ -1273,3 +1280,12 @@ make demo    # run both example suites through the CLI
   scoring 0.0, `ignore_order` still comparing arrays as multisets
   (matched pairwise under tolerance), and a non-numeric or negative
   `tolerance` rejected as a scorer error.~~ (done in v0.40.0)
+- ~~`tolerance` for the `range` scorer: an optional `tolerance`
+  widens the accepted band by that amount on each bounded side —
+  the value passes when it falls in `[min - tolerance,
+  max + tolerance]` — with the partial-credit falloff computed
+  from the widened band, so a float answer that is close but just
+  outside the range still passes; validated the same way as the
+  `json_equals` tolerance (non-numeric, negative, NaN, or infinite
+  rejected as a scorer error), and a tolerance of 0 keeps the old
+  behaviour exactly.~~ (done in v0.41.0)

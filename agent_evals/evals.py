@@ -762,6 +762,7 @@ def score_range(
     output: str,
     min_value: Optional[float] = None,
     max_value: Optional[float] = None,
+    tolerance: float = 0.0,
 ) -> tuple:
     """Pass when the first number in the output falls in ``[min, max]``.
 
@@ -770,16 +771,24 @@ def score_range(
     ``{"max": 100}`` only sets a ceiling. The number may be embedded
     in surrounding text (the same first-number parse as the
     ``numeric`` scorer); an output with no number fails with a
-    score of 0.0. Partial credit: the score falls linearly from 1.0
-    at the bound to 0.0 one scale away, where the scale is the range
-    width when both bounds are present (``max - min``) or the
-    magnitude of the single bound otherwise — so a value just
-    outside the range still earns most of its weight and one a full
-    scale outside earns nothing. A zero scale (``min == max``, or a
-    lone bound of 0) gives no partial credit: any value outside the
-    range scores 0.0. A non-numeric bound, or ``min`` above ``max``,
-    is a scorer error.
+    score of 0.0. An optional ``tolerance`` widens the accepted band
+    by that amount on each bounded side — the value passes when it
+    falls in ``[min - tolerance, max + tolerance]`` — so a float
+    answer that is close but just outside the range still passes.
+    Partial credit: the score falls linearly from 1.0 at the widened
+    bound to 0.0 one scale away, where the scale is the widened
+    range width when both bounds are present (``max - min`` plus
+    twice the tolerance) or the magnitude of the single widened
+    bound otherwise — so a value just outside the widened range
+    still earns most of its weight and one a full scale outside
+    earns nothing. A zero scale (``min == max`` with no tolerance,
+    or a lone bound of 0 with no tolerance) gives no partial
+    credit: any value outside the range scores 0.0. A non-numeric
+    bound, ``min`` above ``max``, or a non-numeric or negative
+    ``tolerance`` is a scorer error. A tolerance of 0 keeps the
+    old behaviour exactly.
     """
+    tolerance = _validate_tolerance(tolerance, "range")
     if min_value is None and max_value is None:
         raise ValueError(
             "range scorer requires at least one of 'min' or 'max'"
@@ -794,26 +803,28 @@ def score_range(
     if match is None:
         return False, "no number in output", 0.0
     got = float(match.group(0))
-    lo = f"min {min_value}" if min_value is not None else "no minimum"
-    hi = f"max {max_value}" if max_value is not None else "no maximum"
-    if (min_value is None or got >= min_value) and (
-        max_value is None or got <= max_value
+    eff_min = None if min_value is None else min_value - tolerance
+    eff_max = None if max_value is None else max_value + tolerance
+    lo = f"min {eff_min}" if eff_min is not None else "no minimum"
+    hi = f"max {eff_max}" if eff_max is not None else "no maximum"
+    if (eff_min is None or got >= eff_min) and (
+        eff_max is None or got <= eff_max
     ):
         return True, f"value {got} within [{lo}, {hi}]", 1.0
-    if min_value is not None and max_value is not None:
-        scale = max_value - min_value
-    elif min_value is not None:
-        scale = abs(min_value)
+    if eff_min is not None and eff_max is not None:
+        scale = eff_max - eff_min
+    elif eff_min is not None:
+        scale = abs(eff_min)
     else:
-        scale = abs(max_value)  # type: ignore[arg-type]
+        scale = abs(eff_max)  # type: ignore[arg-type]
     if scale == 0:
         score = 0.0
-    elif min_value is not None and got < min_value:
-        score = max(0.0, 1.0 - (min_value - got) / scale)
+    elif eff_min is not None and got < eff_min:
+        score = max(0.0, 1.0 - (eff_min - got) / scale)
     else:
-        score = max(0.0, 1.0 - (got - max_value) / scale)  # type: ignore[operator]
-    side = "below minimum" if min_value is not None and got < min_value else "above maximum"
-    bound = min_value if side == "below minimum" else max_value
+        score = max(0.0, 1.0 - (got - eff_max) / scale)  # type: ignore[operator]
+    side = "below minimum" if eff_min is not None and got < eff_min else "above maximum"
+    bound = eff_min if side == "below minimum" else eff_max
     return (
         False,
         f"value {got} {side} {bound} (score {score:.2f})",
@@ -1397,6 +1408,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
             output,
             _as_range_bound(spec, "min", kind),
             _as_range_bound(spec, "max", kind),
+            spec.get("tolerance", 0.0),
         )
     if kind == "judge":
         return score_judge(output, case, judges)
