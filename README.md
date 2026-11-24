@@ -15,9 +15,10 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Fifteen scorers: exact match, substring, contains-all,
+- Sixteen scorers: exact match, substring, contains-all,
   contains-any, not-contains, regex, JSON-schema shape, JSON-path value, JSON
-  subset, fuzzy similarity, starts with, ends with, length range, numeric tolerance, and a judge scorer that scores
+  subset, fuzzy similarity, starts with, ends with, length range, numeric range,
+  numeric tolerance, and a judge scorer that scores
   free-form output against a rubric with a pluggable judge (a
   deterministic built-in stub judge by default; bring your own LLM
   judge as a callable or an HTTP endpoint).
@@ -99,6 +100,7 @@ detail; the run continues with the remaining cases.
 | `starts_with` | `{"prefix": "The answer is"}` | the output starts with the prefix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `ends_with` | `{"suffix": "is 42"}` | the output ends with the suffix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `length` | `{"min_length": 10, "max_length": 100}` | the output's length falls in the range (at least one bound required; optional `"unit": "words"` for word count instead of characters) |
+| `range` | `{"min": 0, "max": 100}` | the first number in the output falls in the range (at least one bound required) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
@@ -188,6 +190,26 @@ outside the range still earns most of its weight and one wildly
 outside earns nothing. A bound that is not a non-negative integer,
 `min_length` above `max_length`, or a `unit` other than
 `"characters"` or `"words"` is a scorer error.
+
+The `range` scorer is the numeric mirror of `length`: it passes
+when the first number in the output falls in `[min, max]` — a score
+that has to land between 0 and 100, a temperature that has to stay
+in a safe band, a probability that has to stay in [0, 1]. At least
+one bound is required, and a missing bound is unbounded on that
+side, so `{"min": 0}` only sets a floor and `{"max": 100}` only
+sets a ceiling; bounds may be negative, and may be integers or
+floats. The number is parsed the same way as the `numeric` scorer
+(the first number in the output, which may be embedded in
+surrounding text), and an output with no number fails with a score
+of 0.0. It gives partial credit like `length`: the score falls
+linearly from 1.0 at the bound to 0.0 one scale away, where the
+scale is the range width when both bounds are present (`max - min`)
+or the magnitude of the single bound otherwise, so a value just
+outside the range still earns most of its weight and one a full
+scale outside earns nothing. A zero scale (`min == max`, or a lone
+bound of 0) gives no partial credit: any value outside the range
+scores 0.0. A non-numeric bound, or `min` above `max`, is a scorer
+error.
 
 The `exact` scorer and the six string scorers — `contains`, `contains_all`,
 `contains_any`, `not_contains`, `starts_with`, `ends_with` — and the
@@ -1209,3 +1231,9 @@ make demo    # run both example suites through the CLI
   to 0 at a length of 0 (too short) or twice the maximum (too long),
   and non-integer, negative, or inverted bounds rejected as scorer
   errors.~~ (done in v0.37.0)
+- ~~`range` scorer: `range` passes when the first number in the output
+  falls in `[min, max]` — at least one bound required, a missing bound
+  unbounded on that side — with linear partial credit falling to 0 one
+  range width outside the bound (or one bound magnitude with a single
+  bound), an output with no number scoring 0, and non-numeric or
+  inverted bounds rejected as scorer errors.~~ (done in v0.38.0)

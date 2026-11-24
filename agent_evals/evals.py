@@ -719,6 +719,85 @@ def score_length(
     )
 
 
+def _as_range_bound(spec: dict, key: str, kind: str) -> Optional[float]:
+    """Read an optional numeric range bound from a scorer spec.
+
+    A bound must be a real number: ``True``/``False`` are rejected
+    (``bool`` is a subclass of ``int``), and a string is a scorer
+    error. Unlike a length bound, a range bound may be negative.
+    Absent means no bound on that side.
+    """
+    if key not in spec or spec[key] is None:
+        return None
+    value = spec[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{kind} scorer requires {key!r} to be a number")
+    return float(value)
+
+
+def score_range(
+    output: str,
+    min_value: Optional[float] = None,
+    max_value: Optional[float] = None,
+) -> tuple:
+    """Pass when the first number in the output falls in ``[min, max]``.
+
+    At least one bound is required; a missing bound is unbounded on
+    that side, so ``{"min": 0}`` only sets a floor and
+    ``{"max": 100}`` only sets a ceiling. The number may be embedded
+    in surrounding text (the same first-number parse as the
+    ``numeric`` scorer); an output with no number fails with a
+    score of 0.0. Partial credit: the score falls linearly from 1.0
+    at the bound to 0.0 one scale away, where the scale is the range
+    width when both bounds are present (``max - min``) or the
+    magnitude of the single bound otherwise — so a value just
+    outside the range still earns most of its weight and one a full
+    scale outside earns nothing. A zero scale (``min == max``, or a
+    lone bound of 0) gives no partial credit: any value outside the
+    range scores 0.0. A non-numeric bound, or ``min`` above ``max``,
+    is a scorer error.
+    """
+    if min_value is None and max_value is None:
+        raise ValueError(
+            "range scorer requires at least one of 'min' or 'max'"
+        )
+    if (
+        min_value is not None
+        and max_value is not None
+        and min_value > max_value
+    ):
+        raise ValueError("range scorer requires 'min' <= 'max'")
+    match = _NUMBER_RE.search(output)
+    if match is None:
+        return False, "no number in output", 0.0
+    got = float(match.group(0))
+    lo = f"min {min_value}" if min_value is not None else "no minimum"
+    hi = f"max {max_value}" if max_value is not None else "no maximum"
+    if (min_value is None or got >= min_value) and (
+        max_value is None or got <= max_value
+    ):
+        return True, f"value {got} within [{lo}, {hi}]", 1.0
+    if min_value is not None and max_value is not None:
+        scale = max_value - min_value
+    elif min_value is not None:
+        scale = abs(min_value)
+    else:
+        scale = abs(max_value)  # type: ignore[arg-type]
+    if scale == 0:
+        score = 0.0
+    elif min_value is not None and got < min_value:
+        score = max(0.0, 1.0 - (min_value - got) / scale)
+    else:
+        score = max(0.0, 1.0 - (got - max_value) / scale)  # type: ignore[operator]
+    side = "below minimum" if min_value is not None and got < min_value else "above maximum"
+    bound = min_value if side == "below minimum" else max_value
+    return (
+        False,
+        f"value {got} {side} {bound} (score {score:.2f})",
+        score,
+    )
+
+
 def score_regex(output: str, pattern: str, ignore_case: bool = False) -> tuple:
     """Pass when the regex matches anywhere in the output.
 
@@ -1067,7 +1146,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     """Score one case's output. Returns (passed, detail, score) where
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
     when the scorer gives partial credit (see ``score_contains_all``,
-    ``score_not_contains``, ``score_fuzzy``, ``score_starts_with``, ``score_ends_with``, ``score_length``, and ``score_judge``). ``judges`` is the registry of judge callables
+    ``score_not_contains``, ``score_fuzzy``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``starts_with``,
@@ -1167,6 +1246,12 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
             _as_length_bound(spec, "min_length", kind),
             _as_length_bound(spec, "max_length", kind),
             spec.get("unit", "characters"),
+        )
+    if kind == "range":
+        return score_range(
+            output,
+            _as_range_bound(spec, "min", kind),
+            _as_range_bound(spec, "max", kind),
         )
     if kind == "judge":
         return score_judge(output, case, judges)

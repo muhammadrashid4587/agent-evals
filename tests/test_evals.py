@@ -1064,6 +1064,191 @@ class TestLengthScorer(unittest.TestCase):
         self.assertEqual(report.results[0].score, 1.0)
 
 
+class TestRangeScorer(unittest.TestCase):
+    def test_inside_range_passes(self):
+        ok, detail, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100}),
+            "The answer is 42.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("value 42.0 within", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100}), "0"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100}), "100"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # 50 below a 0 minimum, range width 100: 1 - 50/100 = 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100}), "-50"
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 0.0", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_above_maximum_partial_credit(self):
+        # 150 against a 100 maximum, range width 100: 1 - 50/100 = 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100}), "150"
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 100.0", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_one_scale_outside_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100}), "200"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100}), "-100"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_wildly_outside_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100}), "9999"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_only_minimum_is_unbounded_above(self):
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 0}), "1000000"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_only_maximum_is_unbounded_below(self):
+        ok, _, score = score_case(
+            _case({"type": "range", "max": 100}), "-1000000"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_single_bound_falloff_uses_bound_magnitude(self):
+        # 5 against a lone minimum of 10: 1 - (10 - 5) / 10 = 0.5,
+        # the same falloff the length scorer gives for 5 of a 10 minimum.
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 10}), "5"
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.5)
+        # 15 against a lone maximum of 10: 1 - (15 - 10) / 10 = 0.5.
+        ok, _, score = score_case(
+            _case({"type": "range", "max": 10}), "15"
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_negative_range(self):
+        ok, _, score = score_case(
+            _case({"type": "range", "min": -10, "max": -1}), "-5"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        # 1 above a -1 maximum, width 9: 1 - 1/9.
+        ok, _, score = score_case(
+            _case({"type": "range", "min": -10, "max": -1}), "0"
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 1.0 - 1.0 / 9.0)
+
+    def test_zero_width_range(self):
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 42, "max": 42}), "42"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "range", "min": 42, "max": 42}), "43"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_lone_zero_bound(self):
+        ok, _, score = score_case(_case({"type": "range", "min": 0}), "0")
+        self.assertTrue(ok)
+        ok, _, score = score_case(_case({"type": "range", "min": 0}), "-1")
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_number_embedded_in_text(self):
+        ok, _, _ = score_case(
+            _case({"type": "range", "min": 0, "max": 100}),
+            "Score: 87 out of 100",
+        )
+        self.assertTrue(ok)
+
+    def test_float_and_scientific_notation(self):
+        ok, _, _ = score_case(
+            _case({"type": "range", "min": 0, "max": 1}), "0.75"
+        )
+        self.assertTrue(ok)
+        ok, _, _ = score_case(
+            _case({"type": "range", "min": 0, "max": 1}), "5e-1"
+        )
+        self.assertTrue(ok)
+
+    def test_no_number_scores_zero(self):
+        ok, detail, score = score_case(
+            _case({"type": "range", "min": 0, "max": 100}), "no digits here"
+        )
+        self.assertFalse(ok)
+        self.assertIn("no number in output", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "range"}), "42")
+
+    def test_minimum_above_maximum_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "range", "min": 100, "max": 0}), "42"
+            )
+
+    def test_string_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "range", "min": "0"}), "42")
+
+    def test_boolean_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "range", "max": True}), "42")
+
+    def test_flows_through_suite_json(self):
+        suite = Suite.from_dict(
+            {
+                "name": "range-demo",
+                "cases": [
+                    {
+                        "id": "in-range",
+                        "prompt": "What is 6 times 7?",
+                        "scorer": {
+                            "type": "range",
+                            "min": 0,
+                            "max": 100,
+                        },
+                    }
+                ],
+            }
+        )
+        report = run_suite(suite, lambda prompt: "42")
+        self.assertEqual(report.passed, 1)
+        self.assertEqual(report.results[0].score, 1.0)
+
+
 class TestIgnoreCaseScorers(unittest.TestCase):
     def test_contains_matches_other_case(self):
         ok, _, _ = score_case(
