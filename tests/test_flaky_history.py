@@ -69,9 +69,12 @@ def _stability_dict(suite="s", started_at="2026-11-22T00:00:00+00:00",
     return data
 
 
-def _case(case_id, runs, passes, flaky=None):
+def _case(case_id, runs, passes, flaky=None, threshold=None,
+          mean_score=None):
     if flaky is None:
         flaky = 0 < passes < runs
+    if mean_score is None:
+        mean_score = round(passes / runs, 4) if runs else 0.0
     return {
         "case_id": case_id,
         "runs": runs,
@@ -80,9 +83,10 @@ def _case(case_id, runs, passes, flaky=None):
         "pass_rate": round(passes / runs, 4) if runs else 0.0,
         "flaky": flaky,
         "mean_latency_ms": 1.0,
-        "mean_score": round(passes / runs, 4) if runs else 0.0,
+        "mean_score": mean_score,
         "timeouts": 0,
         "tags": [],
+        "threshold": threshold,
     }
 
 
@@ -242,6 +246,228 @@ class TestCompareFlakyHistory(unittest.TestCase):
         self.assertEqual(by_id["flaky"]["total_fails"], 3)
         self.assertEqual(
             by_id["flaky"]["pass_rate_history"], [0.5, 0.75, 1.0]
+        )
+
+
+class TestThresholdAwareFlakyHistory(unittest.TestCase):
+    """Threshold-aware flaky history (v0.45.0).
+
+    The history records the pass threshold in effect per report,
+    so a move between the flaky and stable groups is attributed:
+    same scores with a different threshold means the bar moved,
+    not the agent; a genuine score move means the agent did.
+    """
+
+    def _two_reports(self, first, second):
+        return [
+            _stability_dict(
+                started_at="2026-11-20T00:00:00+00:00",
+                cases=[first],
+                path="r1.json",
+            ),
+            _stability_dict(
+                started_at="2026-11-21T00:00:00+00:00",
+                cases=[second],
+                path="r2.json",
+            ),
+        ]
+
+    def test_threshold_history_recorded_per_report(self):
+        reports = self._two_reports(
+            _case("a", 4, 4, threshold=0.75, mean_score=0.8125),
+            _case("a", 4, 1, threshold=0.9, mean_score=0.8125),
+        )
+        history = compare_flaky_history(reports)
+        case = history.cases[0]
+        self.assertEqual(case.threshold_history, [0.75, 0.9])
+        self.assertEqual(case.mean_score_history, [0.8125, 0.8125])
+        self.assertTrue(case.threshold_changed)
+
+    def test_threshold_history_backfills_none_for_absent_case(self):
+        reports = [
+            _stability_dict(
+                started_at="2026-11-20T00:00:00+00:00",
+                cases=[_case("a", 4, 4)],
+                path="r1.json",
+            ),
+            _stability_dict(
+                started_at="2026-11-21T00:00:00+00:00",
+                cases=[
+                    _case("a", 4, 4),
+                    _case("late", 4, 2, threshold=0.8),
+                ],
+                path="r2.json",
+            ),
+        ]
+        history = compare_flaky_history(reports)
+        by_id = {c.case_id: c for c in history.cases}
+        self.assertEqual(by_id["late"].threshold_history, [None, 0.8])
+        self.assertEqual(
+            by_id["late"].mean_score_history, [None, 0.5]
+        )
+        self.assertFalse(by_id["late"].threshold_changed)
+
+    def test_newly_flaky_explained_by_threshold_change(self):
+        # Same mean score in both reports (0.8125), but the bar
+        # moved 0.75 -> 0.9, so the case went from passing every
+        # run to flipping: the threshold moved, not the agent.
+        reports = self._two_reports(
+            _case("a", 4, 4, threshold=0.75, mean_score=0.8125),
+            _case("a", 4, 1, threshold=0.9, mean_score=0.8125),
+        )
+        history = compare_flaky_history(reports)
+        case = history.cases[0]
+        self.assertTrue(case.newly_flaky)
+        self.assertEqual(case.transition_cause, "threshold")
+        self.assertTrue(case.threshold_explained_transition)
+        self.assertEqual(
+            case.transition_boundary,
+            {
+                "prev_threshold": 0.75,
+                "latest_threshold": 0.9,
+                "prev_mean_score": 0.8125,
+                "latest_mean_score": 0.8125,
+            },
+        )
+        self.assertEqual(
+            [c.case_id for c in history.threshold_explained_newly_flaky],
+            ["a"],
+        )
+        self.assertEqual(
+            [c.case_id for c in history.threshold_explained_transitions],
+            ["a"],
+        )
+
+    def test_stopped_flaky_explained_by_threshold_change(self):
+        # Lowering the bar 0.9 -> 0.75 with the same mean score
+        # takes the case from flipping to passing every run.
+        reports = self._two_reports(
+            _case("a", 4, 1, threshold=0.9, mean_score=0.8125),
+            _case("a", 4, 4, threshold=0.75, mean_score=0.8125),
+        )
+        history = compare_flaky_history(reports)
+        case = history.cases[0]
+        self.assertTrue(case.stopped_flaky)
+        self.assertEqual(case.transition_cause, "threshold")
+        self.assertEqual(
+            [c.case_id for c in history.threshold_explained_stopped_flaky],
+            ["a"],
+        )
+
+    def test_newly_flaky_from_genuine_score_move(self):
+        # Same threshold throughout; the mean score fell, so the
+        # case started flipping because the agent got worse.
+        reports = self._two_reports(
+            _case("a", 4, 4, threshold=0.75, mean_score=0.8125),
+            _case("a", 4, 1, threshold=0.75, mean_score=0.5),
+        )
+        history = compare_flaky_history(reports)
+        case = history.cases[0]
+        self.assertTrue(case.newly_flaky)
+        self.assertEqual(case.transition_cause, "score")
+        self.assertFalse(case.threshold_explained_transition)
+        self.assertEqual(history.threshold_explained_transitions, [])
+
+    def test_threshold_change_plus_score_move_is_score(self):
+        # The bar moved AND the scores moved: the move cannot be
+        # blamed on the threshold alone.
+        reports = self._two_reports(
+            _case("a", 4, 4, threshold=0.75, mean_score=0.8125),
+            _case("a", 4, 1, threshold=0.9, mean_score=0.5),
+        )
+        history = compare_flaky_history(reports)
+        case = history.cases[0]
+        self.assertTrue(case.newly_flaky)
+        self.assertEqual(case.transition_cause, "score")
+        self.assertFalse(case.threshold_explained_transition)
+
+    def test_threshold_added_from_none_counts_as_change(self):
+        # No threshold (a full score is required) -> 0.75, with
+        # the same mean score: the bar moved.
+        reports = self._two_reports(
+            _case("a", 4, 4, threshold=None, mean_score=0.8125),
+            _case("a", 4, 1, threshold=0.75, mean_score=0.8125),
+        )
+        history = compare_flaky_history(reports)
+        case = history.cases[0]
+        self.assertTrue(case.threshold_changed)
+        self.assertEqual(case.transition_cause, "threshold")
+
+    def test_no_transition_means_no_cause(self):
+        # Threshold changed, but the case never moved between
+        # groups: there is nothing to attribute.
+        reports = self._two_reports(
+            _case("a", 4, 4, threshold=0.75, mean_score=1.0),
+            _case("a", 4, 4, threshold=0.9, mean_score=1.0),
+        )
+        history = compare_flaky_history(reports)
+        case = history.cases[0]
+        self.assertTrue(case.threshold_changed)
+        self.assertIsNone(case.transition_cause)
+        self.assertIsNone(case.transition_boundary)
+        self.assertFalse(case.threshold_explained_transition)
+
+    def test_old_report_without_threshold_or_score_is_indeterminate(self):
+        # A report predating thresholds carries neither field:
+        # the move cannot be attributed, and the history must
+        # not crash or claim a cause.
+        first = _case("a", 4, 4)
+        first.pop("threshold")
+        first.pop("mean_score")
+        second = _case("a", 4, 1, threshold=0.9, mean_score=0.8125)
+        reports = self._two_reports(first, second)
+        history = compare_flaky_history(reports)
+        case = history.cases[0]
+        self.assertTrue(case.newly_flaky)
+        self.assertIsNone(case.transition_cause)
+        self.assertEqual(case.threshold_history, [None, 0.9])
+        self.assertEqual(case.mean_score_history, [None, 0.8125])
+
+    def test_to_dict_carries_threshold_fields(self):
+        reports = self._two_reports(
+            _case("a", 4, 4, threshold=0.75, mean_score=0.8125),
+            _case("a", 4, 1, threshold=0.9, mean_score=0.8125),
+        )
+        data = json.loads(
+            json.dumps(compare_flaky_history(reports).to_dict())
+        )
+        self.assertEqual(data["threshold_explained_newly_flaky"], ["a"])
+        self.assertEqual(data["threshold_explained_transitions"], ["a"])
+        self.assertEqual(data["threshold_explained_stopped_flaky"], [])
+        by_id = {c["case_id"]: c for c in data["cases"]}
+        self.assertEqual(by_id["a"]["threshold_history"], [0.75, 0.9])
+        self.assertEqual(
+            by_id["a"]["mean_score_history"], [0.8125, 0.8125]
+        )
+        self.assertTrue(by_id["a"]["threshold_changed"])
+        self.assertEqual(by_id["a"]["transition_cause"], "threshold")
+        self.assertTrue(by_id["a"]["threshold_explained_transition"])
+
+    def test_format_annotates_threshold_and_score_moves(self):
+        reports = self._two_reports(
+            _case("bar-moved", 4, 4, threshold=0.75, mean_score=0.8125),
+            _case("bar-moved", 4, 1, threshold=0.9, mean_score=0.8125),
+        )
+        # A second pair in the same history, with a genuine move.
+        reports[0]["cases"].append(
+            _case("agent-moved", 4, 4, threshold=0.75, mean_score=0.8125)
+        )
+        reports[1]["cases"].append(
+            _case("agent-moved", 4, 1, threshold=0.75, mean_score=0.5)
+        )
+        text = format_flaky_history(compare_flaky_history(reports))
+        self.assertIn("Threshold-explained transitions: 1", text)
+        self.assertIn("Threshold-explained transitions (1):", text)
+        self.assertIn(
+            "bar-moved (stable before, flaky in latest report: "
+            "100% 25%F) — threshold change 0.75 -> 0.9, "
+            "mean score unchanged at 0.81",
+            text,
+        )
+        self.assertIn(
+            "agent-moved (stable before, flaky in latest report: "
+            "100% 25%F) — mean score 0.81 -> 0.50",
+            text,
         )
 
 

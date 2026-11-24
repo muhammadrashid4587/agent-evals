@@ -19,6 +19,12 @@ first, and builds a :class:`FlakyHistoryReport`:
   latest one, so something just got unstable;
 * stopped-flaky cases — flaky in an earlier report, stable in the
   latest one, so a fix (or a quieter agent) landed;
+* threshold-explained transitions — when a case moves between the
+  flaky and stable groups, the history records the pass threshold
+  in effect per report, so a move caused by the threshold changing
+  (same scores, different bar) is flagged separately from a genuine
+  score move: a case that only started flipping because its bar
+  moved is not an agent regression;
 * flaky in the latest report — the live signal, and the CI gate:
   the CLI exits 1 while any case is flaky in the latest stability
   report, 0 otherwise.
@@ -78,6 +84,13 @@ class CaseFlakyHistory:
     ``passes_history`` are aligned with the reports list: one entry
     per stability report, ``None`` when the case was absent from
     that report (a case added or removed mid-history).
+    ``threshold_history`` records the case's pass threshold in
+    effect in each report (``None`` when the case was absent, or
+    when the case carries no threshold — a full score is required),
+    and ``mean_score_history`` records the case's mean score per
+    report, so a move between the flaky and stable groups can be
+    attributed: same scores with a different threshold means the
+    bar moved, not the agent.
     """
 
     case_id: str
@@ -85,6 +98,84 @@ class CaseFlakyHistory:
     flaky_history: list = field(default_factory=list)
     runs_history: list = field(default_factory=list)
     passes_history: list = field(default_factory=list)
+    threshold_history: list = field(default_factory=list)
+    mean_score_history: list = field(default_factory=list)
+
+    def _present_indices(self) -> list:
+        """Report indices that contain this case."""
+        return [
+            i
+            for i, rate in enumerate(self.pass_rate_history)
+            if rate is not None
+        ]
+
+    @staticmethod
+    def _at(history: list, index: int):
+        """One history entry, ``None`` when the history is shorter
+        than the reports list (a hand-built history)."""
+        return history[index] if index < len(history) else None
+
+    @property
+    def threshold_changed(self) -> bool:
+        """True when the case's pass threshold differs between two
+        reports that contain it — including a threshold being added
+        or removed (``None`` vs a number). A threshold change is
+        part of the case fingerprint, so it means the case being
+        measured changed, not just its verdict."""
+        thresholds = {
+            self._at(self.threshold_history, i)
+            for i in self._present_indices()
+        }
+        return len(thresholds) > 1
+
+    @property
+    def transition_boundary(self) -> Optional[dict]:
+        """The two reports bracketing the case's latest move
+        between the flaky and stable groups — ``prev_threshold`` /
+        ``latest_threshold`` and ``prev_mean_score`` /
+        ``latest_mean_score`` — or ``None`` when the case did not
+        move between groups in the latest report (it was never
+        flaky, always flaky, or flipped earlier and stayed put)."""
+        if not (self.newly_flaky or self.stopped_flaky):
+            return None
+        present = self._present_indices()
+        prev_i, last_i = present[-2], present[-1]
+        return {
+            "prev_threshold": self._at(self.threshold_history, prev_i),
+            "latest_threshold": self._at(self.threshold_history, last_i),
+            "prev_mean_score": self._at(self.mean_score_history, prev_i),
+            "latest_mean_score": self._at(self.mean_score_history, last_i),
+        }
+
+    @property
+    def transition_cause(self) -> Optional[str]:
+        """Why the case moved between the flaky and stable groups:
+        ``"threshold"`` when the threshold changed between the two
+        reports bracketing the move while the mean score stayed the
+        same — the bar moved, not the agent; ``"score"`` when the
+        mean score genuinely moved; ``None`` when the case did not
+        move between groups, or when the reports do not carry mean
+        scores and the move cannot be attributed."""
+        boundary = self.transition_boundary
+        if boundary is None:
+            return None
+        prev_score = boundary["prev_mean_score"]
+        last_score = boundary["latest_mean_score"]
+        if prev_score is None or last_score is None:
+            return None
+        if (
+            boundary["prev_threshold"] != boundary["latest_threshold"]
+            and abs(prev_score - last_score) <= 1e-9
+        ):
+            return "threshold"
+        return "score"
+
+    @property
+    def threshold_explained_transition(self) -> bool:
+        """True when the case's latest move between the flaky and
+        stable groups was caused by its pass threshold changing
+        while its scores stayed the same."""
+        return self.transition_cause == "threshold"
 
     @property
     def reports_present(self) -> int:
@@ -195,6 +286,14 @@ class CaseFlakyHistory:
             "flaky_history": self.flaky_history,
             "runs_history": self.runs_history,
             "passes_history": self.passes_history,
+            "threshold_history": self.threshold_history,
+            "mean_score_history": self.mean_score_history,
+            "threshold_changed": self.threshold_changed,
+            "transition_cause": self.transition_cause,
+            "threshold_explained_transition": (
+                self.threshold_explained_transition
+            ),
+            "transition_boundary": self.transition_boundary,
             "first_pass_rate": self.first_pass_rate,
             "last_pass_rate": self.last_pass_rate,
             "pass_rate_delta": self.pass_rate_delta,
@@ -270,6 +369,30 @@ class FlakyHistoryReport:
         return [c for c in self.cases if c.stopped_flaky]
 
     @property
+    def threshold_explained_transitions(self) -> list:
+        """Cases whose latest move between the flaky and stable
+        groups was caused by their pass threshold changing while
+        their scores stayed the same — the bar moved, not the
+        agent."""
+        return [c for c in self.cases if c.threshold_explained_transition]
+
+    @property
+    def threshold_explained_newly_flaky(self) -> list:
+        return [
+            c
+            for c in self.newly_flaky
+            if c.threshold_explained_transition
+        ]
+
+    @property
+    def threshold_explained_stopped_flaky(self) -> list:
+        return [
+            c
+            for c in self.stopped_flaky
+            if c.threshold_explained_transition
+        ]
+
+    @property
     def has_flaky_in_latest(self) -> bool:
         return bool(self.flaky_in_latest)
 
@@ -283,6 +406,15 @@ class FlakyHistoryReport:
             "flaky_in_latest": [c.case_id for c in self.flaky_in_latest],
             "newly_flaky": [c.case_id for c in self.newly_flaky],
             "stopped_flaky": [c.case_id for c in self.stopped_flaky],
+            "threshold_explained_transitions": [
+                c.case_id for c in self.threshold_explained_transitions
+            ],
+            "threshold_explained_newly_flaky": [
+                c.case_id for c in self.threshold_explained_newly_flaky
+            ],
+            "threshold_explained_stopped_flaky": [
+                c.case_id for c in self.threshold_explained_stopped_flaky
+            ],
             "runs": [r.to_dict() for r in self.runs],
             "cases": [c.to_dict() for c in self.cases],
         }
@@ -350,11 +482,15 @@ def compare_flaky_history(reports: list) -> FlakyHistoryReport:
                 history.flaky_history.append(None)
                 history.runs_history.append(None)
                 history.passes_history.append(None)
+                history.threshold_history.append(None)
+                history.mean_score_history.append(None)
             else:
                 history.pass_rate_history.append(case.get("pass_rate"))
                 history.flaky_history.append(_case_flaky(case))
                 history.runs_history.append(case.get("runs"))
                 history.passes_history.append(case.get("passes"))
+                history.threshold_history.append(case.get("threshold"))
+                history.mean_score_history.append(case.get("mean_score"))
         for case_id, case in cases.items():
             if case_id not in by_case:
                 # Backfill None for the earlier reports this case was
@@ -365,12 +501,16 @@ def compare_flaky_history(reports: list) -> FlakyHistoryReport:
                     flaky_history=[None] * (len(runs) - 1),
                     runs_history=[None] * (len(runs) - 1),
                     passes_history=[None] * (len(runs) - 1),
+                    threshold_history=[None] * (len(runs) - 1),
+                    mean_score_history=[None] * (len(runs) - 1),
                 )
                 by_case[case_id] = history
                 history.pass_rate_history.append(case.get("pass_rate"))
                 history.flaky_history.append(_case_flaky(case))
                 history.runs_history.append(case.get("runs"))
                 history.passes_history.append(case.get("passes"))
+                history.threshold_history.append(case.get("threshold"))
+                history.mean_score_history.append(case.get("mean_score"))
     # Cases first seen in an early report were appended to on every
     # later report; cases first seen later got backfilled. Order the
     # history by first appearance.
@@ -447,7 +587,9 @@ def format_flaky_history(history: FlakyHistoryReport) -> str:
         f"Flaky in latest report: {len(history.flaky_in_latest)}  "
         f"Persistently flaky: {len(history.persistently_flaky_cases)}  "
         f"Newly flaky: {len(history.newly_flaky)}  "
-        f"Stopped flaky: {len(history.stopped_flaky)}"
+        f"Stopped flaky: {len(history.stopped_flaky)}  "
+        f"Threshold-explained transitions: "
+        f"{len(history.threshold_explained_transitions)}"
     )
     lines.append("")
     lines.append(
@@ -482,6 +624,44 @@ def format_flaky_history(history: FlakyHistoryReport) -> str:
                 parts.append(f"{rate * 100:.0f}%")
         return " ".join(parts)
 
+    def _fmt_threshold(threshold) -> str:
+        """A threshold for the annotation: ``none`` when the case
+        carries none and a full score is required."""
+        return "none" if threshold is None else f"{threshold:g}"
+
+    def _transition_annotation(case: CaseFlakyHistory) -> str:
+        """Why the case moved between the flaky and stable groups,
+        for the newly/stopped sections: a threshold change with
+        unchanged scores, or a genuine score move."""
+        boundary = case.transition_boundary
+        if boundary is None:
+            return ""
+        if case.transition_cause == "threshold":
+            return (
+                f" — threshold change "
+                f"{_fmt_threshold(boundary['prev_threshold'])} -> "
+                f"{_fmt_threshold(boundary['latest_threshold'])}, "
+                f"mean score unchanged at "
+                f"{boundary['latest_mean_score']:.2f}"
+            )
+        if case.transition_cause == "score":
+            text = (
+                f" — mean score "
+                f"{boundary['prev_mean_score']:.2f} -> "
+                f"{boundary['latest_mean_score']:.2f}"
+            )
+            if (
+                boundary["prev_threshold"]
+                != boundary["latest_threshold"]
+            ):
+                text += (
+                    f"; threshold also changed "
+                    f"{_fmt_threshold(boundary['prev_threshold'])} -> "
+                    f"{_fmt_threshold(boundary['latest_threshold'])}"
+                )
+            return text
+        return ""
+
     _section(
         "Persistently flaky",
         history.persistently_flaky_cases,
@@ -503,7 +683,7 @@ def format_flaky_history(history: FlakyHistoryReport) -> str:
         history.newly_flaky,
         lambda c: (
             f"{c.case_id} (stable before, flaky in latest report: "
-            f"{_history_text(c)})"
+            f"{_history_text(c)}){_transition_annotation(c)}"
         ),
     )
     _section(
@@ -511,7 +691,15 @@ def format_flaky_history(history: FlakyHistoryReport) -> str:
         history.stopped_flaky,
         lambda c: (
             f"{c.case_id} (flaky before, stable in latest report: "
-            f"{_history_text(c)})"
+            f"{_history_text(c)}){_transition_annotation(c)}"
+        ),
+    )
+    _section(
+        "Threshold-explained transitions",
+        history.threshold_explained_transitions,
+        lambda c: (
+            f"{c.case_id} (moved between flaky and stable: "
+            f"{_history_text(c)}){_transition_annotation(c)}"
         ),
     )
     lines.append("Per-case flaky history:")

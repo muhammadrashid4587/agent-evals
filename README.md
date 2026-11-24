@@ -1028,7 +1028,19 @@ before, stable now). A case that first appears flaky in the latest
 report was never stable before, so it counts as flaky in the latest
 report but not as newly flaky; a case added or removed mid-history
 gets no verdict for the reports it was not part of, so it does not
-skew the other cases' histories. The JSON history carries the same
+skew the other cases' histories. The history is threshold-aware:
+each case carries the pass threshold in effect per report
+(`threshold_history` in the JSON, null when the case has none or
+was absent) alongside its mean score, and when a case moves
+between the flaky and stable groups the history says why — a
+transition is flagged threshold-explained when the threshold
+changed between the two reports bracketing the move while the mean
+score stayed the same, so a case that only started flipping
+because its bar moved is not mistaken for an agent regression; a
+move with a genuine score change reads as score movement instead.
+The text summary annotates both kinds in the newly and stopped
+sections and lists the threshold-explained transitions as their
+own section. The JSON history carries the same
 groups plus per-case totals (`total_runs`, `total_passes`,
 `total_fails`, `flaky_reports`) and the pass-rate history, so CI
 can track a case's reliability over time. The CLI exits 1 while any
@@ -1355,3 +1367,16 @@ make demo    # run both example suites through the CLI
   passes because of its threshold says so; the pass counts were
   already threshold-aware, and changing a threshold already
   changes the case fingerprint.~~ (done in v0.44.0)
+- ~~Threshold-aware flaky history: a flaky-history report records
+  each case's pass threshold in effect per report
+  (`"threshold_history"` in the JSON, null when the case has none
+  or was absent) alongside its mean score, and when a case moves
+  between the flaky and stable groups the history says why — a
+  transition is flagged threshold-explained when the threshold
+  changed between the two reports bracketing the move while the
+  mean score stayed the same, so a case that only started flipping
+  because its bar moved is not mistaken for an agent regression,
+  and a move with a genuine score change reads as score movement
+  instead; the text summary annotates both kinds in the newly and
+  stopped sections and lists the threshold-explained transitions
+  as their own section.~~ (done in v0.45.0)
