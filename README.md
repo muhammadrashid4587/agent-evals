@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Eleven scorers: exact match, substring, contains-all,
-  contains-any, regex, JSON-schema shape, JSON-path value, JSON
+- Fourteen scorers: exact match, substring, contains-all,
+  contains-any, not-contains, regex, JSON-schema shape, JSON-path value, JSON
   subset, fuzzy similarity, starts with, ends with, numeric tolerance, and a judge scorer that scores
   free-form output against a rubric with a pluggable judge (a
   deterministic built-in stub judge by default; bring your own LLM
@@ -90,6 +90,7 @@ detail; the run continues with the remaining cases.
 | `contains` | `{"substring": "hello"}` | output contains the substring |
 | `contains_all` | `{"substrings": ["hello", "world"]}` | output contains every listed substring (empty list passes) |
 | `contains_any` | `{"substrings": ["hello", "hi"]}` | output contains at least one listed substring (empty list fails) |
+| `not_contains` | `{"substrings": ["as an AI", "sorry"]}` | output contains none of the listed substrings (empty list passes) |
 | `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
@@ -158,6 +159,16 @@ score is the fraction of the suffix the output matches from the
 end, so an output that gets the last few words right still earns
 part of its weight. An empty `suffix` passes vacuously: every
 string ends with it.
+
+The `not_contains` scorer is the mirror of `contains_all`, for
+output that must not contain certain phrases — an answer that must
+not say "as an AI", a reply that must not apologise, a summary that
+must not leak a forbidden token. It passes when none of the listed
+substrings appears in the output. It gives partial credit like
+`contains_all`: the score is the fraction of listed substrings that
+are absent, so an output that slips in one of four forbidden phrases
+still earns most of its weight. An empty `substrings` list passes
+vacuously: there is nothing forbidden to find.
 
 ## LLM-as-judge scorer
 
@@ -1130,3 +1141,9 @@ make demo    # run both example suites through the CLI
   fraction of the suffix matched from the end, so an output that
   gets the last few words right still earns part of its weight.~~
   (done in v0.32.0)
+- ~~`not_contains` scorer: `not_contains` passes when the output
+  contains none of the listed substrings — the mirror of
+  `contains_all` — with partial credit equal to the fraction of
+  listed substrings absent, so an output that slips in one
+  forbidden phrase still earns most of its weight.~~
+  (done in v0.33.0)

@@ -102,6 +102,53 @@ class TestContainsAnyScorer(unittest.TestCase):
             score_case(_case({"type": "contains_any", "substrings": "hello"}), "hello")
 
 
+class TestNotContainsScorer(unittest.TestCase):
+    def test_none_present_passes(self):
+        ok, detail, score = score_case(
+            _case({"type": "not_contains", "substrings": ["as an AI", "sorry"]}),
+            "Here is the refund policy.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("no forbidden substrings", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_one_present_fails_with_partial_credit(self):
+        ok, detail, score = score_case(
+            _case(
+                {"type": "not_contains", "substrings": ["hello", "world"]}
+            ),
+            "hello there",
+        )
+        self.assertFalse(ok)
+        self.assertIn("hello", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_all_present_scores_zero(self):
+        ok, _, score = score_case(
+            _case(
+                {"type": "not_contains", "substrings": ["hello", "world"]}
+            ),
+            "hello world",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_list_passes_vacuously(self):
+        ok, _, score = score_case(
+            _case({"type": "not_contains", "substrings": []}), "anything"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_missing_substrings_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "not_contains"}), "hello")
+
+    def test_non_list_spec_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "not_contains", "substrings": "hello"}), "hello")
+
+
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
         ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")

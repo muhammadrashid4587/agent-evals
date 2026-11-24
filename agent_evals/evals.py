@@ -12,6 +12,7 @@ Design
       {"type": "contains", "substring": "hello"}
       {"type": "contains_all", "substrings": ["hello", "world"]}
       {"type": "contains_any", "substrings": ["hello", "hi"]}
+      {"type": "not_contains", "substrings": ["as an AI", "sorry"]}
       {"type": "regex", "pattern": "^\\d+$"}
       {"type": "json_schema", "schema": {"name": "str", "age": "int"}}
       {"type": "json_path", "path": "$.result.total", "expected": 42}
@@ -454,6 +455,33 @@ def score_contains_any(output: str, substrings: list) -> tuple:
     )
 
 
+def score_not_contains(output: str, substrings: list) -> tuple:
+    """Pass when the output contains none of the listed substrings.
+
+    The mirror of :func:`score_contains_all`: where that scorer
+    requires every listed substring to be present, this one requires
+    every listed substring to be absent — for output that must not
+    leak a phrase ("as an AI"), must not apologise, or must not
+    contain a forbidden token. An empty list passes vacuously: there
+    is nothing forbidden to find. Partial credit: the score is the
+    fraction of listed substrings absent, so an output that slips in
+    one of four forbidden phrases still earns most of its weight. A
+    case only counts as passed when no listed substring is found
+    (score 1.0).
+    """
+    found = [s for s in substrings if s in output]
+    if not substrings:
+        return True, "no forbidden substrings found", 1.0
+    score = (len(substrings) - len(found)) / len(substrings)
+    if not found:
+        return True, "no forbidden substrings found", 1.0
+    return (
+        False,
+        f"found forbidden substrings: {', '.join(repr(s) for s in found)}",
+        score,
+    )
+
+
 def score_starts_with(output: str, prefix: str) -> tuple:
     """Pass when the output starts with the prefix string.
 
@@ -850,7 +878,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     """Score one case's output. Returns (passed, detail, score) where
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
     when the scorer gives partial credit (see ``score_contains_all``,
-    ``score_fuzzy``, ``score_starts_with``, ``score_ends_with``, and ``score_judge``). ``judges`` is the registry of judge callables
+    ``score_not_contains``, ``score_fuzzy``, ``score_starts_with``, ``score_ends_with``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry."""
     spec = case.scorer
     kind = spec.get("type")
@@ -862,6 +890,8 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
         return score_contains_all(output, _as_substring_list(spec, kind))
     if kind == "contains_any":
         return score_contains_any(output, _as_substring_list(spec, kind))
+    if kind == "not_contains":
+        return score_not_contains(output, _as_substring_list(spec, kind))
     if kind == "regex":
         return score_regex(output, str(spec["pattern"]))
     if kind == "json_schema":
