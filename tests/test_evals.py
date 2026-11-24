@@ -831,6 +831,239 @@ class TestEndsWithScorer(unittest.TestCase):
         self.assertEqual(score, 1.0)
 
 
+class TestLengthScorer(unittest.TestCase):
+    def test_inside_range_passes(self):
+        ok, detail, score = score_case(
+            _case({"type": "length", "min_length": 10, "max_length": 20}),
+            "hello world",
+        )
+        self.assertTrue(ok)
+        self.assertIn("length 11 characters", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        ok, _, score = score_case(
+            _case({"type": "length", "min_length": 10, "max_length": 20}),
+            "0123456789",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "length", "min_length": 10, "max_length": 20}),
+            "01234567890123456789",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # 5 of a 10 minimum: score falls linearly to 0 at length 0.
+        ok, detail, score = score_case(
+            _case({"type": "length", "min_length": 10, "max_length": 20}),
+            "hello",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 10", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_empty_output_below_minimum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "length", "min_length": 10}), ""
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_above_maximum_partial_credit(self):
+        # 15 of a 10 maximum: halfway to 2x the max, so score 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "length", "max_length": 10}),
+            "0123456789abcde",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 10", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_twice_maximum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "length", "max_length": 10}),
+            "01234567890123456789",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_wildly_over_maximum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "length", "max_length": 10}), "x" * 25
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_only_minimum_is_unbounded_above(self):
+        ok, _, score = score_case(
+            _case({"type": "length", "min_length": 5}), "x" * 100
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_only_maximum_is_unbounded_below(self):
+        ok, _, score = score_case(
+            _case({"type": "length", "max_length": 5}), ""
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_zero_maximum(self):
+        ok, _, score = score_case(
+            _case({"type": "length", "max_length": 0}), ""
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "length", "max_length": 0}), "x"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_words_unit(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "length",
+                    "min_length": 2,
+                    "max_length": 4,
+                    "unit": "words",
+                }
+            ),
+            "one two three",
+        )
+        self.assertTrue(ok)
+        self.assertIn("length 3 words", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_words_unit_partial_credit(self):
+        # 5 words against a 4 maximum: (2*4 - 5) / 4 = 0.75.
+        ok, _, score = score_case(
+            _case(
+                {"type": "length", "max_length": 4, "unit": "words"}
+            ),
+            "one two three four five",
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.75)
+
+    def test_words_unit_below_minimum(self):
+        # 1 word against a 2 minimum: 1 / 2 = 0.5.
+        ok, _, score = score_case(
+            _case(
+                {"type": "length", "min_length": 2, "unit": "words"}
+            ),
+            "one",
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_words_split_on_any_whitespace(self):
+        ok, _, _ = score_case(
+            _case(
+                {"type": "length", "min_length": 3, "max_length": 3,
+                 "unit": "words"}
+            ),
+            "one\ttwo\nthree",
+        )
+        self.assertTrue(ok)
+
+    def test_surrounding_whitespace_ignored(self):
+        ok, _, _ = score_case(
+            _case({"type": "length", "min_length": 5, "max_length": 5}),
+            "  hello  \n",
+        )
+        self.assertTrue(ok)
+
+    def test_integral_float_bound_accepted(self):
+        ok, _, _ = score_case(
+            _case({"type": "length", "min_length": 10.0}), "0123456789"
+        )
+        self.assertTrue(ok)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "length"}), "hello")
+
+    def test_negative_minimum_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "length", "min_length": -1}), "hello"
+            )
+
+    def test_negative_maximum_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "length", "max_length": -5}), "hello"
+            )
+
+    def test_non_integer_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "length", "min_length": 10.5}), "hello"
+            )
+
+    def test_string_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "length", "min_length": "10"}), "hello"
+            )
+
+    def test_boolean_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "length", "min_length": True}), "hello"
+            )
+
+    def test_minimum_above_maximum_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "length", "min_length": 20, "max_length": 10}
+                ),
+                "hello",
+            )
+
+    def test_unknown_unit_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "length", "max_length": 10, "unit": "bytes"}
+                ),
+                "hello",
+            )
+
+    def test_non_string_unit_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "length", "max_length": 10, "unit": 5}),
+                "hello",
+            )
+
+    def test_flows_through_suite_json(self):
+        suite = Suite.from_dict(
+            {
+                "name": "length-demo",
+                "cases": [
+                    {
+                        "id": "terse",
+                        "prompt": "Answer briefly.",
+                        "scorer": {
+                            "type": "length",
+                            "max_length": 10,
+                        },
+                    }
+                ],
+            }
+        )
+        report = run_suite(suite, lambda prompt: "short")
+        self.assertEqual(report.passed, 1)
+        self.assertEqual(report.results[0].score, 1.0)
+
+
 class TestIgnoreCaseScorers(unittest.TestCase):
     def test_contains_matches_other_case(self):
         ok, _, _ = score_case(

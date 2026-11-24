@@ -15,9 +15,9 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Fourteen scorers: exact match, substring, contains-all,
+- Fifteen scorers: exact match, substring, contains-all,
   contains-any, not-contains, regex, JSON-schema shape, JSON-path value, JSON
-  subset, fuzzy similarity, starts with, ends with, numeric tolerance, and a judge scorer that scores
+  subset, fuzzy similarity, starts with, ends with, length range, numeric tolerance, and a judge scorer that scores
   free-form output against a rubric with a pluggable judge (a
   deterministic built-in stub judge by default; bring your own LLM
   judge as a callable or an HTTP endpoint).
@@ -98,6 +98,7 @@ detail; the run continues with the remaining cases.
 | `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8; optional `"ignore_case": true` for a case-insensitive comparison) |
 | `starts_with` | `{"prefix": "The answer is"}` | the output starts with the prefix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `ends_with` | `{"suffix": "is 42"}` | the output ends with the suffix (surrounding whitespace ignored; optional `"ignore_case": true`) |
+| `length` | `{"min_length": 10, "max_length": 100}` | the output's length falls in the range (at least one bound required; optional `"unit": "words"` for word count instead of characters) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
@@ -169,6 +170,24 @@ substrings appears in the output. It gives partial credit like
 are absent, so an output that slips in one of four forbidden phrases
 still earns most of its weight. An empty `substrings` list passes
 vacuously: there is nothing forbidden to find.
+
+The `length` scorer is for output that must be a certain size — a
+summary that has to fit in a tweet, an answer that has to be at least
+a paragraph, a code snippet that must not ramble. It passes when the
+output's length falls in `[min_length, max_length]`; at least one
+bound is required, and a missing bound is unbounded on that side, so
+`{"min_length": 10}` only sets a floor and `{"max_length": 100}`
+only sets a ceiling. Length is measured in characters by default
+(the stripped output, like the other string scorers) or in words
+with `"unit": "words"` (whitespace-split word count). It gives
+partial credit: the score falls linearly from 1.0 at the bound to
+0.0 at a length of 0 (too short: the score is `n / min_length`) or
+at twice the maximum (too long: the score is
+`max(0, (2 * max_length - n) / max_length)`), so an output just
+outside the range still earns most of its weight and one wildly
+outside earns nothing. A bound that is not a non-negative integer,
+`min_length` above `max_length`, or a `unit` other than
+`"characters"` or `"words"` is a scorer error.
 
 The `exact` scorer and the six string scorers — `contains`, `contains_all`,
 `contains_any`, `not_contains`, `starts_with`, `ends_with` — and the
@@ -1183,3 +1202,10 @@ make demo    # run both example suites through the CLI
   `"ignore_case": true`, which matches with `re.IGNORECASE` — with
   scores and partial credit unchanged, the option defaulting to off,
   and a non-boolean value rejected as a scorer error.~~ (done in v0.36.0)
+- ~~`length` scorer: `length` passes when the output's length falls in
+  `[min_length, max_length]` — at least one bound required, a missing
+  bound unbounded on that side — measured in characters by default or
+  in words with `"unit": "words"`, with linear partial credit falling
+  to 0 at a length of 0 (too short) or twice the maximum (too long),
+  and non-integer, negative, or inverted bounds rejected as scorer
+  errors.~~ (done in v0.37.0)

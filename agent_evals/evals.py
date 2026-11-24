@@ -15,6 +15,7 @@ Design
       {"type": "not_contains", "substrings": ["as an AI", "sorry"]}
       {"type": "starts_with", "prefix": "The answer is"}
       {"type": "ends_with", "suffix": "is 42"}
+      {"type": "length", "min_length": 10, "max_length": 100}
 
 * The ``exact`` scorer and the string scorers (``contains``,
   ``contains_all``, ``contains_any``, ``not_contains``,
@@ -616,6 +617,108 @@ def score_ends_with(
     )
 
 
+def _as_length_bound(spec: dict, key: str, kind: str) -> Optional[int]:
+    """Read an optional length bound from a scorer spec.
+
+    A bound must be a non-negative integer: ``True``/``False`` are
+    rejected (``bool`` is a subclass of ``int``), a float is only
+    accepted when it is integral (``10.0``), and a string, a
+    non-integral float, or a negative value is a scorer error.
+    Absent means no bound on that side.
+    """
+    if key not in spec or spec[key] is None:
+        return None
+    value = spec[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"{kind} scorer requires {key!r} to be a non-negative integer"
+        )
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError(
+                f"{kind} scorer requires {key!r} to be a non-negative integer"
+            )
+        value = int(value)
+    if value < 0:
+        raise ValueError(
+            f"{kind} scorer requires {key!r} to be a non-negative integer"
+        )
+    return value
+
+
+def score_length(
+    output: str,
+    min_length: Optional[int] = None,
+    max_length: Optional[int] = None,
+    unit: str = "characters",
+) -> tuple:
+    """Pass when the output's length falls in ``[min_length, max_length]``.
+
+    At least one bound is required; a missing bound is unbounded on
+    that side, so ``{"min_length": 10}`` only sets a floor and
+    ``{"max_length": 100}`` only sets a ceiling. Length is measured
+    in characters by default (``len`` of the stripped output, like
+    the other string scorers) or in words with ``unit="words"``
+    (whitespace-split word count). Partial credit: the score falls
+    linearly from 1.0 at the bound to 0.0 at a length of 0 (too
+    short: score is ``n / min_length``) or at twice the maximum
+    (too long: score is ``max(0, (2 * max_length - n) / max_length)``),
+    so an output just outside the range still earns most of its
+    weight and one wildly outside earns nothing. A bound that is
+    not a non-negative integer, ``min_length`` above ``max_length``,
+    or a ``unit`` other than ``"characters"`` or ``"words"`` is a
+    scorer error.
+    """
+    if unit not in ("characters", "words"):
+        raise ValueError(
+            "length scorer requires 'unit' to be 'characters' or 'words'"
+        )
+    if min_length is None and max_length is None:
+        raise ValueError(
+            "length scorer requires at least one of 'min_length' or "
+            "'max_length'"
+        )
+    if (
+        min_length is not None
+        and max_length is not None
+        and min_length > max_length
+    ):
+        raise ValueError(
+            "length scorer requires 'min_length' <= 'max_length'"
+        )
+    stripped = output.strip()
+    if unit == "words":
+        n = len(stripped.split())
+    else:
+        n = len(stripped)
+    lo = f"min {min_length}" if min_length is not None else "no minimum"
+    hi = f"max {max_length}" if max_length is not None else "no maximum"
+    if (min_length is None or n >= min_length) and (
+        max_length is None or n <= max_length
+    ):
+        return True, f"length {n} {unit} within [{lo}, {hi}]", 1.0
+    if min_length is not None and n < min_length:
+        score = n / min_length
+        return (
+            False,
+            f"length {n} {unit} below minimum {min_length} "
+            f"(score {score:.2f})",
+            score,
+        )
+    # n > max_length here; max_length is 0 only when the output is
+    # non-empty, which already scores 0.
+    if max_length == 0:
+        score = 0.0
+    else:
+        score = max(0.0, (2 * max_length - n) / max_length)
+    return (
+        False,
+        f"length {n} {unit} above maximum {max_length} "
+        f"(score {score:.2f})",
+        score,
+    )
+
+
 def score_regex(output: str, pattern: str, ignore_case: bool = False) -> tuple:
     """Pass when the regex matches anywhere in the output.
 
@@ -964,7 +1067,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     """Score one case's output. Returns (passed, detail, score) where
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
     when the scorer gives partial credit (see ``score_contains_all``,
-    ``score_not_contains``, ``score_fuzzy``, ``score_starts_with``, ``score_ends_with``, and ``score_judge``). ``judges`` is the registry of judge callables
+    ``score_not_contains``, ``score_fuzzy``, ``score_starts_with``, ``score_ends_with``, ``score_length``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``starts_with``,
@@ -1057,6 +1160,13 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
             output,
             str(spec["suffix"]),
             _as_bool_option(spec, "ignore_case", kind),
+        )
+    if kind == "length":
+        return score_length(
+            output,
+            _as_length_bound(spec, "min_length", kind),
+            _as_length_bound(spec, "max_length", kind),
+            spec.get("unit", "characters"),
         )
     if kind == "judge":
         return score_judge(output, case, judges)
