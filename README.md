@@ -15,9 +15,10 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Eighteen scorers: exact match, substring, contains-all,
+- Nineteen scorers: exact match, substring, contains-all,
   contains-any, not-contains, regex, contains-regex, JSON-schema shape, JSON-path value, JSON
-  subset, JSON equality, fuzzy similarity, starts with, ends with, length range,
+  subset, JSON equality, fuzzy similarity, starts with, ends with, one of,
+  length range,
   numeric range, numeric tolerance, and a judge scorer that scores
   free-form output against a rubric with a pluggable judge (a
   deterministic built-in stub judge by default; bring your own LLM
@@ -101,6 +102,7 @@ detail; the run continues with the remaining cases.
 | `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8; optional `"ignore_case": true` for a case-insensitive comparison) |
 | `starts_with` | `{"prefix": "The answer is"}` | the output starts with the prefix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `ends_with` | `{"suffix": "is 42"}` | the output ends with the suffix (surrounding whitespace ignored; optional `"ignore_case": true`) |
+| `one_of` | `{"values": ["yes", "no", "maybe"]}` | the output equals one of the listed values (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `length` | `{"min_length": 10, "max_length": 100}` | the output's length falls in the range (at least one bound required; optional `"unit": "words"` for word count instead of characters) |
 | `range` | `{"min": 0, "max": 100}` | the first number in the output falls in the range (at least one bound required; optional `"tolerance"` widens the accepted band) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
@@ -186,6 +188,18 @@ end, so an output that gets the last few words right still earns
 part of its weight. An empty `suffix` passes vacuously: every
 string ends with it.
 
+The `one_of` scorer is for output that must be one of a fixed set
+of allowed values — a classification answer that has to be "yes",
+"no", or "maybe", a verdict from a fixed vocabulary, a choice from
+a menu. It passes when the stripped output equals one of the listed
+`values`, whole-output equality like `exact`, not containment: "yes
+please" is not "yes". It is all-or-nothing like `exact`: 1.0 on a
+pass, 0.0 on a fail. It accepts an optional `"ignore_case": true`,
+which case-folds both the values and the output before comparing.
+A missing `values`, a non-list `values`, or an empty list is a
+scorer error: a set of allowed values with nothing in it can never
+pass, so the suite is wrong, not the agent.
+
 The `not_contains` scorer is the mirror of `contains_all`, for
 output that must not contain certain phrases — an answer that must
 not say "as an AI", a reply that must not apologise, a summary that
@@ -249,8 +263,8 @@ that passes a number where a pattern belongs fails loudly instead
 of matching the digits of that number. An invalid regex is a scorer
 error too. It is all-or-nothing: 1.0 on a match, 0.0 otherwise.
 
-The `exact` scorer and the six string scorers — `contains`, `contains_all`,
-`contains_any`, `not_contains`, `starts_with`, `ends_with` — and the
+The `exact` scorer and the seven string scorers — `contains`, `contains_all`,
+`contains_any`, `not_contains`, `starts_with`, `ends_with`, `one_of` — and the
 `fuzzy`, `regex`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
 in the spec, e.g.
 `{"type": "exact", "expected": "Hello", "ignore_case": true}`.
@@ -1380,3 +1394,10 @@ make demo    # run both example suites through the CLI
   instead; the text summary annotates both kinds in the newly and
   stopped sections and lists the threshold-explained transitions
   as their own section.~~ (done in v0.45.0)
+- ~~`one_of` scorer: `one_of` passes when the stripped output
+  equals one of a listed set of allowed values — the scorer for
+  classification-style evals, an answer that has to be "yes", "no",
+  or "maybe" — with whole-output equality like `exact` (not
+  containment), all-or-nothing scoring, an optional
+  `"ignore_case": true`, and a missing, non-list, or empty
+  `values` rejected as a scorer error.~~ (done in v0.46.0)

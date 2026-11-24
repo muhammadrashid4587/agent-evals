@@ -679,6 +679,47 @@ def score_ends_with(
     )
 
 
+def _as_value_list(spec: dict, kind: str) -> list:
+    """Coerce a scorer spec's ``values`` value to a non-empty list of strings.
+
+    An empty list is a scorer error: a set of allowed values with
+    nothing in it can never pass, so the suite is wrong, not the
+    agent — the same fail-loudly rule as a non-string
+    ``contains_regex`` pattern.
+    """
+    values = spec.get("values")
+    if not isinstance(values, list):
+        raise ValueError(f"{kind} scorer requires a 'values' list")
+    if not values:
+        raise ValueError(f"{kind} scorer requires a non-empty 'values' list")
+    return [str(v) for v in values]
+
+
+def score_one_of(
+    output: str, values: list, ignore_case: bool = False
+) -> tuple:
+    """Pass when the output equals one of the allowed values.
+
+    The scorer for classification-style evals: an agent that must
+    answer with a label from a fixed set — "yes", "no", "maybe" — a
+    verdict from a fixed vocabulary, a choice from a menu. The
+    output is stripped before comparing, like ``exact``, so
+    surrounding whitespace does not fail the case. It is
+    all-or-nothing like ``exact``: 1.0 on a pass, 0.0 on a fail.
+    With ``ignore_case``, the comparison is case-insensitive; the
+    detail still names the values as written in the spec.
+    """
+    out = output.strip()
+    folded = _fold(out, ignore_case)
+    if any(folded == _fold(v.strip(), ignore_case) for v in values):
+        return True, f"output is one of {values!r}", 1.0
+    return (
+        False,
+        f"expected one of {values!r}, got {out!r}",
+        0.0,
+    )
+
+
 def _as_length_bound(spec: dict, key: str, kind: str) -> Optional[int]:
     """Read an optional length bound from a scorer spec.
 
@@ -1362,7 +1403,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``starts_with``,
-    ``ends_with``) and the ``exact``, ``fuzzy``, ``regex``, and
+    ``ends_with``, ``one_of``) and the ``exact``, ``fuzzy``, ``regex``, and
     ``contains_regex`` scorers accept an optional
     ``"ignore_case": true`` in the spec:
     both the expected strings and the output are case-folded before
@@ -1469,6 +1510,12 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
         return score_ends_with(
             output,
             str(spec["suffix"]),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
+    if kind == "one_of":
+        return score_one_of(
+            output,
+            _as_value_list(spec, kind),
             _as_bool_option(spec, "ignore_case", kind),
         )
     if kind == "length":

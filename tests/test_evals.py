@@ -951,6 +951,102 @@ class TestEndsWithScorer(unittest.TestCase):
         self.assertEqual(score, 1.0)
 
 
+class TestOneOfScorer(unittest.TestCase):
+    def test_allowed_value_passes(self):
+        ok, detail, score = score_case(
+            _case({"type": "one_of", "values": ["yes", "no", "maybe"]}),
+            "no",
+        )
+        self.assertTrue(ok)
+        self.assertIn("one of", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_first_value_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "one_of", "values": ["yes", "no"]}), "yes"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_value_not_in_list_fails(self):
+        ok, detail, score = score_case(
+            _case({"type": "one_of", "values": ["yes", "no", "maybe"]}),
+            "perhaps",
+        )
+        self.assertFalse(ok)
+        self.assertIn("expected one of", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_substring_of_allowed_value_fails(self):
+        # one_of is whole-output equality, not containment: "yes
+        # please" is not "yes".
+        ok, _, score = score_case(
+            _case({"type": "one_of", "values": ["yes", "no"]}),
+            "yes please",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_surrounding_whitespace_ignored(self):
+        ok, _, _ = score_case(
+            _case({"type": "one_of", "values": ["yes", "no"]}), "  yes\n"
+        )
+        self.assertTrue(ok)
+
+    def test_ignore_case_matches_other_case(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "one_of",
+                    "values": ["Yes", "No"],
+                    "ignore_case": True,
+                }
+            ),
+            "YES",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_case_sensitive_by_default(self):
+        ok, _, score = score_case(
+            _case({"type": "one_of", "values": ["Yes", "No"]}), "YES"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_missing_values_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "one_of"}), "yes")
+
+    def test_non_list_values_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "one_of", "values": "yes"}), "yes")
+
+    def test_empty_values_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "one_of", "values": []}), "yes")
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "one_of",
+                        "values": ["yes"],
+                        "ignore_case": "true",
+                    }
+                ),
+                "yes",
+            )
+
+    def test_single_value_behaves_like_exact(self):
+        ok, _, score = score_case(
+            _case({"type": "one_of", "values": ["42"]}), "42"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+
 class TestLengthScorer(unittest.TestCase):
     def test_inside_range_passes(self):
         ok, detail, score = score_case(
