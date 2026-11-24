@@ -3105,5 +3105,245 @@ class TestOutputDiff(unittest.TestCase):
         self.assertIn("+c", text)
 
 
+class TestPerCaseThreshold(unittest.TestCase):
+    """Per-case pass thresholds (v0.43.0).
+
+    A case may carry a ``threshold`` in [0, 1]: it passes when its
+    scorer's score reaches the threshold, so a partial-credit case
+    can pass without a full score. When unset the case passes only
+    as its scorer says, exactly as before.
+    """
+
+    def _threshold_case(self, threshold, scorer=None):
+        return Case(
+            "c1",
+            "list the fruits",
+            scorer
+            or {
+                "type": "contains_all",
+                "substrings": ["apple", "banana", "cherry", "date"],
+            },
+            threshold=threshold,
+        )
+
+    def test_threshold_defaults_to_none_and_is_omitted(self):
+        case = Case.from_dict(
+            {"id": "c1", "prompt": "p", "scorer": {"type": "exact", "expected": "x"}}
+        )
+        self.assertIsNone(case.threshold)
+        self.assertNotIn("threshold", case.to_dict())
+        # An unset threshold leaves the case identical to before.
+        twin = Case("c1", "p", {"type": "exact", "expected": "x"})
+        self.assertEqual(case.fingerprint(), twin.fingerprint())
+
+    def test_threshold_round_trips_through_suite_json(self):
+        suite = Suite.from_dict(
+            {
+                "name": "s",
+                "cases": [
+                    {
+                        "id": "c1",
+                        "prompt": "list the fruits",
+                        "scorer": {
+                            "type": "contains_all",
+                            "substrings": ["apple", "banana", "cherry", "date"],
+                        },
+                        "threshold": 0.75,
+                    }
+                ],
+            }
+        )
+        self.assertEqual(suite.cases[0].threshold, 0.75)
+        self.assertEqual(suite.to_dict()["cases"][0]["threshold"], 0.75)
+        report = run_suite(suite, lambda prompt: "apple banana cherry")
+        self.assertTrue(report.results[0].passed)
+        self.assertEqual(report.results[0].score, 0.75)
+
+    def test_threshold_changes_the_case_fingerprint(self):
+        plain = self._threshold_case(None)
+        with_threshold = self._threshold_case(0.5)
+        self.assertNotEqual(plain.fingerprint(), with_threshold.fingerprint())
+        other = self._threshold_case(0.75)
+        self.assertNotEqual(with_threshold.fingerprint(), other.fingerprint())
+
+    def test_partial_credit_passes_when_score_meets_threshold(self):
+        # 3 of 4 substrings: score 0.75, which the scorer alone fails.
+        suite = Suite("s", [self._threshold_case(0.75)])
+        report = run_suite(suite, lambda prompt: "apple banana cherry")
+        result = report.results[0]
+        self.assertTrue(result.passed)
+        self.assertEqual(result.score, 0.75)
+        self.assertEqual(report.earned_weight, 0.75)
+        self.assertIn("meets threshold 0.75", result.detail)
+
+    def test_partial_credit_fails_below_threshold(self):
+        suite = Suite("s", [self._threshold_case(0.8)])
+        report = run_suite(suite, lambda prompt: "apple banana cherry")
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertEqual(result.score, 0.75)
+        self.assertEqual(report.earned_weight, 0.75)
+
+    def test_threshold_can_fail_a_scorer_pass_on_a_low_score(self):
+        # fuzzy ratio 0.9 passes the scorer (its own threshold is
+        # 0.8) with a score of 0.9; a case threshold of 0.95 fails it.
+        case = Case(
+            "c1",
+            "p",
+            {"type": "fuzzy", "expected": "abcdefghij"},
+            threshold=0.95,
+        )
+        report = run_suite(Suite("s", [case]), lambda prompt: "abcdefghix")
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertEqual(result.score, 0.9)
+        self.assertIn("below threshold 0.95", result.detail)
+
+    def test_threshold_zero_passes_any_scored_case(self):
+        case = Case(
+            "c1", "p", {"type": "exact", "expected": "yes"}, threshold=0.0
+        )
+        report = run_suite(Suite("s", [case]), lambda prompt: "no")
+        self.assertTrue(report.results[0].passed)
+        self.assertEqual(report.results[0].score, 0.0)
+
+    def test_scorer_error_still_fails_with_zero_threshold(self):
+        case = Case(
+            "c1",
+            "p",
+            {"type": "regex", "pattern": "[invalid"},
+            threshold=0.0,
+        )
+        report = run_suite(Suite("s", [case]), lambda prompt: "anything")
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertTrue(result.detail.startswith("scorer error:"))
+        self.assertEqual(result.score, 0.0)
+
+    def test_timeout_still_fails_with_zero_threshold(self):
+        def slow_agent(prompt):
+            time.sleep(0.5)
+            return "done"
+
+        case = Case(
+            "c1",
+            "p",
+            {"type": "exact", "expected": "done"},
+            timeout=0.05,
+            threshold=0.0,
+        )
+        report = run_suite(Suite("s", [case]), slow_agent)
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertTrue(result.timed_out)
+
+    def test_agent_error_still_fails_with_zero_threshold(self):
+        def broken_agent(prompt):
+            raise ValueError("boom")
+
+        case = Case(
+            "c1", "p", {"type": "exact", "expected": "x"}, threshold=0.0
+        )
+        report = run_suite(Suite("s", [case]), broken_agent)
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertIn("agent error", result.detail)
+
+    def test_threshold_passed_case_can_still_trip_a_latency_budget(self):
+        def slow_agent(prompt):
+            time.sleep(0.01)
+            return "apple banana cherry"
+
+        case = Case(
+            "c1",
+            "list the fruits",
+            {
+                "type": "contains_all",
+                "substrings": ["apple", "banana", "cherry", "date"],
+            },
+            threshold=0.5,
+            max_latency_ms=1,
+        )
+        report = run_suite(Suite("s", [case]), slow_agent)
+        result = report.results[0]
+        self.assertFalse(result.passed)
+        self.assertTrue(result.budget_violated)
+        self.assertEqual(result.score, 0.0)
+
+    def test_threshold_in_report_and_summary(self):
+        suite = Suite("s", [self._threshold_case(0.5)])
+        report = run_suite(suite, lambda prompt: "apple banana cherry")
+        data = report.to_dict()
+        self.assertEqual(data["results"][0]["threshold"], 0.5)
+        self.assertEqual(data["passed"], 1)
+        text = format_summary(report)
+        self.assertIn("PASS", text)
+        self.assertIn("meets threshold 0.5", text)
+
+    def test_threshold_flows_through_suite_json_file(self):
+        suite_json = {
+            "name": "threshold-suite",
+            "cases": [
+                {
+                    "id": "fruits",
+                    "prompt": "list the fruits",
+                    "scorer": {
+                        "type": "contains_all",
+                        "substrings": ["apple", "banana", "cherry", "date"],
+                    },
+                    "threshold": 0.5,
+                }
+            ],
+        }
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False
+        ) as f:
+            json.dump(suite_json, f)
+            path = f.name
+        try:
+            suite = load_suite(path)
+            report = run_suite(suite, lambda prompt: "apple banana cherry")
+        finally:
+            os.unlink(path)
+        self.assertEqual(report.passed, 1)
+
+    def test_non_numeric_threshold_rejected(self):
+        for bad in ("high", True, "0.5"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    Case.from_dict(
+                        {
+                            "id": "c1",
+                            "prompt": "p",
+                            "scorer": {"type": "exact", "expected": "x"},
+                            "threshold": bad,
+                        }
+                    )
+
+    def test_out_of_range_threshold_rejected(self):
+        for bad in (-0.1, 1.5, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    Case.from_dict(
+                        {
+                            "id": "c1",
+                            "prompt": "p",
+                            "scorer": {"type": "exact", "expected": "x"},
+                            "threshold": bad,
+                        }
+                    )
+
+    def test_integer_threshold_accepted(self):
+        case = Case.from_dict(
+            {
+                "id": "c1",
+                "prompt": "p",
+                "scorer": {"type": "exact", "expected": "x"},
+                "threshold": 1,
+            }
+        )
+        self.assertEqual(case.threshold, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

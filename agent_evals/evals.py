@@ -43,6 +43,15 @@ Design
   equal to the fraction of required substrings found. The report totals
   ``earned_weight`` over ``total_weight`` as ``weighted_score``.
 
+* A case may carry a ``threshold`` in [0, 1]: the minimum score it
+  needs to pass. By default a case passes only on a full score, but a
+  case with ``threshold`` 0.75 passes when its scorer gives it 0.75 or
+  more — so a partial-credit case can pass without earning a full
+  score, and a case whose scorer passes it on a low score can still
+  fail. The threshold only applies to a score the scorer actually
+  produced: a timeout, an agent error, or a scorer error still fails
+  the case whatever the threshold is.
+
 * A case may carry a ``max_latency_ms`` budget: if the agent's answer
   passes its checks but took longer than the budget, the case is
   reported as a budget violation instead of a pass (``passed`` is
@@ -180,6 +189,12 @@ class Case:
     token budget only applies when the agent reports a token count.
     ``tags`` is an optional list of labels (e.g. ``["smoke"]``) used
     to select cases for a run; it defaults to no tags.
+    ``threshold`` is an optional per-case pass threshold in [0, 1]:
+    when set, a case passes when its scorer's score reaches the
+    threshold, so a partial-credit case can pass without a full
+    score. When unset the case passes only as its scorer says. A
+    timeout, an agent error, or a scorer error still fails the case
+    whatever the threshold is.
     """
 
     id: str
@@ -189,6 +204,7 @@ class Case:
     weight: float = 1.0
     max_latency_ms: Optional[float] = None
     max_tokens: Optional[int] = None
+    threshold: Optional[float] = None
     tags: list = field(default_factory=list)
 
     @classmethod
@@ -252,6 +268,24 @@ class Case:
                 f"case {data.get('id')!r}: tags must be a list of strings, "
                 f"got {tags!r}"
             )
+        threshold = data.get("threshold")
+        if threshold is not None:
+            # A threshold is a score in [0, 1]: bools are rejected
+            # (bool is a subclass of int), and NaN/infinity fail the
+            # range check below, since no comparison with them is true.
+            if isinstance(threshold, bool) or not isinstance(
+                threshold, (int, float)
+            ):
+                raise ValueError(
+                    f"case {data.get('id')!r}: threshold must be a number "
+                    f"in [0, 1], got {threshold!r}"
+                )
+            threshold = float(threshold)
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError(
+                    f"case {data.get('id')!r}: threshold must be in "
+                    f"[0, 1], got {threshold!r}"
+                )
         seen: set = set()
         clean_tags = []
         for tag in tags:
@@ -274,6 +308,7 @@ class Case:
             weight=weight,
             max_latency_ms=max_latency_ms,
             max_tokens=max_tokens,
+            threshold=threshold,
             tags=clean_tags,
         )
 
@@ -287,13 +322,15 @@ class Case:
             data["max_latency_ms"] = self.max_latency_ms
         if self.max_tokens is not None:
             data["max_tokens"] = self.max_tokens
+        if self.threshold is not None:
+            data["threshold"] = self.threshold
         if self.tags:
             data["tags"] = list(self.tags)
         return data
 
     def fingerprint(self) -> str:
         """A short content hash of this case: its id, prompt, scorer,
-        timeout, weight, latency budget, token budget, and tags. Two cases with the
+        timeout, weight, latency budget, token budget, threshold, and tags. Two cases with the
         same fingerprint are the same case; a changed prompt or scorer
         changes the fingerprint, so a run diff can tell a case that
         changed from an agent that changed."""
@@ -1517,6 +1554,9 @@ class Result:
     compare two blobs by eye.
     ``tags`` is the case's tag list, carried into the report so a
     filtered run still says which cases it ran.
+    ``threshold`` is the case's pass threshold (None when the case
+    carries none): the score the case needed to pass, so a report
+    says why a case that scored 0.75 counted as passed.
     """
 
     case_id: str
@@ -1535,6 +1575,7 @@ class Result:
     case_fingerprint: Optional[str] = None
     diff: Optional[str] = None
     tags: list = field(default_factory=list)
+    threshold: Optional[float] = None
 
     def to_dict(self) -> dict:
         return {
@@ -1554,6 +1595,7 @@ class Result:
             "case_fingerprint": self.case_fingerprint,
             "diff": self.diff,
             "tags": list(self.tags),
+            "threshold": self.threshold,
         }
 
 
@@ -1761,7 +1803,10 @@ def _run_case(
 
     An agent that raises is recorded as a failed case with the exception
     in the detail. A case with a ``timeout`` that the agent exceeds is
-    recorded as failed and timed out.
+    recorded as failed and timed out. A case carrying a ``threshold``
+    passes when its scorer's score reaches it, and fails when it does
+    not — a timeout, an agent error, or a scorer error still fails the
+    case whatever the threshold is.
     """
     t0 = time.perf_counter()
     status, output, tokens, exc = _run_agent(agent, case.prompt, case.timeout)
@@ -1777,6 +1822,7 @@ def _run_case(
             weight=case.weight,
             case_fingerprint=case.fingerprint(),
             tags=list(case.tags),
+            threshold=case.threshold,
         )
     if status == "error":
         return Result(
@@ -1789,9 +1835,30 @@ def _run_case(
             weight=case.weight,
             case_fingerprint=case.fingerprint(),
             tags=list(case.tags),
+            threshold=case.threshold,
         )
     try:
         passed, detail, score = score_case(case, output, judges)
+        if case.threshold is not None:
+            # The case passes when its score reaches its own
+            # threshold, either way: a partial-credit fail can pass
+            # on a good-enough score, and a scorer pass on a low
+            # score can fail. A timeout, an agent error, or a scorer
+            # error never reaches this line, so those still fail
+            # whatever the threshold is. The case keeps the scorer's
+            # score either way, so it earns its partial weight.
+            if score >= case.threshold and not passed:
+                passed = True
+                detail = (
+                    f"{detail}; score {score:.2f} meets threshold "
+                    f"{case.threshold:g}"
+                )
+            elif score < case.threshold and passed:
+                passed = False
+                detail = (
+                    f"{detail}; score {score:.2f} below threshold "
+                    f"{case.threshold:g}"
+                )
     except ValueError as exc:
         passed, detail, score = False, f"scorer error: {exc}", 0.0
     diff = None
@@ -1849,6 +1916,7 @@ def _run_case(
         case_fingerprint=case.fingerprint(),
         diff=diff,
         tags=list(case.tags),
+        threshold=case.threshold,
     )
 
 

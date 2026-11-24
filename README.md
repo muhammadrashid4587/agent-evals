@@ -362,6 +362,27 @@ e.g. `Weighted score: 2.00/3 (66.7%)`, and the JSON report carries
 and `weight` per result. The CLI exit code is unchanged: 0 only when
 every case passes, even if the weighted score is high.
 
+## Per-case pass thresholds
+
+A case may also carry an optional `threshold` in [0, 1], e.g.
+`{"id": "mostly", ..., "threshold": 0.75}`. By default a case passes
+only on a full score, but a case with a threshold passes when its
+scorer's score reaches it — so a `contains_all` case that finds 3 of
+4 substrings (score 0.75) passes at a threshold of 0.75, and a case
+whose scorer passes it on a low score can still fail at a higher
+threshold. The case keeps the scorer's score either way, so it earns
+its partial weight; the detail records why the verdict changed, e.g.
+`missing substrings: 'date'; score 0.75 meets threshold 0.75`. The
+threshold is part of the case, so setting or changing it changes the
+case fingerprint, and the JSON report carries the threshold per
+result. A timeout, an agent error, or a scorer error still fails the
+case whatever the threshold is — the threshold only applies to a
+score the scorer actually produced.
+
+A non-numeric threshold, a boolean, or a value outside [0, 1] is
+rejected when the suite loads, the same way a bad weight or timeout
+is.
+
 ## Latency budgets
 
 A case may also carry an optional `max_latency_ms` budget, e.g.
@@ -1304,3 +1325,11 @@ make demo    # run both example suites through the CLI
   being stringified — with an invalid regex also a scorer error,
   `ignore_case` composing through `re.IGNORECASE`, and the scorer
   flowing through suite JSON like the other scorers.~~ (done in v0.42.0)
+- ~~Per-case pass thresholds: a case may carry a `threshold` in [0, 1]
+  and passes when its scorer's score reaches it — so a partial-credit
+  case can pass without a full score, and a case its scorer passes on
+  a low score can still fail — with the threshold in the case
+  fingerprint and per result in the JSON report, the verdict reason
+  in the detail, and timeouts, agent errors, and scorer errors still
+  failing whatever the threshold is; a non-numeric or out-of-range
+  threshold is rejected when the suite loads.~~ (done in v0.43.0)
