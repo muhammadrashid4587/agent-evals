@@ -321,5 +321,159 @@ class TestStabilityTagBreakdown(unittest.TestCase):
             self.assertIn("arithmetic", breakdown)
 
 
+def threshold_demo_agent(prompt):
+    """Demo agent for the threshold stability tests, loadable by the
+    CLI as ``tests.test_stability:threshold_demo_agent``: finds 3 of
+    4 substrings on 'partial', near-misses 'hello world' on 'fuzzy',
+    and answers '19' otherwise."""
+    if prompt == "partial":
+        return "hello world date"
+    if prompt == "fuzzy":
+        return "hello worle"
+    return "19"
+
+
+class TestStabilityThresholds(unittest.TestCase):
+    """Threshold-aware stability reports (v0.44.0).
+
+    A case's pass threshold decides the verdict in every run, so
+    the stability report carries the threshold per case: a case
+    that passes on raw score but fails its threshold reads as
+    failing, and a partial-credit case that only passes because of
+    its threshold says so.
+    """
+
+    def _threshold_suite(self):
+        def case(case_id, prompt, scorer, threshold=None):
+            data = {"id": case_id, "prompt": prompt, "scorer": scorer}
+            if threshold is not None:
+                data["threshold"] = threshold
+            return Case.from_dict(data)
+
+        return Suite(
+            name="thresholds",
+            cases=[
+                # contains_all over 4 substrings; the agent finds 3,
+                # so the score is 0.75 every run.
+                case("meets-threshold", "partial",
+                     {"type": "contains_all",
+                      "substrings": ["hello", "world", "date", "time"]},
+                     threshold=0.75),
+                # Same score, higher bar: the scorer fails it and the
+                # threshold does not rescue it.
+                case("below-threshold", "partial",
+                     {"type": "contains_all",
+                      "substrings": ["hello", "world", "date", "time"]},
+                     threshold=0.9),
+                # fuzzy ratio 0.9091 >= 0.8, so the scorer passes it —
+                # but the case threshold is 0.95, so it fails anyway.
+                case("scorer-passes-threshold-fails", "fuzzy",
+                     {"type": "fuzzy", "expected": "hello world"},
+                     threshold=0.95),
+                case("plain", "p",
+                     {"type": "exact", "expected": "19"}),
+            ],
+        )
+
+    def _agent(self, prompt):
+        return threshold_demo_agent(prompt)
+
+    def test_threshold_carried_per_case_in_dict(self):
+        report = repeat_suite(
+            self._threshold_suite(), self._agent, repetitions=2
+        )
+        by_id = {c["case_id"]: c for c in report.to_dict()["cases"]}
+        self.assertEqual(by_id["meets-threshold"]["threshold"], 0.75)
+        self.assertEqual(by_id["below-threshold"]["threshold"], 0.9)
+        self.assertEqual(
+            by_id["scorer-passes-threshold-fails"]["threshold"], 0.95
+        )
+        # A case with no threshold carries null, not 1.0.
+        self.assertIsNone(by_id["plain"]["threshold"])
+        self.assertFalse(by_id["meets-threshold"]["below_threshold"])
+        self.assertTrue(by_id["below-threshold"]["below_threshold"])
+        self.assertTrue(
+            by_id["scorer-passes-threshold-fails"]["below_threshold"]
+        )
+        self.assertFalse(by_id["plain"]["below_threshold"])
+
+    def test_threshold_promotes_partial_credit_to_pass(self):
+        report = repeat_suite(
+            self._threshold_suite(), self._agent, repetitions=2
+        )
+        by_id = {c.case_id: c for c in report.cases}
+        # Score 0.75 meets threshold 0.75, so it passes every run.
+        self.assertEqual(by_id["meets-threshold"].passes, 2)
+        self.assertEqual(by_id["meets-threshold"].pass_rate, 1.0)
+        self.assertFalse(by_id["meets-threshold"].flaky)
+
+    def test_case_passing_on_raw_score_but_failing_threshold(self):
+        report = repeat_suite(
+            self._threshold_suite(), self._agent, repetitions=2
+        )
+        by_id = {c.case_id: c for c in report.cases}
+        # The fuzzy scorer passes the output (ratio 0.9091 >= 0.8),
+        # but the case threshold is 0.95, so the case fails.
+        demoted = by_id["scorer-passes-threshold-fails"]
+        self.assertEqual(demoted.passes, 0)
+        self.assertAlmostEqual(demoted.mean_score, 0.9091, places=4)
+        self.assertTrue(demoted.below_threshold)
+        # Same story for the partial-credit case under a 0.9 bar.
+        self.assertEqual(by_id["below-threshold"].passes, 0)
+        self.assertAlmostEqual(by_id["below-threshold"].mean_score, 0.75)
+        self.assertTrue(by_id["below-threshold"].below_threshold)
+
+    def test_format_stability_shows_threshold_column(self):
+        report = repeat_suite(
+            self._threshold_suite(), self._agent, repetitions=2
+        )
+        text = format_stability(report)
+        self.assertIn("threshold", text)
+        self.assertIn(">=0.75", text)
+        self.assertIn(">=0.9", text)
+        self.assertIn(">=0.95", text)
+        self.assertIn("Below their pass threshold (2):", text)
+        self.assertIn("below-threshold  mean score 0.75 < threshold 0.9",
+                      text)
+        self.assertIn(
+            "scorer-passes-threshold-fails  mean score 0.91 "
+            "< threshold 0.95",
+            text,
+        )
+        # The passing case is not in the below-threshold section.
+        section = text.split("Below their pass threshold")[1]
+        self.assertNotIn("meets-threshold", section)
+        self.assertNotIn("plain", section)
+
+    def test_format_stability_omits_below_threshold_section(self):
+        report = repeat_suite(_suite(), lambda prompt: "19", repetitions=2)
+        self.assertNotIn("Below their pass threshold",
+                         format_stability(report))
+
+    def test_cli_repeat_writes_thresholds_in_report(self):
+        from agent_evals.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            report_path = os.path.join(tmp, "stability.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._threshold_suite().to_dict(), f)
+            code = main([
+                "--suite", path,
+                "--agent", "tests.test_stability:threshold_demo_agent",
+                "--repeat", "2",
+                "--report", report_path,
+            ])
+            self.assertEqual(code, 1)  # threshold cases fail the run
+            with open(report_path, encoding="utf-8") as f:
+                stability = json.load(f)
+            by_id = {c["case_id"]: c for c in stability["cases"]}
+            self.assertEqual(by_id["meets-threshold"]["threshold"], 0.75)
+            self.assertEqual(by_id["meets-threshold"]["passes"], 2)
+            self.assertEqual(by_id["below-threshold"]["threshold"], 0.9)
+            self.assertEqual(by_id["below-threshold"]["passes"], 0)
+            self.assertIsNone(by_id["plain"]["threshold"])
+
+
 if __name__ == "__main__":
     unittest.main()

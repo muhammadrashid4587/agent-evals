@@ -965,7 +965,19 @@ every case passed every time; `--report` writes the stability report
 as JSON. In the JSON report each case carries its run count, passes,
 fails, and flakiness flag (`"runs"`, `"passes"`, `"fails"`,
 `"flaky"`), and the text summary lists the flaky cases by name with
-their pass counts. `repetitions` must be a positive integer. Tag filters apply
+their pass counts. Passes are threshold-aware: a case's pass
+threshold decides the verdict in every run, so a case that passes
+its checks on a low score still fails when the score is below its
+threshold, and a partial-credit case passes when its score reaches
+it. The report carries the threshold per case — `"threshold"` in the
+JSON (null when the case has none), a `threshold` column in the text
+table (`>=0.75`, or `-` with no threshold) — plus a
+`"below_threshold"` flag per case, and the text summary lists the
+cases whose mean score does not reach their threshold, so a case
+that fails on its threshold instead of its scorer says so. A
+threshold change is already part of the case fingerprint, so
+changing a threshold changes the case a stability report is
+measuring, not just its verdict. `repetitions` must be a positive integer. Tag filters apply
 to repeated runs too: `--tag smoke --repeat 5` repeats only the
 smoke cases, and the stability report records the filter that was
 applied — `tag_filter` in the JSON report (null when no filter was
@@ -1333,3 +1345,13 @@ make demo    # run both example suites through the CLI
   in the detail, and timeouts, agent errors, and scorer errors still
   failing whatever the threshold is; a non-numeric or out-of-range
   threshold is rejected when the suite loads.~~ (done in v0.43.0)
+- ~~Threshold-aware stability reports: a `--repeat` report carries
+  each case's pass threshold (`"threshold"` in the JSON, null when
+  the case has none; a `threshold` column in the text summary) and
+  a `"below_threshold"` flag, and the text summary lists the cases
+  whose mean score does not reach their threshold — so a case that
+  passes on raw score but fails its threshold reads as failing
+  with the reason visible, and a partial-credit case that only
+  passes because of its threshold says so; the pass counts were
+  already threshold-aware, and changing a threshold already
+  changes the case fingerprint.~~ (done in v0.44.0)

@@ -28,7 +28,12 @@ says which subset of the suite it covers. The report also carries a
 per-tag pass-rate breakdown (``tag_breakdown`` in JSON, a
 ``Per-tag pass rates:`` section in the text summary), reusing the
 same shape as a single run's breakdown, so a tag that is flaky
-across repetitions is visible at a glance.
+across repetitions is visible at a glance. Passes are
+threshold-aware: a case's pass threshold (see ``Case.threshold``
+in ``evals``) decides the verdict in every run, so a case whose
+scorer passes it on a low score still fails when the score is
+below its threshold — and the report carries the threshold per
+case, so the reason is visible instead of a bare fail.
 """
 
 from __future__ import annotations
@@ -57,7 +62,15 @@ class CaseStability:
     ``mean_latency_ms`` and ``mean_score`` are the averages across
     the runs; ``timeouts`` counts the runs in which the case timed out.
     ``tags`` is the case's tag list, carried so the stability report
-    can break pass rates down per tag.
+    can break pass rates down per tag. ``threshold`` is the case's
+    pass threshold (``None`` when the case carries none, meaning a
+    full score is required): the verdict in every run already
+    honours it — a case whose scorer passes it on a low score still
+    fails when the score is below the threshold, and a partial-credit
+    case passes when its score reaches it — so ``passes`` is a
+    threshold-aware count, and ``below_threshold`` says whether the
+    case's mean score clears its threshold, which is why a case
+    with a healthy-looking mean score can still fail every run.
     """
 
     case_id: str
@@ -67,6 +80,7 @@ class CaseStability:
     mean_score: float
     timeouts: int = 0
     tags: list = field(default_factory=list)
+    threshold: Optional[float] = None
 
     @property
     def pass_rate(self) -> float:
@@ -81,6 +95,16 @@ class CaseStability:
     def flaky(self) -> bool:
         return 0 < self.passes < self.runs
 
+    @property
+    def below_threshold(self) -> bool:
+        """True when the case carries a threshold its mean score does
+        not reach: the case's typical score is below the bar it has
+        to clear, so it fails (or flips) on the threshold, not on
+        the scorer. A case with no threshold is never below one."""
+        return (
+            self.threshold is not None and self.mean_score < self.threshold
+        )
+
     def to_dict(self) -> dict:
         return {
             "case_id": self.case_id,
@@ -93,6 +117,8 @@ class CaseStability:
             "mean_score": round(self.mean_score, 4),
             "timeouts": self.timeouts,
             "tags": list(self.tags),
+            "threshold": self.threshold,
+            "below_threshold": self.below_threshold,
         }
 
 
@@ -279,6 +305,7 @@ def repeat_suite(
             mean_score=aggregate[case_id]["score"] / repetitions,
             timeouts=aggregate[case_id]["timeouts"],
             tags=list(by_id[case_id].tags),
+            threshold=by_id[case_id].threshold,
         )
         for case_id in order
     ]
@@ -307,6 +334,15 @@ def _format_tag_filter(tag_filter: Optional[dict]) -> str:
     return "; ".join(parts)
 
 
+def _format_threshold(case: CaseStability) -> str:
+    """Render a case's pass threshold for the summary table, e.g.
+    ``>=0.75`` — ``-`` when the case carries no threshold and a
+    full score is required."""
+    if case.threshold is None:
+        return "-"
+    return f">={case.threshold:g}"
+
+
 def format_stability(report: StabilityReport) -> str:
     """Render a stability report as a plain-text summary table."""
     lines = [
@@ -319,8 +355,9 @@ def format_stability(report: StabilityReport) -> str:
         f"Always passing: {len(report.always_passing)}  "
         f"Always failing: {len(report.always_failing)}",
         "",
-        f"{'case':<22} {'pass rate':<10} {'passes':<8} {'mean ms':>8}  verdict",
-        "-" * 66,
+        f"{'case':<22} {'pass rate':<10} {'passes':<8} {'mean ms':>8}  "
+        f"{'threshold':<10} verdict",
+        "-" * 71,
     ]
     for c in report.cases:
         if c.flaky:
@@ -331,7 +368,8 @@ def format_stability(report: StabilityReport) -> str:
             verdict = "FAIL"
         lines.append(
             f"{c.case_id:<22} {c.pass_rate * 100:>8.1f}%  "
-            f"{c.passes}/{c.runs:<6} {c.mean_latency_ms:>8.1f}  {verdict}"
+            f"{c.passes}/{c.runs:<6} {c.mean_latency_ms:>8.1f}  "
+            f"{_format_threshold(c):<10} {verdict}"
         )
     if report.flaky_cases:
         lines += [
@@ -348,6 +386,27 @@ def format_stability(report: StabilityReport) -> str:
             "Flaky cases passed at least once and failed at least once; "
             "the verdict is not reproducible. Check the agent for "
             "nondeterminism or the case for a brittle scorer.",
+        ]
+    below = [c for c in report.cases if c.below_threshold]
+    if below:
+        # A case can look healthy on mean score and still fail every
+        # run: its threshold is higher than the score it typically
+        # earns. Name those cases, so the threshold is the first
+        # place to look instead of the agent or the scorer.
+        lines += [
+            "",
+            f"Below their pass threshold ({len(below)}):",
+        ]
+        for c in below:
+            lines.append(
+                f"  {c.case_id}  mean score {c.mean_score:.2f} "
+                f"< threshold {c.threshold:g}"
+            )
+        lines += [
+            "",
+            "These cases fail (or flip) on their threshold, not on "
+            "the scorer: their mean score does not reach the bar "
+            "the case has to clear.",
         ]
     breakdown = report.tag_breakdown
     if breakdown:
