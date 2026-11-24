@@ -16,10 +16,10 @@ from agent_evals.trends import (
 )
 
 
-def _report(started_at, results, suite="calc", weighted_score=1.0):
+def _report(started_at, results, suite="calc", weighted_score=1.0, path=None):
     """Build a run-report dict in the shape ``load_report`` returns."""
     passed = sum(1 for r in results if r["passed"])
-    return {
+    report = {
         "suite": suite,
         "started_at": started_at,
         "total": len(results),
@@ -38,10 +38,14 @@ def _report(started_at, results, suite="calc", weighted_score=1.0):
                 "score": r.get("score", 1.0 if r["passed"] else 0.0),
                 "latency_ms": r.get("latency_ms", 1.0),
                 "tokens": r.get("tokens"),
+                "tags": list(r.get("tags", [])),
             }
             for r in results
         ],
     }
+    if path is not None:
+        report["_path"] = path
+    return report
 
 
 def _history():
@@ -89,11 +93,178 @@ def _history():
     ]
 
 
+def _tagged_history():
+    """Three runs with tagged cases: a score tie broken by latency,
+    an all-zero case, an exact score-and-latency tie, a case present
+    in only one run, a case whose tags changed between runs, and an
+    untagged case."""
+    return [
+        _report(
+            "2026-11-22T10:00:00+00:00",
+            [
+                {"case_id": "alpha", "passed": True, "score": 1.0, "latency_ms": 10.0, "tags": ["smoke"]},
+                {"case_id": "beta", "passed": False, "score": 0.0, "latency_ms": 5.0, "tags": ["smoke", "slow"]},
+                {"case_id": "gamma", "passed": True, "score": 0.5, "latency_ms": 8.0, "tags": ["fast"]},
+                {"case_id": "delta", "passed": True, "score": 1.0, "latency_ms": 4.0, "tags": ["fast"]},
+                {"case_id": "epsilon", "passed": True, "score": 1.0, "latency_ms": 6.0, "tags": ["old"]},
+                {"case_id": "plain", "passed": True, "score": 1.0, "latency_ms": 3.0},
+            ],
+            path="run-0.json",
+        ),
+        _report(
+            "2026-11-22T11:00:00+00:00",
+            [
+                {"case_id": "alpha", "passed": True, "score": 0.5, "latency_ms": 12.0, "tags": ["smoke"]},
+                {"case_id": "beta", "passed": False, "score": 0.0, "latency_ms": 5.0, "tags": ["smoke", "slow"]},
+                {"case_id": "gamma", "passed": True, "score": 1.0, "latency_ms": 9.0, "tags": ["fast"]},
+                {"case_id": "plain", "passed": True, "score": 1.0, "latency_ms": 3.0},
+            ],
+            path="run-1.json",
+        ),
+        _report(
+            "2026-11-22T12:00:00+00:00",
+            [
+                {"case_id": "alpha", "passed": True, "score": 1.0, "latency_ms": 5.0, "tags": ["smoke"]},
+                {"case_id": "beta", "passed": False, "score": 0.0, "latency_ms": 5.0, "tags": ["smoke", "slow"]},
+                {"case_id": "gamma", "passed": True, "score": 1.0, "latency_ms": 9.0, "tags": ["fast"]},
+                {"case_id": "epsilon", "passed": False, "score": 0.5, "latency_ms": 6.0, "tags": ["new"]},
+                {"case_id": "plain", "passed": True, "score": 1.0, "latency_ms": 3.0},
+            ],
+            path="run-2.json",
+        ),
+    ]
+
+
+class TestTrendCaseWinsByTag(unittest.TestCase):
+    def setUp(self):
+        self.trend = compare_history(_tagged_history())
+        self.by_id = {c.case_id: c for c in self.trend.cases}
+
+    def test_winner_is_highest_score_with_latency_tiebreak(self):
+        # "alpha" scored 1.0 in runs 0 and 2; run 2 was faster
+        # (5 ms vs 10 ms), so run 2 wins it.
+        self.assertEqual(self.by_id["alpha"].winner_run_index, 2)
+        # "epsilon" scored 1.0 in run 0 and 0.5 in run 2.
+        self.assertEqual(self.by_id["epsilon"].winner_run_index, 0)
+
+    def test_no_winner_when_every_run_scored_zero(self):
+        # "beta" scored 0.0 in every run: nothing to win.
+        self.assertIsNone(self.by_id["beta"].winner_run_index)
+
+    def test_no_winner_on_exact_score_and_latency_tie(self):
+        # "gamma" scored 1.0 in runs 1 and 2 at the same latency
+        # (9.0 ms), and "plain" scored 1.0 at 3.0 ms in all runs.
+        self.assertIsNone(self.by_id["gamma"].winner_run_index)
+        self.assertIsNone(self.by_id["plain"].winner_run_index)
+
+    def test_no_winner_for_case_in_only_one_run(self):
+        # "delta" appears only in run 0: a set change, not a win.
+        self.assertIsNone(self.by_id["delta"].winner_run_index)
+
+    def test_tags_come_from_latest_run_containing_the_case(self):
+        # "epsilon" ran under "old" in run 0 and "new" in run 2.
+        self.assertEqual(self.by_id["epsilon"].tags, ["new"])
+        self.assertEqual(self.by_id["beta"].tags, ["smoke", "slow"])
+        self.assertEqual(self.by_id["plain"].tags, [])
+
+    def test_case_wins_by_tag_breakdown(self):
+        # "smoke": alpha (won by run-2) and beta (tie).
+        # "slow": beta only (tie). "fast": gamma and delta (both
+        # ties). "new": epsilon only (won by run-0). The "old" tag
+        # is gone: epsilon's latest tags replaced it. Untagged
+        # "plain" appears under no tag.
+        self.assertEqual(
+            self.trend.case_wins_by_tag(),
+            {
+                "fast": {
+                    "cases": 2,
+                    "ties": 2,
+                    "wins": {
+                        "run-0.json": 0,
+                        "run-1.json": 0,
+                        "run-2.json": 0,
+                    },
+                },
+                "new": {
+                    "cases": 1,
+                    "ties": 0,
+                    "wins": {
+                        "run-0.json": 1,
+                        "run-1.json": 0,
+                        "run-2.json": 0,
+                    },
+                },
+                "slow": {
+                    "cases": 1,
+                    "ties": 1,
+                    "wins": {
+                        "run-0.json": 0,
+                        "run-1.json": 0,
+                        "run-2.json": 0,
+                    },
+                },
+                "smoke": {
+                    "cases": 2,
+                    "ties": 1,
+                    "wins": {
+                        "run-0.json": 0,
+                        "run-1.json": 0,
+                        "run-2.json": 1,
+                    },
+                },
+            },
+        )
+
+    def test_wins_plus_ties_equals_case_count(self):
+        for entry in self.trend.case_wins_by_tag().values():
+            self.assertEqual(
+                sum(entry["wins"].values()) + entry["ties"],
+                entry["cases"],
+            )
+
+    def test_tags_and_breakdown_in_dict(self):
+        self.assertEqual(
+            self.by_id["beta"].to_dict()["tags"], ["smoke", "slow"]
+        )
+        self.assertEqual(self.by_id["plain"].to_dict()["tags"], [])
+        self.assertEqual(
+            self.trend.to_dict()["case_wins_by_tag"],
+            self.trend.case_wins_by_tag(),
+        )
+
+    def test_format_shows_case_wins_by_tag(self):
+        text = format_trend(self.trend)
+        self.assertIn("Case wins by tag:", text)
+        self.assertIn(
+            "  smoke (2 cases): run-0.json 0, run-1.json 0, "
+            "run-2.json 1, ties 1",
+            text,
+        )
+        self.assertIn(
+            "  fast (2 cases): run-0.json 0, run-1.json 0, "
+            "run-2.json 0, ties 2",
+            text,
+        )
+        self.assertIn(
+            "  new (1 case): run-0.json 1, run-1.json 0, "
+            "run-2.json 0, ties 0",
+            text,
+        )
+        self.assertIn(
+            "  slow (1 case): run-0.json 0, run-1.json 0, "
+            "run-2.json 0, ties 1",
+            text,
+        )
+
+    def test_format_omits_section_when_nothing_is_tagged(self):
+        text = format_trend(compare_history(_history()))
+        self.assertNotIn("Case wins by tag", text)
+
+
 class TestCaseTrend(unittest.TestCase):
     def setUp(self):
         self.trend = compare_history(_history())
         self.by_id = {c.case_id: c for c in self.trend.cases}
-
     def test_per_case_pass_rates(self):
         self.assertEqual(self.by_id["steady"].pass_rate, 1.0)
         self.assertEqual(self.by_id["regressor"].pass_rate, 0.5)
@@ -918,6 +1089,47 @@ class TestTrendsCli(unittest.TestCase):
             self.assertEqual(data["n_reports"], 4)
             self.assertEqual(data["newly_failing"], ["late"])
             self.assertEqual(data["newly_passing"], ["fixed"])
+
+    def test_cli_json_carries_case_wins_by_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, _tagged_history())
+            out = os.path.join(tmp, "trend.json")
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_evals.trends",
+                    "--reports-dir",
+                    tmp,
+                    "--json",
+                    out,
+                ],
+                capture_output=True,
+                text=True,
+                cwd=os.path.join(os.path.dirname(__file__), ".."),
+            )
+            # Exit 1: "epsilon" passed in run 0 and fails in run 2,
+            # so it newly failed — but the JSON is still written.
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("Case wins by tag:", proc.stdout)
+            self.assertIn("smoke (2 cases)", proc.stdout)
+            with open(out) as f:
+                data = json.load(f)
+            self.assertEqual(
+                data["case_wins_by_tag"]["smoke"],
+                {
+                    "cases": 2,
+                    "ties": 1,
+                    "wins": {
+                        "run-0.json": 0,
+                        "run-1.json": 0,
+                        "run-2.json": 1,
+                    },
+                },
+            )
+            self.assertEqual(
+                data["case_wins_by_tag"]["new"]["wins"]["run-0.json"], 1
+            )
 
     def test_cli_empty_directory_exits_2(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -30,6 +30,11 @@ returned by ``load_report``), ordered oldest first, and builds a
 * flaky cases — cases that passed sometimes and failed other times
   across the history, the same signal as a repeated run, but over
   real runs instead of one burst;
+* per-tag case wins — which run won how many cases under each tag,
+  with the cases no run won recorded as ties, so a tag one run
+  keeps losing on is visible at a glance (the same breakdown as
+  the two-run comparison, keyed by run instead of baseline and
+  current);
 * the headline trend: pass rate and weighted score from the first
   run to the latest, and a per-run table.
 
@@ -98,6 +103,7 @@ class CaseTrend:
     score_history: list = field(default_factory=list)
     latency_history: list = field(default_factory=list)
     tokens_history: list = field(default_factory=list)
+    tags: list = field(default_factory=list)
 
     @property
     def runs_present(self) -> int:
@@ -206,6 +212,46 @@ class CaseTrend:
         """Passed at least once and failed at least once across the
         history, so the verdict is not reproducible run to run."""
         return self.ever_passed and self.ever_failed
+
+    @property
+    def winner_run_index(self) -> Optional[int]:
+        """Index of the run that won this case, or None when no run
+        did.
+
+        The run with the highest score wins; a tie on score is
+        broken by the lowest latency, mirroring the two-run
+        comparison. A case every run scored 0 on has no winner —
+        there is nothing to win — and neither does an exact
+        score-and-latency tie, a case with fewer than two scored
+        runs, or a case present in only one run (a set change, not
+        a win). A run whose score is missing cannot win, and a
+        score tie is only broken by latency when every tied run
+        reported one."""
+        candidates = [
+            (i, score, self.latency_history[i])
+            for i, score in enumerate(self.score_history)
+            if self.passed_history[i] is not None and score is not None
+        ]
+        if len(candidates) < 2:
+            return None
+        best = max(score for _, score, _ in candidates)
+        if best <= 0.0:
+            return None
+        leaders = [
+            (i, latency)
+            for i, score, latency in candidates
+            if score == best
+        ]
+        if len(leaders) == 1:
+            return leaders[0][0]
+        latencies = [latency for _, latency in leaders]
+        if any(latency is None for latency in latencies):
+            return None
+        fastest = min(latencies)
+        winners = [
+            i for i, latency in leaders if latency == fastest
+        ]
+        return winners[0] if len(winners) == 1 else None
 
     # -- latency trends -------------------------------------------------
 
@@ -427,6 +473,7 @@ class CaseTrend:
     def to_dict(self) -> dict:
         return {
             "case_id": self.case_id,
+            "tags": list(self.tags),
             "runs_present": self.runs_present,
             "passes": self.passes,
             "pass_rate": round(self.pass_rate, 4),
@@ -648,6 +695,41 @@ class TrendReport:
         """True when no case's token slope exceeds the threshold."""
         return not self.cost_gate_failures(threshold_tokens_per_run)
 
+    def case_wins_by_tag(self) -> dict:
+        """Case wins broken down per tag, mirroring the two-run
+        comparison.
+
+        Maps each tag to ``{"cases": n, "ties": n, "wins":
+        {run_path: n, ...}}``, sorted by tag, with one win count
+        per run in the history (keyed by the run's path, the same
+        identifier the per-run table uses). A case carrying several
+        tags counts under each of them; untagged cases appear under
+        no tag. A case with no winning run — every run scored 0 on
+        it, an exact score-and-latency tie, or a case present in
+        only one run — is a tie: it counts towards the tag's case
+        count but towards no run's wins, so wins plus ties always
+        equals the tag's case count. A case's tags are the ones it
+        carried in the latest run that contained it.
+        """
+        run_paths = [run.path for run in self.runs]
+        breakdown = {}
+        for case in self.cases:
+            for tag in case.tags:
+                entry = breakdown.setdefault(
+                    tag,
+                    {
+                        "cases": 0,
+                        "ties": 0,
+                        "wins": {path: 0 for path in run_paths},
+                    },
+                )
+                entry["cases"] += 1
+                if case.winner_run_index is None:
+                    entry["ties"] += 1
+                else:
+                    entry["wins"][run_paths[case.winner_run_index]] += 1
+        return dict(sorted(breakdown.items()))
+
     @property
     def slowest_growing(self) -> list:
         """Cases whose latency is trending up, worst first: ranked
@@ -714,6 +796,7 @@ class TrendReport:
             "costliest_growing": [
                 c.case_id for c in self.costliest_growing
             ],
+            "case_wins_by_tag": self.case_wins_by_tag(),
             "runs": [r.to_dict() for r in self.runs],
             "cases": [c.to_dict() for c in self.cases],
         }
@@ -764,7 +847,11 @@ def compare_history(reports: list) -> TrendReport:
     The caller is responsible for the order; the CLI sorts by
     ``started_at``. Cases are matched by ``case_id``; a case absent
     from a run gets ``None`` in that run's slot, so a case added or
-    removed mid-history does not skew the others' pass rates.
+    removed mid-history does not skew the others' pass rates. A
+    case's tags are the ones it carried in the latest run that
+    contained it, so the per-tag case-wins breakdown
+    (:meth:`TrendReport.case_wins_by_tag`) groups cases the way the
+    two-run comparison does.
     """
     runs = []
     by_case: dict[str, CaseTrend] = {}
@@ -819,6 +906,16 @@ def compare_history(reports: list) -> TrendReport:
                 trend.score_history.append(result.get("score"))
                 trend.latency_history.append(result.get("latency_ms"))
                 trend.tokens_history.append(result.get("tokens"))
+        for case_id, result in results.items():
+            # A case's tags come from the latest run that contained
+            # it — the case as measured most recently — mirroring
+            # the two-run comparison, which takes tags from the
+            # current run. Reports written by the harness record
+            # tags per result; anything else is treated as untagged.
+            tags = result.get("tags")
+            by_case[case_id].tags = (
+                list(tags) if isinstance(tags, list) else []
+            )
     # Cases first seen in an early run were appended to on every later
     # run; cases first seen later got backfilled. Order the trend by
     # first appearance.
@@ -877,7 +974,10 @@ def format_trend(
 ) -> str:
     """Render a trend report as a plain-text summary.
 
-    When ``latency_gate_threshold_ms_per_run`` is given, a section
+    The summary carries a ``Case wins by tag:`` section when any
+    case is tagged, breaking case wins down per tag the same way
+    the two-run comparison does. When
+    ``latency_gate_threshold_ms_per_run`` is given, a section
     lists the cases whose slope tripped the gate (or says the gate
     passed); when ``fail_on_slowing`` is given, the slowing cases
     are called out the same way. ``cost_gate_threshold_tokens_per_run``
@@ -999,6 +1099,23 @@ def format_trend(
             f"mean {c.mean_tokens:.0f} tokens)"
         ),
     )
+    # Wins per tag: which run won how many cases under each tag.
+    # A case carrying several tags counts under each of them; a case
+    # with no winning run is a tie, counted but won by nobody.
+    by_tag = trend.case_wins_by_tag()
+    if by_tag:
+        lines.append("Case wins by tag:")
+        for tag, entry in by_tag.items():
+            count = entry["cases"]
+            noun = "case" if count == 1 else "cases"
+            wins = ", ".join(
+                f"{path} {n}" for path, n in entry["wins"].items()
+            )
+            lines.append(
+                f"  {tag} ({count} {noun}): {wins}, "
+                f"ties {entry['ties']}"
+            )
+        lines.append("")
     if latency_gate_threshold_ms_per_run is not None:
         failures = trend.latency_gate_failures(
             latency_gate_threshold_ms_per_run

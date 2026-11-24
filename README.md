@@ -511,7 +511,16 @@ run, the flaky cases across the history, and the worst regressions —
 cases that passed at least once and are failing in their latest run,
 ranked by how reliably they used to pass, so a case that passed 9
 of 10 runs and now fails outranks one that was already failing half
-the time. Reports load in `started_at` order; a case added or removed
+the time. It also breaks case wins down per tag — which run won how
+many cases under each tag, with the cases no run won recorded as
+ties (a case wins the run with its highest score, ties broken by
+lowest latency; a case every run scored 0 on, an exact tie, or a
+case present in only one run has no winner) — so a tag one run
+keeps losing on is visible at a glance, the same breakdown the
+two-run comparison carries, keyed by run. A case carrying several
+tags counts under each of them; untagged cases appear under no tag,
+and a case's tags are the ones it carried in the latest run that
+contained it. Reports load in `started_at` order; a case added or removed
 mid-history gets no verdict for the runs it was not part of, so it
 does not skew the other cases' pass rates. A file in the directory
 that is not a run report is skipped with a warning, not an error.
@@ -1000,3 +1009,13 @@ make demo    # run both example suites through the CLI
   JSON (`case_wins_by_tag`), with each case's tags in its per-case
   row, so a tag one run keeps losing on is visible at a glance.~~
   (done in v0.26.0)
+- ~~Per-tag case wins in the trend report: the trend across a
+  reports directory breaks case wins down per tag the same way —
+  which run won how many cases under each tag, with the cases no
+  run won recorded as ties — in the text summary (`Case wins by
+  tag:`) and in the JSON (`case_wins_by_tag`), with each case's
+  tags in its per-case row, so a tag one run keeps losing on is
+  visible at a glance. A case wins the run with its highest score
+  over the history, ties broken by lowest latency; a case every
+  run scored 0 on, an exact tie, or a case present in only one run
+  has no winner.~~ (done in v0.27.0)
