@@ -1060,7 +1060,13 @@ groups plus per-case totals (`total_runs`, `total_passes`,
 can track a case's reliability over time. The CLI exits 1 while any
 case is flaky in the latest stability report, 0 otherwise, so it
 can gate a CI step on current flakiness — a case that stopped
-flipping passes the gate, whatever its history says. Files in the
+flipping passes the gate, whatever its history says. `--fail-on-newly-flaky`
+narrows that gate to fresh instability only: it exits 1 when a case
+just started flipping (stable in every earlier report, flaky in the
+latest one) and 0 otherwise, so a case that was already known-flaky
+does not block the run — only a new regression fails CI. A case that
+first appears flaky in the latest report was never stable before, so
+it is not newly flaky and passes the narrow gate. Files in the
 directory that are not stability reports (single-run reports, bad
 JSON) are skipped with a warning, not an error.
 
@@ -1401,3 +1407,13 @@ make demo    # run both example suites through the CLI
   containment), all-or-nothing scoring, an optional
   `"ignore_case": true`, and a missing, non-list, or empty
   `values` rejected as a scorer error.~~ (done in v0.46.0)
+- ~~`--fail-on-newly-flaky` CI gate for the flaky-history CLI:
+  `python -m agent_evals.flaky_history --reports-dir stability/
+  --fail-on-newly-flaky` exits 1 only when a case just started
+  flipping — stable in every earlier report, flaky in the latest
+  one — and 0 otherwise, so a case that was already known-flaky
+  does not block the run and only fresh instability fails CI; a
+  case that first appears flaky in the latest report was never
+  stable before, so it is not newly flaky and passes the narrow
+  gate, while the default gate (any case flaky in the latest
+  report) is unchanged without the flag.~~ (done in v0.47.0)

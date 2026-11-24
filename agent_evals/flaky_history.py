@@ -27,7 +27,11 @@ first, and builds a :class:`FlakyHistoryReport`:
   moved is not an agent regression;
 * flaky in the latest report — the live signal, and the CI gate:
   the CLI exits 1 while any case is flaky in the latest stability
-  report, 0 otherwise.
+  report, 0 otherwise. ``--fail-on-newly-flaky`` narrows that gate
+  to cases that just started flipping (stable in every earlier
+  report, flaky in the latest one), so a case that was already
+  known-flaky does not block the run — only fresh instability
+  fails CI.
 
 Usage:
     python -m agent_evals.flaky_history --reports-dir stability/
@@ -733,6 +737,15 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--json", help="optional path to write the flaky history as JSON"
     )
+    parser.add_argument(
+        "--fail-on-newly-flaky",
+        action="store_true",
+        help="exit 1 only when a case just started flipping (stable "
+        "in every earlier report, flaky in the latest one); by "
+        "default the CLI exits 1 while any case is flaky in the "
+        "latest report, so a case that was already known-flaky "
+        "passes this narrower gate",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -750,6 +763,20 @@ def main(argv=None) -> int:
     if args.json:
         history.save(args.json)
         print(f"\nFlaky history written to {args.json}")
+    if args.fail_on_newly_flaky:
+        # The narrow gate: only fresh instability fails the run.
+        # A case that was already flaky in an earlier report is
+        # known flakiness, tracked in the history, not a regression.
+        if history.newly_flaky:
+            print(
+                f"\nNewly-flaky gate FAILED: "
+                f"{len(history.newly_flaky)} case(s) just started "
+                f"flipping: "
+                + ", ".join(c.case_id for c in history.newly_flaky),
+                file=sys.stderr,
+            )
+            return 1
+        return 0
     if history.has_flaky_in_latest:
         print(
             f"\nFlaky gate FAILED: {len(history.flaky_in_latest)} "

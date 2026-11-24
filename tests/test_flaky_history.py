@@ -560,6 +560,71 @@ class TestFlakyHistoryCLI(unittest.TestCase):
             self._write_reports(tmp, reports)
             self.assertEqual(main(["--reports-dir", tmp]), 1)
 
+    def test_cli_fail_on_newly_flaky_exits_1_when_newly_flaky(self):
+        from agent_evals.flaky_history import main
+
+        reports = [
+            _stability_dict(cases=[_case("fresh", 4, 4)]),
+            _stability_dict(cases=[_case("fresh", 4, 2)]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(
+                main(["--reports-dir", tmp, "--fail-on-newly-flaky"]), 1
+            )
+
+    def test_cli_fail_on_newly_flaky_exits_0_when_already_flaky(self):
+        from agent_evals.flaky_history import main
+
+        # Flaky in both reports: known flakiness, not a fresh
+        # regression, so the narrow gate passes (the default gate
+        # would still fail this history).
+        reports = [
+            _stability_dict(cases=[_case("known", 4, 2)]),
+            _stability_dict(cases=[_case("known", 4, 3)]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(
+                main(["--reports-dir", tmp, "--fail-on-newly-flaky"]), 0
+            )
+
+    def test_cli_fail_on_newly_flaky_exits_0_when_stable(self):
+        from agent_evals.flaky_history import main
+
+        reports = [
+            _stability_dict(cases=[_case("ok", 4, 4)]),
+            _stability_dict(cases=[_case("ok", 4, 4)]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(
+                main(["--reports-dir", tmp, "--fail-on-newly-flaky"]), 0
+            )
+
+    def test_cli_fail_on_newly_flaky_exits_0_when_first_seen_flaky(self):
+        from agent_evals.flaky_history import main
+
+        # One report, flaky in it: the case was never stable before,
+        # so it is flaky in the latest report but not newly flaky.
+        reports = [_stability_dict(cases=[_case("new", 4, 2)])]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(
+                main(["--reports-dir", tmp, "--fail-on-newly-flaky"]), 0
+            )
+
+    def test_cli_default_gate_still_fails_on_newly_flaky(self):
+        from agent_evals.flaky_history import main
+
+        reports = [
+            _stability_dict(cases=[_case("fresh", 4, 4)]),
+            _stability_dict(cases=[_case("fresh", 4, 2)]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_reports(tmp, reports)
+            self.assertEqual(main(["--reports-dir", tmp]), 1)
+
     def test_cli_exits_0_when_stable_and_writes_json(self):
         from agent_evals.flaky_history import main
 
