@@ -656,6 +656,175 @@ class TestEndsWithScorer(unittest.TestCase):
         self.assertEqual(score, 1.0)
 
 
+class TestIgnoreCaseScorers(unittest.TestCase):
+    def test_contains_matches_other_case(self):
+        ok, _, _ = score_case(
+            _case(
+                {"type": "contains", "substring": "HELLO", "ignore_case": True}
+            ),
+            "say hello there",
+        )
+        self.assertTrue(ok)
+
+    def test_contains_is_case_sensitive_by_default(self):
+        ok, _, _ = score_case(
+            _case({"type": "contains", "substring": "HELLO"}),
+            "say hello there",
+        )
+        self.assertFalse(ok)
+
+    def test_contains_all_matches_mixed_case(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "contains_all",
+                    "substrings": ["Hello", "WORLD"],
+                    "ignore_case": True,
+                }
+            ),
+            "hello world",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_contains_all_partial_credit_ignores_case(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "contains_all",
+                    "substrings": ["hello", "WORLD"],
+                    "ignore_case": True,
+                }
+            ),
+            "hello there",
+        )
+        self.assertFalse(ok)
+        self.assertIn("WORLD", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_contains_any_matches_other_case(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "contains_any",
+                    "substrings": ["HELLO", "hi"],
+                    "ignore_case": True,
+                }
+            ),
+            "say hello",
+        )
+        self.assertTrue(ok)
+
+    def test_not_contains_catches_other_case(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "not_contains",
+                    "substrings": ["As an AI", "sorry"],
+                    "ignore_case": True,
+                }
+            ),
+            "AS AN AI language model, I cannot help.",
+        )
+        self.assertFalse(ok)
+        self.assertIn("As an AI", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_not_contains_passes_when_absent_in_any_case(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "not_contains",
+                    "substrings": ["as an AI", "sorry"],
+                    "ignore_case": True,
+                }
+            ),
+            "Here is the refund policy.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_starts_with_matches_other_case(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "starts_with",
+                    "prefix": "the answer is",
+                    "ignore_case": True,
+                }
+            ),
+            "The Answer Is 42",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_starts_with_partial_credit_ignores_case(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "starts_with",
+                    "prefix": "HELLO WORLD",
+                    "ignore_case": True,
+                }
+            ),
+            "hello there",
+        )
+        self.assertFalse(ok)
+        self.assertIn("6 of 11", detail)
+        self.assertAlmostEqual(score, 6 / 11)
+
+    def test_ends_with_matches_other_case(self):
+        ok, _, score = score_case(
+            _case(
+                {"type": "ends_with", "suffix": "IS 42", "ignore_case": True}
+            ),
+            "The answer is 42",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_ends_with_partial_credit_ignores_case(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "ends_with",
+                    "suffix": "HELLO WORLD",
+                    "ignore_case": True,
+                }
+            ),
+            "goodbye world",
+        )
+        self.assertFalse(ok)
+        self.assertIn("6 of 11", detail)
+        self.assertAlmostEqual(score, 6 / 11)
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "contains",
+                        "substring": "hello",
+                        "ignore_case": "true",
+                    }
+                ),
+                "hello",
+            )
+
+    def test_ignore_case_false_is_case_sensitive(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "contains",
+                    "substring": "HELLO",
+                    "ignore_case": False,
+                }
+            ),
+            "say hello there",
+        )
+        self.assertFalse(ok)
+
+
 class TestNumericScorer(unittest.TestCase):
     def test_within_tolerance(self):
         ok, _, _ = score_case(

@@ -87,17 +87,17 @@ detail; the run continues with the remaining cases.
 | type | spec | passes when |
 | --- | --- | --- |
 | `exact` | `{"expected": "19"}` | output equals the expected string (surrounding whitespace ignored) |
-| `contains` | `{"substring": "hello"}` | output contains the substring |
-| `contains_all` | `{"substrings": ["hello", "world"]}` | output contains every listed substring (empty list passes) |
-| `contains_any` | `{"substrings": ["hello", "hi"]}` | output contains at least one listed substring (empty list fails) |
-| `not_contains` | `{"substrings": ["as an AI", "sorry"]}` | output contains none of the listed substrings (empty list passes) |
+| `contains` | `{"substring": "hello"}` | output contains the substring (optional `"ignore_case": true` for a case-insensitive match) |
+| `contains_all` | `{"substrings": ["hello", "world"]}` | output contains every listed substring (empty list passes; optional `"ignore_case": true`) |
+| `contains_any` | `{"substrings": ["hello", "hi"]}` | output contains at least one listed substring (empty list fails; optional `"ignore_case": true`) |
+| `not_contains` | `{"substrings": ["as an AI", "sorry"]}` | output contains none of the listed substrings (empty list passes; optional `"ignore_case": true`) |
 | `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
 | `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
 | `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8) |
-| `starts_with` | `{"prefix": "The answer is"}` | the output starts with the prefix (surrounding whitespace ignored) |
-| `ends_with` | `{"suffix": "is 42"}` | the output ends with the suffix (surrounding whitespace ignored) |
+| `starts_with` | `{"prefix": "The answer is"}` | the output starts with the prefix (surrounding whitespace ignored; optional `"ignore_case": true`) |
+| `ends_with` | `{"suffix": "is 42"}` | the output ends with the suffix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
@@ -169,6 +169,20 @@ substrings appears in the output. It gives partial credit like
 are absent, so an output that slips in one of four forbidden phrases
 still earns most of its weight. An empty `substrings` list passes
 vacuously: there is nothing forbidden to find.
+
+The six string scorers — `contains`, `contains_all`,
+`contains_any`, `not_contains`, `starts_with`, `ends_with` — all
+accept an optional `"ignore_case": true` in the spec, e.g.
+`{"type": "contains", "substring": "Hello", "ignore_case": true}`.
+When set, the expected strings and the output are case-folded
+(`str.casefold`, so non-ASCII case pairs compare equal too) before
+comparing, so `"Hello"` matches `"hello"` and a forbidden phrase
+fails `not_contains` in any casing. Scores and partial credit are
+unchanged — a `contains_all` case that finds 3 of 4 substrings in
+the wrong case still earns 0.75 — and the detail still names the
+substrings as written in the spec. The option defaults to off, so
+existing suites behave exactly as before, and a non-boolean value
+is a scorer error.
 
 ## LLM-as-judge scorer
 
@@ -1147,3 +1161,12 @@ make demo    # run both example suites through the CLI
   listed substrings absent, so an output that slips in one
   forbidden phrase still earns most of its weight.~~
   (done in v0.33.0)
+- ~~Case-insensitive string scorers: the six string scorers
+  (`contains`, `contains_all`, `contains_any`, `not_contains`,
+  `starts_with`, `ends_with`) accept an optional
+  `"ignore_case": true`, which case-folds both the expected strings
+  and the output before comparing, so `"Hello"` matches `"hello"`
+  and a forbidden phrase fails `not_contains` in any casing —
+  with scores and partial credit unchanged, details still naming
+  the substrings as written, and a non-boolean value rejected as a
+  scorer error.~~ (done in v0.34.0)

@@ -13,6 +13,15 @@ Design
       {"type": "contains_all", "substrings": ["hello", "world"]}
       {"type": "contains_any", "substrings": ["hello", "hi"]}
       {"type": "not_contains", "substrings": ["as an AI", "sorry"]}
+      {"type": "starts_with", "prefix": "The answer is"}
+      {"type": "ends_with", "suffix": "is 42"}
+
+* The string scorers (``contains``, ``contains_all``, ``contains_any``,
+  ``not_contains``, ``starts_with``, ``ends_with``) also accept an
+  optional ``"ignore_case": true``: the expected strings and the
+  output are case-folded before comparing, so ``"Hello"`` matches
+  ``"hello"``. Scores and partial credit are unchanged; the option
+  defaults to off, and a non-boolean value is a scorer error.
       {"type": "regex", "pattern": "^\\d+$"}
       {"type": "json_schema", "schema": {"name": "str", "age": "int"}}
       {"type": "json_path", "path": "$.result.total", "expected": 42}
@@ -402,9 +411,39 @@ def score_exact(output: str, expected: str) -> tuple:
     return ok, detail, 1.0 if ok else 0.0
 
 
-def score_contains(output: str, substring: str) -> tuple:
-    """Pass when the output contains the substring."""
-    ok = substring in output
+def _fold(text: str, ignore_case: bool) -> str:
+    """Fold ``text`` for comparison when ``ignore_case`` is set.
+
+    ``str.casefold`` is used rather than ``lower`` so non-ASCII case
+    pairs (e.g. German ß/ss) compare equal too. With ``ignore_case``
+    off the text is returned unchanged.
+    """
+    return text.casefold() if ignore_case else text
+
+
+def _as_bool_option(spec: dict, key: str, kind: str) -> bool:
+    """Read an optional boolean scorer option, defaulting to False.
+
+    A non-boolean value is a scorer error: a JSON ``"false"`` string
+    would otherwise silently enable the option, since ``bool("false")``
+    is True.
+    """
+    value = spec.get(key, False)
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"{kind} scorer requires {key!r} to be a boolean, "
+            f"got {value!r}"
+        )
+    return value
+
+
+def score_contains(output: str, substring: str, ignore_case: bool = False) -> tuple:
+    """Pass when the output contains the substring.
+
+    With ``ignore_case``, both the substring and the output are
+    case-folded before comparing, so ``"Hello"`` matches ``"hello"``.
+    """
+    ok = _fold(substring, ignore_case) in _fold(output, ignore_case)
     detail = "substring found" if ok else f"{substring!r} not in output"
     return ok, detail, 1.0 if ok else 0.0
 
@@ -417,16 +456,21 @@ def _as_substring_list(spec: dict, kind: str) -> list:
     return [str(s) for s in substrings]
 
 
-def score_contains_all(output: str, substrings: list) -> tuple:
+def score_contains_all(
+    output: str, substrings: list, ignore_case: bool = False
+) -> tuple:
     """Pass when the output contains every listed substring.
 
     An empty list passes: there is nothing required to be present.
     Partial credit: the score is the fraction of listed substrings
     found, so a case that gets most of the way there still earns most
     of its weight. A case only counts as passed when every substring
-    is found (score 1.0).
+    is found (score 1.0). With ``ignore_case``, the comparison is
+    case-insensitive; the detail still names the substrings as
+    written in the spec.
     """
-    missing = [s for s in substrings if s not in output]
+    folded = _fold(output, ignore_case)
+    missing = [s for s in substrings if _fold(s, ignore_case) not in folded]
     if not substrings:
         return True, "all substrings found", 1.0
     score = (len(substrings) - len(missing)) / len(substrings)
@@ -439,12 +483,16 @@ def score_contains_all(output: str, substrings: list) -> tuple:
     )
 
 
-def score_contains_any(output: str, substrings: list) -> tuple:
+def score_contains_any(
+    output: str, substrings: list, ignore_case: bool = False
+) -> tuple:
     """Pass when the output contains at least one listed substring.
 
-    An empty list fails: no listed substring can be present.
+    An empty list fails: no listed substring can be present. With
+    ``ignore_case``, the comparison is case-insensitive.
     """
-    found = [s for s in substrings if s in output]
+    folded = _fold(output, ignore_case)
+    found = [s for s in substrings if _fold(s, ignore_case) in folded]
     if found:
         return True, f"found {found[0]!r}", 1.0
     return (
@@ -455,7 +503,9 @@ def score_contains_any(output: str, substrings: list) -> tuple:
     )
 
 
-def score_not_contains(output: str, substrings: list) -> tuple:
+def score_not_contains(
+    output: str, substrings: list, ignore_case: bool = False
+) -> tuple:
     """Pass when the output contains none of the listed substrings.
 
     The mirror of :func:`score_contains_all`: where that scorer
@@ -467,9 +517,13 @@ def score_not_contains(output: str, substrings: list) -> tuple:
     fraction of listed substrings absent, so an output that slips in
     one of four forbidden phrases still earns most of its weight. A
     case only counts as passed when no listed substring is found
-    (score 1.0).
+    (score 1.0). With ``ignore_case``, the comparison is
+    case-insensitive, so a forbidden phrase in any casing fails the
+    case; the detail still names the substrings as written in the
+    spec.
     """
-    found = [s for s in substrings if s in output]
+    folded = _fold(output, ignore_case)
+    found = [s for s in substrings if _fold(s, ignore_case) in folded]
     if not substrings:
         return True, "no forbidden substrings found", 1.0
     score = (len(substrings) - len(found)) / len(substrings)
@@ -482,7 +536,9 @@ def score_not_contains(output: str, substrings: list) -> tuple:
     )
 
 
-def score_starts_with(output: str, prefix: str) -> tuple:
+def score_starts_with(
+    output: str, prefix: str, ignore_case: bool = False
+) -> tuple:
     """Pass when the output starts with the prefix string.
 
     Surrounding whitespace is ignored on both sides, like ``exact``
@@ -490,29 +546,35 @@ def score_starts_with(output: str, prefix: str) -> tuple:
     prefix the output matches from the start (the longest common
     prefix over the prefix length), so an output that gets the first
     few words right still earns part of its weight. An empty prefix
-    passes vacuously: every string starts with it.
+    passes vacuously: every string starts with it. With
+    ``ignore_case``, the comparison is case-insensitive; the detail
+    still shows the prefix as written in the spec.
     """
     out = output.strip()
     pre = prefix.strip()
     if not pre:
         return True, "starts with empty prefix", 1.0
+    out_cmp = _fold(out, ignore_case)
+    pre_cmp = _fold(pre, ignore_case)
     common = 0
-    for a, b in zip(out, pre):
+    for a, b in zip(out_cmp, pre_cmp):
         if a != b:
             break
         common += 1
-    score = common / len(pre)
-    if common == len(pre):
+    score = common / len(pre_cmp)
+    if common == len(pre_cmp):
         return True, f"starts with {pre!r}", 1.0
     return (
         False,
         f"expected output to start with {pre!r}, "
-        f"matched {common} of {len(pre)} prefix characters; got {out!r}",
+        f"matched {common} of {len(pre_cmp)} prefix characters; got {out!r}",
         score,
     )
 
 
-def score_ends_with(output: str, suffix: str) -> tuple:
+def score_ends_with(
+    output: str, suffix: str, ignore_case: bool = False
+) -> tuple:
     """Pass when the output ends with the suffix string.
 
     Surrounding whitespace is ignored on both sides, like ``exact``
@@ -520,24 +582,28 @@ def score_ends_with(output: str, suffix: str) -> tuple:
     suffix the output matches from the end (the longest common
     suffix over the suffix length), so an output that gets the last
     few words right still earns part of its weight. An empty suffix
-    passes vacuously: every string ends with it.
+    passes vacuously: every string ends with it. With
+    ``ignore_case``, the comparison is case-insensitive; the detail
+    still shows the suffix as written in the spec.
     """
     out = output.strip()
     suf = suffix.strip()
     if not suf:
         return True, "ends with empty suffix", 1.0
+    out_cmp = _fold(out, ignore_case)
+    suf_cmp = _fold(suf, ignore_case)
     common = 0
-    for a, b in zip(reversed(out), reversed(suf)):
+    for a, b in zip(reversed(out_cmp), reversed(suf_cmp)):
         if a != b:
             break
         common += 1
-    score = common / len(suf)
-    if common == len(suf):
+    score = common / len(suf_cmp)
+    if common == len(suf_cmp):
         return True, f"ends with {suf!r}", 1.0
     return (
         False,
         f"expected output to end with {suf!r}, "
-        f"matched {common} of {len(suf)} suffix characters; got {out!r}",
+        f"matched {common} of {len(suf_cmp)} suffix characters; got {out!r}",
         score,
     )
 
@@ -879,19 +945,42 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
     when the scorer gives partial credit (see ``score_contains_all``,
     ``score_not_contains``, ``score_fuzzy``, ``score_starts_with``, ``score_ends_with``, and ``score_judge``). ``judges`` is the registry of judge callables
-    used by a ``judge`` scorer; None means the built-in registry."""
+    used by a ``judge`` scorer; None means the built-in registry.
+    The string scorers (``contains``, ``contains_all``,
+    ``contains_any``, ``not_contains``, ``starts_with``,
+    ``ends_with``) accept an optional ``"ignore_case": true`` in the
+    spec: both the expected strings and the output are case-folded
+    before comparing, so ``"Hello"`` matches ``"hello"``; scores and
+    partial credit are unchanged, and a non-boolean value is a scorer
+    error."""
     spec = case.scorer
     kind = spec.get("type")
     if kind == "exact":
         return score_exact(output, str(spec["expected"]))
     if kind == "contains":
-        return score_contains(output, str(spec["substring"]))
+        return score_contains(
+            output,
+            str(spec["substring"]),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
     if kind == "contains_all":
-        return score_contains_all(output, _as_substring_list(spec, kind))
+        return score_contains_all(
+            output,
+            _as_substring_list(spec, kind),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
     if kind == "contains_any":
-        return score_contains_any(output, _as_substring_list(spec, kind))
+        return score_contains_any(
+            output,
+            _as_substring_list(spec, kind),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
     if kind == "not_contains":
-        return score_not_contains(output, _as_substring_list(spec, kind))
+        return score_not_contains(
+            output,
+            _as_substring_list(spec, kind),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
     if kind == "regex":
         return score_regex(output, str(spec["pattern"]))
     if kind == "json_schema":
@@ -924,11 +1013,19 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     if kind == "starts_with":
         if "prefix" not in spec:
             raise ValueError("starts_with scorer requires a 'prefix' value")
-        return score_starts_with(output, str(spec["prefix"]))
+        return score_starts_with(
+            output,
+            str(spec["prefix"]),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
     if kind == "ends_with":
         if "suffix" not in spec:
             raise ValueError("ends_with scorer requires a 'suffix' value")
-        return score_ends_with(output, str(spec["suffix"]))
+        return score_ends_with(
+            output,
+            str(spec["suffix"]),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
     if kind == "judge":
         return score_judge(output, case, judges)
     raise ValueError(f"unknown scorer type: {kind!r}")
