@@ -16,12 +16,13 @@ Design
       {"type": "starts_with", "prefix": "The answer is"}
       {"type": "ends_with", "suffix": "is 42"}
 
-* The string scorers (``contains``, ``contains_all``, ``contains_any``,
-  ``not_contains``, ``starts_with``, ``ends_with``) also accept an
-  optional ``"ignore_case": true``: the expected strings and the
-  output are case-folded before comparing, so ``"Hello"`` matches
-  ``"hello"``. Scores and partial credit are unchanged; the option
-  defaults to off, and a non-boolean value is a scorer error.
+* The ``exact`` scorer and the string scorers (``contains``,
+  ``contains_all``, ``contains_any``, ``not_contains``,
+  ``starts_with``, ``ends_with``) also accept an optional
+  ``"ignore_case": true``: the expected strings and the output are
+  case-folded before comparing, so ``"Hello"`` matches ``"hello"``.
+  Scores and partial credit are unchanged; the option defaults to
+  off, and a non-boolean value is a scorer error.
       {"type": "regex", "pattern": "^\\d+$"}
       {"type": "json_schema", "schema": {"name": "str", "age": "int"}}
       {"type": "json_path", "path": "$.result.total", "expected": 42}
@@ -403,10 +404,15 @@ def load_suite(path: str) -> Suite:
 # ---------------------------------------------------------------------------
 
 
-def score_exact(output: str, expected: str) -> tuple:
+def score_exact(output: str, expected: str, ignore_case: bool = False) -> tuple:
     """Pass when the output equals the expected string (ignoring
-    surrounding whitespace on both sides)."""
-    ok = output.strip() == expected.strip()
+    surrounding whitespace on both sides).
+
+    With ``ignore_case``, both strings are case-folded before
+    comparing, so ``"Hello"`` matches ``"hello"``. Exact stays
+    all-or-nothing: the score is 1.0 on a pass and 0.0 on a fail.
+    """
+    ok = _fold(output.strip(), ignore_case) == _fold(expected.strip(), ignore_case)
     detail = "exact match" if ok else f"expected {expected!r}, got {output!r}"
     return ok, detail, 1.0 if ok else 0.0
 
@@ -948,15 +954,19 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``starts_with``,
-    ``ends_with``) accept an optional ``"ignore_case": true`` in the
-    spec: both the expected strings and the output are case-folded
-    before comparing, so ``"Hello"`` matches ``"hello"``; scores and
-    partial credit are unchanged, and a non-boolean value is a scorer
-    error."""
+    ``ends_with``) and the ``exact`` scorer accept an optional
+    ``"ignore_case": true`` in the spec: both the expected strings
+    and the output are case-folded before comparing, so ``"Hello"``
+    matches ``"hello"``; scores and partial credit are unchanged,
+    and a non-boolean value is a scorer error."""
     spec = case.scorer
     kind = spec.get("type")
     if kind == "exact":
-        return score_exact(output, str(spec["expected"]))
+        return score_exact(
+            output,
+            str(spec["expected"]),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
     if kind == "contains":
         return score_contains(
             output,

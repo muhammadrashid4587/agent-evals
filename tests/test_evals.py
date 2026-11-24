@@ -38,6 +38,99 @@ class TestExactScorer(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class TestExactIgnoreCaseScorer(unittest.TestCase):
+    def test_matches_other_case(self):
+        ok, _, score = score_case(
+            _case({"type": "exact", "expected": "Hello", "ignore_case": True}),
+            "hello",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_case_sensitive_by_default(self):
+        ok, _, _ = score_case(
+            _case({"type": "exact", "expected": "Hello"}), "hello"
+        )
+        self.assertFalse(ok)
+
+    def test_ignore_case_false_is_case_sensitive(self):
+        ok, _, _ = score_case(
+            _case({"type": "exact", "expected": "Hello", "ignore_case": False}),
+            "hello",
+        )
+        self.assertFalse(ok)
+
+    def test_still_all_or_nothing(self):
+        ok, _, score = score_case(
+            _case({"type": "exact", "expected": "Hello", "ignore_case": True}),
+            "goodbye",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_casefold_folds_german_sharp_s(self):
+        # str.casefold folds ß to ss, so "straße" matches "STRASSE".
+        ok, _, _ = score_case(
+            _case({"type": "exact", "expected": "straße", "ignore_case": True}),
+            "STRASSE",
+        )
+        self.assertTrue(ok)
+
+    def test_sharp_s_matches_ss_spelling(self):
+        ok, _, _ = score_case(
+            _case({"type": "exact", "expected": "straße", "ignore_case": True}),
+            "strasse",
+        )
+        self.assertTrue(ok)
+
+    def test_whitespace_still_ignored_with_ignore_case(self):
+        ok, _, _ = score_case(
+            _case({"type": "exact", "expected": "Hello", "ignore_case": True}),
+            "  HELLO\n",
+        )
+        self.assertTrue(ok)
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "exact",
+                        "expected": "hello",
+                        "ignore_case": "true",
+                    }
+                ),
+                "hello",
+            )
+
+    def test_flows_through_suite_json(self):
+        suite_json = {
+            "name": "case",
+            "cases": [
+                {
+                    "id": "c1",
+                    "prompt": "say hello",
+                    "scorer": {
+                        "type": "exact",
+                        "expected": "Hello",
+                        "ignore_case": True,
+                    },
+                }
+            ],
+        }
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False
+        ) as f:
+            json.dump(suite_json, f)
+            path = f.name
+        try:
+            suite = load_suite(path)
+            report = run_suite(suite, lambda prompt: "HELLO")
+        finally:
+            os.unlink(path)
+        self.assertEqual(report.passed, 1)
+
+
 class TestContainsScorer(unittest.TestCase):
     def test_found(self):
         ok, _, _ = score_case(_case({"type": "contains", "substring": "hello"}), "say hello there")
