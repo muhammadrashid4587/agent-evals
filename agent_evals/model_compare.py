@@ -5,7 +5,9 @@ one agent over time. This module answers the other question: given the
 same suite, which agent is best? ``compare_models`` runs the suite
 against every named agent and produces one comparison view: per-case
 and aggregate scores, latency, and token/cost totals side by side,
-with a winner per case and an overall ranking.
+with a winner per case and an overall ranking. The case-wins count
+is also broken down per tag, so a tag an agent keeps losing on is
+visible without digging through the per-case table.
 
 The per-case winner is the agent with the highest score on that case;
 a tie is broken by the lowest latency, then by name, so the winner is
@@ -73,17 +75,20 @@ class CaseComparison:
     agent's run. ``winner`` is the name of the agent that won the
     case — the highest score, breaking ties by lowest latency, then
     by name — or None when every agent scored 0 on the case and
-    there is nothing to win.
+    there is nothing to win. ``tags`` is the case's tag list, so
+    the comparison can break case wins down per tag.
     """
 
     case_id: str
     results: dict
     winner: Optional[str] = None
+    tags: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "case_id": self.case_id,
             "winner": self.winner,
+            "tags": list(self.tags),
             "agents": {
                 name: {
                     "passed": result.passed,
@@ -183,6 +188,36 @@ class ModelComparison:
                 wins[case.winner] += 1
         return wins
 
+    def case_wins_by_tag(self) -> dict:
+        """Case wins broken down per tag.
+
+        Maps each tag to ``{"cases": n, "ties": n, "wins": {name: n}}``,
+        sorted by tag. A case carrying several tags counts under each
+        of them; untagged cases appear under no tag. A case with no
+        winner (every agent scored 0 on it) is a tie: it counts
+        towards the tag's case count but towards no agent's wins, so
+        wins plus ties always equals the tag's case count.
+        """
+        breakdown = {}
+        for case in self.cases:
+            for tag in case.tags:
+                entry = breakdown.setdefault(
+                    tag,
+                    {
+                        "cases": 0,
+                        "ties": 0,
+                        "wins": {
+                            name: 0 for name in self.agent_names
+                        },
+                    },
+                )
+                entry["cases"] += 1
+                if case.winner is None:
+                    entry["ties"] += 1
+                else:
+                    entry["wins"][case.winner] += 1
+        return dict(sorted(breakdown.items()))
+
     def per_case_losers_to(self, baseline: str) -> list:
         """The agents the named baseline agent beats on case wins,
         best first (by the overall ranking).
@@ -233,6 +268,7 @@ class ModelComparison:
             "ranking": self.ranking,
             "winner": self.winner,
             "case_wins": self.case_wins(),
+            "case_wins_by_tag": self.case_wins_by_tag(),
             "cases": [case.to_dict() for case in self.cases],
         }
 
@@ -293,6 +329,7 @@ def compare_models(
                 case_id=case.id,
                 results=results,
                 winner=_case_winner(case.id, results),
+                tags=list(case.tags),
             )
         )
     return ModelComparison(
@@ -392,6 +429,23 @@ def format_model_comparison(comp: ModelComparison) -> str:
         "Case wins: "
         + ", ".join(f"{name} {wins[name]}" for name in names)
     )
+    # Wins per tag: which agent won how many cases under each tag.
+    # A case carrying several tags counts under each of them; a case
+    # with no winner is a tie, counted but won by nobody.
+    by_tag = comp.case_wins_by_tag()
+    if by_tag:
+        lines.append("")
+        lines.append("Case wins by tag:")
+        for tag, entry in by_tag.items():
+            wins_text = ", ".join(
+                f"{name} {entry['wins'][name]}" for name in names
+            )
+            count = entry["cases"]
+            noun = "case" if count == 1 else "cases"
+            lines.append(
+                f"  {tag} ({count} {noun}): {wins_text}, "
+                f"ties {entry['ties']}"
+            )
     return "\n".join(lines)
 
 

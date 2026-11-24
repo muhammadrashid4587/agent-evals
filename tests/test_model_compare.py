@@ -237,6 +237,141 @@ class TestCompareModels(unittest.TestCase):
         self.assertIn("hard", text)
 
 
+class TestCaseWinsByTag(unittest.TestCase):
+    def _tagged_suite(self):
+        return Suite.from_dict(
+            {
+                "name": "calc",
+                "cases": [
+                    {
+                        "id": "add",
+                        "prompt": "2+2",
+                        "scorer": {"type": "exact", "expected": "4"},
+                        "tags": ["arithmetic", "smoke"],
+                    },
+                    {
+                        "id": "sub",
+                        "prompt": "5-3",
+                        "scorer": {"type": "exact", "expected": "2"},
+                        "tags": ["arithmetic"],
+                    },
+                    {
+                        "id": "hard",
+                        "prompt": "sqrt(-1)",
+                        "scorer": {"type": "exact", "expected": "i"},
+                        "tags": ["smoke"],
+                    },
+                ],
+            }
+        )
+
+    def test_wins_split_by_tag(self):
+        # left wins add, right wins sub, nobody wins hard.
+        comp = compare_models(
+            self._tagged_suite(), {"left": _left, "right": _right}
+        )
+        self.assertEqual(
+            comp.case_wins_by_tag(),
+            {
+                "arithmetic": {
+                    "cases": 2,
+                    "ties": 0,
+                    "wins": {"left": 1, "right": 1},
+                },
+                "smoke": {
+                    "cases": 2,
+                    "ties": 1,
+                    "wins": {"left": 1, "right": 0},
+                },
+            },
+        )
+
+    def test_multi_tag_case_counts_under_each_tag(self):
+        # add carries both tags, so it counts under both of them.
+        comp = compare_models(
+            self._tagged_suite(), {"left": _left, "right": _right}
+        )
+        by_tag = comp.case_wins_by_tag()
+        self.assertEqual(by_tag["arithmetic"]["cases"], 2)
+        self.assertEqual(by_tag["smoke"]["cases"], 2)
+
+    def test_tie_counts_but_wins_for_nobody(self):
+        # hard is failed by every agent: a tie under smoke, won by
+        # nobody, and the tag's wins plus ties equal its case count.
+        comp = compare_models(
+            self._tagged_suite(), {"left": _left, "right": _right}
+        )
+        smoke = comp.case_wins_by_tag()["smoke"]
+        self.assertEqual(smoke["ties"], 1)
+        self.assertEqual(sum(smoke["wins"].values()) + smoke["ties"], 2)
+
+    def test_untagged_suite_has_no_breakdown(self):
+        comp = compare_models(_suite(), {"good": _good, "bad": _bad})
+        self.assertEqual(comp.case_wins_by_tag(), {})
+
+    def test_to_dict_carries_breakdown_and_case_tags(self):
+        comp = compare_models(
+            self._tagged_suite(), {"left": _left, "right": _right}
+        )
+        data = json.loads(json.dumps(comp.to_dict()))
+        self.assertEqual(
+            data["case_wins_by_tag"]["arithmetic"]["wins"],
+            {"left": 1, "right": 1},
+        )
+        self.assertEqual(
+            data["case_wins_by_tag"]["smoke"]["ties"], 1
+        )
+        by_id = {c["case_id"]: c for c in data["cases"]}
+        self.assertEqual(by_id["add"]["tags"], ["arithmetic", "smoke"])
+        self.assertEqual(by_id["sub"]["tags"], ["arithmetic"])
+
+    def test_format_shows_breakdown(self):
+        comp = compare_models(
+            self._tagged_suite(), {"left": _left, "right": _right}
+        )
+        text = format_model_comparison(comp)
+        self.assertIn("Case wins by tag:", text)
+        self.assertIn(
+            "arithmetic (2 cases): left 1, right 1, ties 0", text
+        )
+        self.assertIn("smoke (2 cases): left 1, right 0, ties 1", text)
+
+    def test_format_omits_breakdown_when_untagged(self):
+        comp = compare_models(_suite(), {"good": _good, "bad": _bad})
+        text = format_model_comparison(comp)
+        self.assertIn("Case wins: good 2, bad 0", text)
+        self.assertNotIn("Case wins by tag:", text)
+
+    def test_cli_json_carries_breakdown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._tagged_suite().to_dict(), f)
+            out = os.path.join(tmp, "compare.json")
+            code = main(
+                [
+                    "--suite",
+                    path,
+                    "--agent",
+                    "left=tests.test_model_compare:_left",
+                    "--agent",
+                    "right=tests.test_model_compare:_right",
+                    "--json",
+                    out,
+                ]
+            )
+            self.assertEqual(code, 0)
+            with open(out, encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(
+                data["case_wins_by_tag"]["smoke"]["ties"], 1
+            )
+            self.assertEqual(
+                data["case_wins_by_tag"]["arithmetic"]["wins"],
+                {"left": 1, "right": 1},
+            )
+
+
 class TestLosersToBaseline(unittest.TestCase):
     def test_loser_is_agent_the_baseline_beats(self):
         comp = compare_models(_suite(), {"good": _good, "bad": _bad})

@@ -455,8 +455,14 @@ The view shows an overall ranking (weighted score, then pass rate,
 then lowest total latency), per-case and aggregate scores, latency,
 and token totals side by side, a winner per case (highest score,
 ties broken by lowest latency — a case every agent failed has no
-winner), and a case-wins count per agent. `--json` writes the
-comparison as JSON. At least two `--agent name=module:attribute`
+winner), a case-wins count per agent, and a case-wins breakdown per
+tag (which agent won how many cases under each tag, with the cases
+no agent won recorded as ties), so a tag one agent keeps losing on
+is visible without digging through the per-case table. A case
+carrying several tags counts under each of them; untagged cases
+appear under no tag. `--json` writes the comparison as JSON
+(`case_wins_by_tag` in the JSON, with each case's `tags` in its
+per-case row). At least two `--agent name=module:attribute`
 specs are required. The comparison exits 0 by default: it reports
 which agent won, it does not gate CI. `--fail-on-lose BASELINE`
 turns it into a gate: it exits 1 when the named baseline agent
@@ -972,3 +978,10 @@ make demo    # run both example suites through the CLI
   the current run (a tie is not a loss), so a run that loses case
   by case fails CI even if it wins the aggregate.~~ (done in
   v0.24.0)
+- ~~Per-tag case wins in the per-model comparison: the multi-agent
+  comparison view breaks case wins down per tag — which agent won
+  how many cases under each tag, with the cases no agent won
+  recorded as ties and not counted as wins — in the text summary
+  (`Case wins by tag:`) and in the JSON (`case_wins_by_tag`), with
+  each case's tags in its per-case row, so a tag one agent keeps
+  losing on is visible at a glance.~~ (done in v0.25.0)
