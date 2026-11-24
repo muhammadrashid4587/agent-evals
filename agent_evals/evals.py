@@ -15,6 +15,7 @@ Design
       {"type": "regex", "pattern": "^\\d+$"}
       {"type": "json_schema", "schema": {"name": "str", "age": "int"}}
       {"type": "json_path", "path": "$.result.total", "expected": 42}
+      {"type": "json_subset", "expected": {"status": "ok", "total": 42}}
       {"type": "numeric", "expected": 3.14159, "tolerance": 0.001}
       {"type": "judge", "judge": "stub", "rubric": {"criteria": [...]}}
 
@@ -606,6 +607,99 @@ def score_json_path(
     return False, f"expected {path} == {expected!r}, got {extracted!r}", 0.0
 
 
+def _count_leaves(value: Any) -> int:
+    """Count the scalar leaves in an expected JSON value: one per
+    scalar, the sum of the elements for a list, the sum of the values
+    for a dict. Used to weight partial credit for a subset match."""
+    if isinstance(value, dict):
+        return sum(_count_leaves(v) for v in value.values())
+    if isinstance(value, list):
+        return sum(_count_leaves(v) for v in value)
+    return 1
+
+
+def _subset_check(
+    expected: Any, actual: Any, path: str, tolerance: float
+) -> tuple:
+    """Compare ``expected`` against ``actual`` as a subset.
+
+    Returns ``(matched, total, mismatches)``: ``matched``/``total``
+    count the expected leaf values that matched, and ``mismatches``
+    are human-readable strings naming what did not match. Dicts
+    match by subset — every expected key must be present, extra
+    actual keys are ignored — and lists match pairwise by position
+    with the same length; a dict inside a list is itself a subset
+    match, so an expected list item only pins the fields it names.
+    """
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return 0, _count_leaves(expected), [
+                f"{path}: expected object, got {type(actual).__name__}"
+            ]
+        matched, total, mismatches = 0, 0, []
+        for key, sub_expected in expected.items():
+            child = f"{path}.{key}"
+            if key not in actual:
+                total += _count_leaves(sub_expected)
+                mismatches.append(f"missing key {key!r} at {child}")
+                continue
+            m, t, errs = _subset_check(sub_expected, actual[key], child, tolerance)
+            matched += m
+            total += t
+            mismatches.extend(errs)
+        return matched, total, mismatches
+    if isinstance(expected, list):
+        if not isinstance(actual, list):
+            return 0, _count_leaves(expected), [
+                f"{path}: expected array, got {type(actual).__name__}"
+            ]
+        if len(actual) != len(expected):
+            return 0, _count_leaves(expected), [
+                f"{path}: expected array of length {len(expected)}, "
+                f"got {len(actual)}"
+            ]
+        matched, total, mismatches = 0, 0, []
+        for i, (sub_expected, sub_actual) in enumerate(zip(expected, actual)):
+            m, t, errs = _subset_check(
+                sub_expected, sub_actual, f"{path}[{i}]", tolerance
+            )
+            matched += m
+            total += t
+            mismatches.extend(errs)
+        return matched, total, mismatches
+    if _values_equal(actual, expected, tolerance):
+        return 1, 1, []
+    return 0, 1, [f"expected {path} == {expected!r}, got {actual!r}"]
+
+
+def score_json_subset(output: str, expected: Any, tolerance: float = 0.0) -> tuple:
+    """Pass when the output JSON contains every expected value.
+
+    ``expected`` is an object: every key it names must be present in
+    the output with a matching value, recursively, while extra keys
+    in the output are ignored — the check is a subset match, not a
+    full equality. Numbers compare with an optional ``tolerance``;
+    ``bool`` is never accepted as ``int``. Partial credit: the score
+    is the fraction of expected leaf values that matched, so a case
+    that gets most of the fields right still earns most of its
+    weight. An empty expected object passes vacuously. A non-object
+    ``expected`` raises ``ValueError``.
+    """
+    if not isinstance(expected, dict):
+        raise ValueError("json_subset scorer requires an 'expected' object")
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError as exc:
+        return False, f"output is not valid JSON: {exc}", 0.0
+    matched, total, mismatches = _subset_check(
+        expected, value, "$", float(tolerance)
+    )
+    if not mismatches:
+        return True, "JSON subset matches", 1.0
+    score = (matched / total) if total else 1.0
+    return False, "; ".join(mismatches), score
+
+
 def score_numeric(output: str, expected: float, tolerance: float = 0.0) -> tuple:
     """Pass when the first number in the output is within ``tolerance`` of
     ``expected``. The number may be embedded in surrounding text."""
@@ -693,6 +787,12 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
             str(spec["path"]),
             spec["expected"],
             float(spec.get("tolerance", 0.0)),
+        )
+    if kind == "json_subset":
+        if "expected" not in spec:
+            raise ValueError("json_subset scorer requires an 'expected' object")
+        return score_json_subset(
+            output, spec["expected"], float(spec.get("tolerance", 0.0))
         )
     if kind == "numeric":
         return score_numeric(

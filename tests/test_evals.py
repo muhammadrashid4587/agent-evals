@@ -279,6 +279,153 @@ class TestJsonPathScorer(unittest.TestCase):
             score_case(_case({"type": "json_path", "path": "$.a"}), '{"a": 1}')
 
 
+class TestJsonSubsetScorer(unittest.TestCase):
+    def test_extra_keys_ignored(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_subset",
+                    "expected": {"status": "ok", "total": 42},
+                }
+            ),
+            '{"status": "ok", "total": 42, "request_id": "abc", "took_ms": 3}',
+        )
+        self.assertTrue(ok)
+
+    def test_nested_subset(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_subset",
+                    "expected": {"result": {"total": 42, "currency": "USD"}},
+                }
+            ),
+            '{"result": {"total": 42, "currency": "USD", "items": []},'
+            ' "debug": true}',
+        )
+        self.assertTrue(ok)
+
+    def test_list_items_are_subsets(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_subset",
+                    "expected": {"items": [{"id": 1}, {"id": 2}]},
+                }
+            ),
+            '{"items": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]}',
+        )
+        self.assertTrue(ok)
+
+    def test_missing_key_fails_with_partial_credit(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "json_subset",
+                    "expected": {"status": "ok", "total": 42},
+                }
+            ),
+            '{"status": "ok"}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("total", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_wrong_value_fails_with_partial_credit(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "json_subset",
+                    "expected": {"a": 1, "b": 2, "c": 3},
+                }
+            ),
+            '{"a": 1, "b": 99, "c": 3}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("$.b", detail)
+        self.assertAlmostEqual(score, 2 / 3)
+
+    def test_wrong_type_fails(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "json_subset",
+                    "expected": {"user": {"id": 7}},
+                }
+            ),
+            '{"user": [7]}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("object", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_list_length_mismatch_fails(self):
+        ok, detail, _ = score_case(
+            _case(
+                {
+                    "type": "json_subset",
+                    "expected": {"items": [1, 2]},
+                }
+            ),
+            '{"items": [1]}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("length 2", detail)
+
+    def test_invalid_json_fails(self):
+        ok, detail, _ = score_case(
+            _case({"type": "json_subset", "expected": {"a": 1}}), "{not json"
+        )
+        self.assertFalse(ok)
+        self.assertIn("not valid JSON", detail)
+
+    def test_numeric_tolerance(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_subset",
+                    "expected": {"pi": 3.14},
+                    "tolerance": 0.01,
+                }
+            ),
+            '{"pi": 3.14159}',
+        )
+        self.assertTrue(ok)
+
+    def test_bool_is_not_int(self):
+        ok, _, _ = score_case(
+            _case({"type": "json_subset", "expected": {"flag": 1}}),
+            '{"flag": true}',
+        )
+        self.assertFalse(ok)
+
+    def test_null_value_matches(self):
+        ok, _, _ = score_case(
+            _case({"type": "json_subset", "expected": {"note": None}}),
+            '{"note": null, "other": 1}',
+        )
+        self.assertTrue(ok)
+
+    def test_empty_expected_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "json_subset", "expected": {}}),
+            '{"anything": true}',
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_non_object_expected_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "json_subset", "expected": [1, 2]}),
+                '{"a": 1}',
+            )
+
+    def test_missing_expected_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "json_subset"}), '{"a": 1}')
+
+
 class TestNumericScorer(unittest.TestCase):
     def test_within_tolerance(self):
         ok, _, _ = score_case(

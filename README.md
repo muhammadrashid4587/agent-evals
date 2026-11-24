@@ -16,11 +16,11 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 
 - A small runner for evaluating an agent callable against a suite of cases.
 - Nine scorers: exact match, substring, contains-all,
-  contains-any, regex, JSON-schema shape, JSON-path value, numeric
-  tolerance, and a judge scorer that scores free-form output against
-  a rubric with a pluggable judge (a deterministic built-in stub
-  judge by default; bring your own LLM judge as a callable or an
-  HTTP endpoint).
+  contains-any, regex, JSON-schema shape, JSON-path value, JSON
+  subset, numeric tolerance, and a judge scorer that scores
+  free-form output against a rubric with a pluggable judge (a
+  deterministic built-in stub judge by default; bring your own LLM
+  judge as a callable or an HTTP endpoint).
 - A CLI that runs a suite JSON file against an agent named as
   `module:attribute` and exits 0 only when every case passes (a case
   that passes its checks but exceeds its latency budget does not fail
@@ -93,6 +93,7 @@ detail; the run continues with the remaining cases.
 | `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
+| `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
@@ -105,6 +106,23 @@ The JSON-path language: an optional leading `$`, dot-separated keys, and
 `[n]` array indices, e.g. `$.result.total` or `items[0].name`. A missing
 key or index fails the case; a malformed path is a scorer error. Numbers
 compare with an optional `tolerance`; `bool` is never accepted as `int`.
+
+The JSON-subset scorer checks several fields at once where
+`json_path` checks one: `expected` is an object, and every field it
+names must be present in the output JSON with a matching value,
+recursively, while extra fields in the output are ignored — the
+check is a subset match, not a full equality. That is the shape of
+an agent that returns JSON with fields you did not ask for: a
+request id, a timestamp, debug metadata. A dict inside the expected
+object is itself a subset match, and a list matches pairwise by
+position with the same length (a dict inside a list is a subset
+too, so an expected list item only pins the fields it names).
+Numbers compare with an optional `tolerance`; `bool` is never
+accepted as `int`. It gives partial credit like `contains_all`:
+the score is the fraction of expected leaf values that matched, so
+a case that gets most of the fields right still earns most of its
+weight. An empty `expected` object passes vacuously; a non-object
+`expected` is a scorer error.
 
 ## LLM-as-judge scorer
 
@@ -1055,3 +1073,9 @@ make demo    # run both example suites through the CLI
   loses a whole tag case by case fails CI even if it wins the
   aggregate — the per-tag variant of the `--fail-on-lose-per-case`
   gate, using the `case_wins_by_tag` breakdown.~~ (done in v0.28.0)
+- ~~JSON-subset scorer: `json_subset` checks that the output JSON
+  contains every expected field with a matching value, recursively,
+  while extra fields are ignored — a subset match, not a full
+  equality — with partial credit per matched leaf value, so an agent
+  that returns JSON with fields you did not ask for can still be
+  scored on the fields you did.~~ (done in v0.29.0)
