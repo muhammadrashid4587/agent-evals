@@ -16,6 +16,7 @@ Design
       {"type": "json_schema", "schema": {"name": "str", "age": "int"}}
       {"type": "json_path", "path": "$.result.total", "expected": 42}
       {"type": "json_subset", "expected": {"status": "ok", "total": 42}}
+      {"type": "fuzzy", "expected": "hello world", "threshold": 0.8}
       {"type": "numeric", "expected": 3.14159, "tolerance": 0.001}
       {"type": "judge", "judge": "stub", "rubric": {"criteria": [...]}}
 
@@ -717,6 +718,32 @@ def score_numeric(output: str, expected: float, tolerance: float = 0.0) -> tuple
     return ok, detail, 1.0 if ok else 0.0
 
 
+def score_fuzzy(output: str, expected: str, threshold: float = 0.8) -> tuple:
+    """Pass when the output is close enough to the expected string.
+
+    Similarity is :class:`difflib.SequenceMatcher`'s ratio on the
+    stripped strings — deterministic, standard library only, no
+    model. Pass when the ratio reaches ``threshold`` (default 0.8),
+    which must be in [0, 1]. Partial credit: the score is the ratio
+    itself, so a near miss still earns most of its weight. An exact
+    match is a ratio of 1.0; an empty expected string only matches
+    an empty output.
+    """
+    threshold = float(threshold)
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("fuzzy scorer requires a 'threshold' in [0, 1]")
+    ratio = difflib.SequenceMatcher(
+        None, output.strip(), expected.strip()
+    ).ratio()
+    ok = ratio >= threshold
+    detail = (
+        f"similarity {ratio:.2f} >= threshold {threshold:.2f}"
+        if ok
+        else f"similarity {ratio:.2f} < threshold {threshold:.2f}"
+    )
+    return ok, detail, ratio
+
+
 def score_judge(output: str, case: Case, judges: Optional[dict] = None) -> tuple:
     """Score one case's output with a judge.
 
@@ -797,6 +824,12 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     if kind == "numeric":
         return score_numeric(
             output, float(spec["expected"]), float(spec.get("tolerance", 0.0))
+        )
+    if kind == "fuzzy":
+        if "expected" not in spec:
+            raise ValueError("fuzzy scorer requires an 'expected' value")
+        return score_fuzzy(
+            output, str(spec["expected"]), float(spec.get("threshold", 0.8))
         )
     if kind == "judge":
         return score_judge(output, case, judges)

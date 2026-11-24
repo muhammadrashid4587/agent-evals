@@ -426,6 +426,87 @@ class TestJsonSubsetScorer(unittest.TestCase):
             score_case(_case({"type": "json_subset"}), '{"a": 1}')
 
 
+class TestFuzzyScorer(unittest.TestCase):
+    def test_exact_match(self):
+        ok, _, score = score_case(
+            _case({"type": "fuzzy", "expected": "hello world"}), "hello world"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_near_miss_passes(self):
+        ok, detail, score = score_case(
+            _case({"type": "fuzzy", "expected": "hello world"}), "hello wrld"
+        )
+        self.assertTrue(ok)
+        self.assertIn("0.95", detail)
+        self.assertAlmostEqual(score, 0.9523809523809523)
+
+    def test_far_miss_fails_with_partial_credit(self):
+        ok, detail, score = score_case(
+            _case({"type": "fuzzy", "expected": "hello world"}),
+            "goodbye moon",
+        )
+        self.assertFalse(ok)
+        self.assertIn("similarity", detail)
+        self.assertLess(score, 0.8)
+        self.assertGreater(score, 0.0)
+
+    def test_threshold_is_respected(self):
+        ok, _, _ = score_case(
+            _case(
+                {"type": "fuzzy", "expected": "hello world", "threshold": 0.99}
+            ),
+            "hello wrld",
+        )
+        self.assertFalse(ok)
+
+    def test_threshold_zero_passes_anything(self):
+        ok, _, _ = score_case(
+            _case(
+                {"type": "fuzzy", "expected": "hello world", "threshold": 0}
+            ),
+            "something else entirely",
+        )
+        self.assertTrue(ok)
+
+    def test_threshold_above_one_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "fuzzy", "expected": "hello", "threshold": 1.5}
+                ),
+                "hello",
+            )
+
+    def test_negative_threshold_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "fuzzy", "expected": "hello", "threshold": -0.1}
+                ),
+                "hello",
+            )
+
+    def test_missing_expected_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "fuzzy"}), "hello")
+
+    def test_surrounding_whitespace_ignored(self):
+        ok, _, _ = score_case(
+            _case({"type": "fuzzy", "expected": "hello"}), "  hello\n"
+        )
+        self.assertTrue(ok)
+
+    def test_empty_expected_only_matches_empty(self):
+        ok, _, _ = score_case(_case({"type": "fuzzy", "expected": ""}), "")
+        self.assertTrue(ok)
+        ok, _, _ = score_case(
+            _case({"type": "fuzzy", "expected": ""}), "hello"
+        )
+        self.assertFalse(ok)
+
+
 class TestNumericScorer(unittest.TestCase):
     def test_within_tolerance(self):
         ok, _, _ = score_case(

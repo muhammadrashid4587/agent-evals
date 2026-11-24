@@ -15,9 +15,9 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Nine scorers: exact match, substring, contains-all,
+- Eleven scorers: exact match, substring, contains-all,
   contains-any, regex, JSON-schema shape, JSON-path value, JSON
-  subset, numeric tolerance, and a judge scorer that scores
+  subset, fuzzy similarity, numeric tolerance, and a judge scorer that scores
   free-form output against a rubric with a pluggable judge (a
   deterministic built-in stub judge by default; bring your own LLM
   judge as a callable or an HTTP endpoint).
@@ -94,6 +94,7 @@ detail; the run continues with the remaining cases.
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
 | `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
+| `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
@@ -123,6 +124,16 @@ the score is the fraction of expected leaf values that matched, so
 a case that gets most of the fields right still earns most of its
 weight. An empty `expected` object passes vacuously; a non-object
 `expected` is a scorer error.
+
+The `fuzzy` scorer is for output that should be close to an
+expected string without matching it exactly — a rephrased answer,
+a typo, an extra word. Similarity is `difflib`'s SequenceMatcher
+ratio on the stripped strings (deterministic, standard library
+only, no model): the case passes when the ratio reaches
+`threshold` (default 0.8, must be in [0, 1]). It gives partial
+credit like `contains_all`: the score is the ratio itself, so a
+near miss still earns most of its weight. An exact match is a
+ratio of 1.0; an empty `expected` only matches an empty output.
 
 ## LLM-as-judge scorer
 
@@ -1079,3 +1090,9 @@ make demo    # run both example suites through the CLI
   equality — with partial credit per matched leaf value, so an agent
   that returns JSON with fields you did not ask for can still be
   scored on the fields you did.~~ (done in v0.29.0)
+- ~~Fuzzy similarity scorer: `fuzzy` passes when the output is
+  close enough to an expected string — a `difflib` SequenceMatcher
+  ratio at or above a `threshold` (default 0.8) — with partial
+  credit equal to the ratio, so a rephrased answer, a typo, or an
+  extra word can still pass without an exact match.~~ (done in
+  v0.30.0)
