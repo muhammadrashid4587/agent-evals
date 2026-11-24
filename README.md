@@ -91,11 +91,11 @@ detail; the run continues with the remaining cases.
 | `contains_all` | `{"substrings": ["hello", "world"]}` | output contains every listed substring (empty list passes; optional `"ignore_case": true`) |
 | `contains_any` | `{"substrings": ["hello", "hi"]}` | output contains at least one listed substring (empty list fails; optional `"ignore_case": true`) |
 | `not_contains` | `{"substrings": ["as an AI", "sorry"]}` | output contains none of the listed substrings (empty list passes; optional `"ignore_case": true`) |
-| `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output |
+| `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match) |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
 | `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
-| `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8) |
+| `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8; optional `"ignore_case": true` for a case-insensitive comparison) |
 | `starts_with` | `{"prefix": "The answer is"}` | the output starts with the prefix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `ends_with` | `{"suffix": "is 42"}` | the output ends with the suffix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
@@ -171,12 +171,14 @@ still earns most of its weight. An empty `substrings` list passes
 vacuously: there is nothing forbidden to find.
 
 The `exact` scorer and the six string scorers — `contains`, `contains_all`,
-`contains_any`, `not_contains`, `starts_with`, `ends_with` — all
-accept an optional `"ignore_case": true` in the spec, e.g.
+`contains_any`, `not_contains`, `starts_with`, `ends_with` — and the
+`fuzzy` and `regex` scorers all accept an optional `"ignore_case": true`
+in the spec, e.g.
 `{"type": "exact", "expected": "Hello", "ignore_case": true}`.
 When set, the expected strings and the output are case-folded
 (`str.casefold`, so non-ASCII case pairs compare equal too) before
-comparing, so `"Hello"` matches `"hello"` and a forbidden phrase
+comparing — `regex` matches with `re.IGNORECASE` instead — so `"Hello"`
+matches `"hello"` and a forbidden phrase
 fails `not_contains` in any casing. Scores and partial credit are
 unchanged — a `contains_all` case that finds 3 of 4 substrings in
 the wrong case still earns 0.75, and `exact` stays all-or-nothing —
@@ -1175,3 +1177,9 @@ make demo    # run both example suites through the CLI
   and the output before comparing, so `"Hello"` matches `"hello"` —
   with the score still all-or-nothing, the option defaulting to off,
   and a non-boolean value rejected as a scorer error.~~ (done in v0.35.0)
+- ~~`ignore_case` for the `fuzzy` and `regex` scorers: `fuzzy` accepts
+  an optional `"ignore_case": true`, which case-folds both strings
+  before the SequenceMatcher ratio, and `regex` accepts an optional
+  `"ignore_case": true`, which matches with `re.IGNORECASE` — with
+  scores and partial credit unchanged, the option defaulting to off,
+  and a non-boolean value rejected as a scorer error.~~ (done in v0.36.0)

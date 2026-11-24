@@ -255,6 +255,39 @@ class TestRegexScorer(unittest.TestCase):
         with self.assertRaises(ValueError):
             score_case(_case({"type": "regex", "pattern": "("}), "x")
 
+    def test_ignore_case_matches(self):
+        ok, _, _ = score_case(
+            _case({"type": "regex", "pattern": r"^hello$", "ignore_case": True}),
+            "HELLO",
+        )
+        self.assertTrue(ok)
+
+    def test_ignore_case_false_is_case_sensitive(self):
+        ok, _, _ = score_case(
+            _case({"type": "regex", "pattern": r"^hello$", "ignore_case": False}),
+            "HELLO",
+        )
+        self.assertFalse(ok)
+
+    def test_ignore_case_defaults_off(self):
+        ok, _, _ = score_case(
+            _case({"type": "regex", "pattern": r"^hello$"}), "HELLO"
+        )
+        self.assertFalse(ok)
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "regex",
+                        "pattern": r"^hello$",
+                        "ignore_case": "true",
+                    }
+                ),
+                "HELLO",
+            )
+
 
 class TestJsonSchemaScorer(unittest.TestCase):
     def test_matching_shape(self):
@@ -645,6 +678,55 @@ class TestFuzzyScorer(unittest.TestCase):
             _case({"type": "fuzzy", "expected": ""}), "hello"
         )
         self.assertFalse(ok)
+
+    def test_ignore_case_matches(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "fuzzy",
+                    "expected": "Hello World",
+                    "ignore_case": True,
+                }
+            ),
+            "hello world",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_ignore_case_false_is_case_sensitive(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "fuzzy",
+                    "expected": "HELLO",
+                    "ignore_case": False,
+                }
+            ),
+            "hello",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_ignore_case_defaults_off(self):
+        ok, _, score = score_case(
+            _case({"type": "fuzzy", "expected": "HELLO"}),
+            "hello",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "fuzzy",
+                        "expected": "hello",
+                        "ignore_case": "true",
+                    }
+                ),
+                "hello",
+            )
 
 
 class TestStartsWithScorer(unittest.TestCase):

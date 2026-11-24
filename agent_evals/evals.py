@@ -18,11 +18,13 @@ Design
 
 * The ``exact`` scorer and the string scorers (``contains``,
   ``contains_all``, ``contains_any``, ``not_contains``,
-  ``starts_with``, ``ends_with``) also accept an optional
-  ``"ignore_case": true``: the expected strings and the output are
-  case-folded before comparing, so ``"Hello"`` matches ``"hello"``.
-  Scores and partial credit are unchanged; the option defaults to
-  off, and a non-boolean value is a scorer error.
+  ``starts_with``, ``ends_with``), and the ``fuzzy`` and ``regex``
+  scorers, also accept an optional ``"ignore_case": true``: the
+  expected strings and the output are case-folded before comparing
+  (``regex`` matches with ``re.IGNORECASE``), so ``"Hello"``
+  matches ``"hello"``. Scores and partial credit are unchanged;
+  the option defaults to off, and a non-boolean value is a scorer
+  error.
       {"type": "regex", "pattern": "^\\d+$"}
       {"type": "json_schema", "schema": {"name": "str", "age": "int"}}
       {"type": "json_path", "path": "$.result.total", "expected": 42}
@@ -614,10 +616,16 @@ def score_ends_with(
     )
 
 
-def score_regex(output: str, pattern: str) -> tuple:
-    """Pass when the regex matches anywhere in the output."""
+def score_regex(output: str, pattern: str, ignore_case: bool = False) -> tuple:
+    """Pass when the regex matches anywhere in the output.
+
+    With ``ignore_case``, the match is case-insensitive
+    (``re.IGNORECASE``), so a pattern written in lower case still
+    matches upper-case output.
+    """
+    flags = re.IGNORECASE if ignore_case else 0
     try:
-        match = re.search(pattern, output)
+        match = re.search(pattern, output, flags)
     except re.error as exc:
         raise ValueError(f"invalid regex {pattern!r}: {exc}") from exc
     ok = match is not None
@@ -878,7 +886,9 @@ def score_numeric(output: str, expected: float, tolerance: float = 0.0) -> tuple
     return ok, detail, 1.0 if ok else 0.0
 
 
-def score_fuzzy(output: str, expected: str, threshold: float = 0.8) -> tuple:
+def score_fuzzy(
+    output: str, expected: str, threshold: float = 0.8, ignore_case: bool = False
+) -> tuple:
     """Pass when the output is close enough to the expected string.
 
     Similarity is :class:`difflib.SequenceMatcher`'s ratio on the
@@ -887,13 +897,17 @@ def score_fuzzy(output: str, expected: str, threshold: float = 0.8) -> tuple:
     which must be in [0, 1]. Partial credit: the score is the ratio
     itself, so a near miss still earns most of its weight. An exact
     match is a ratio of 1.0; an empty expected string only matches
-    an empty output.
+    an empty output. With ``ignore_case``, both strings are
+    case-folded before the ratio is computed, so ``"Hello World"``
+    and ``"hello world"`` score 1.0.
     """
     threshold = float(threshold)
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("fuzzy scorer requires a 'threshold' in [0, 1]")
     ratio = difflib.SequenceMatcher(
-        None, output.strip(), expected.strip()
+        None,
+        _fold(output.strip(), ignore_case),
+        _fold(expected.strip(), ignore_case),
     ).ratio()
     ok = ratio >= threshold
     detail = (
@@ -954,11 +968,12 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``starts_with``,
-    ``ends_with``) and the ``exact`` scorer accept an optional
-    ``"ignore_case": true`` in the spec: both the expected strings
-    and the output are case-folded before comparing, so ``"Hello"``
-    matches ``"hello"``; scores and partial credit are unchanged,
-    and a non-boolean value is a scorer error."""
+    ``ends_with``) and the ``exact``, ``fuzzy``, and ``regex``
+    scorers accept an optional ``"ignore_case": true`` in the spec:
+    both the expected strings and the output are case-folded before
+    comparing (``regex`` matches with ``re.IGNORECASE``), so
+    ``"Hello"`` matches ``"hello"``; scores and partial credit are
+    unchanged, and a non-boolean value is a scorer error."""
     spec = case.scorer
     kind = spec.get("type")
     if kind == "exact":
@@ -992,7 +1007,11 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
             _as_bool_option(spec, "ignore_case", kind),
         )
     if kind == "regex":
-        return score_regex(output, str(spec["pattern"]))
+        return score_regex(
+            output,
+            str(spec["pattern"]),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
     if kind == "json_schema":
         return score_json_schema(output, spec["schema"])
     if kind == "json_path":
@@ -1018,7 +1037,10 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
         if "expected" not in spec:
             raise ValueError("fuzzy scorer requires an 'expected' value")
         return score_fuzzy(
-            output, str(spec["expected"]), float(spec.get("threshold", 0.8))
+            output,
+            str(spec["expected"]),
+            float(spec.get("threshold", 0.8)),
+            _as_bool_option(spec, "ignore_case", kind),
         )
     if kind == "starts_with":
         if "prefix" not in spec:
