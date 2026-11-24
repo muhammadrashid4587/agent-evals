@@ -507,6 +507,57 @@ class TestFuzzyScorer(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestStartsWithScorer(unittest.TestCase):
+    def test_prefix_match(self):
+        ok, detail, score = score_case(
+            _case({"type": "starts_with", "prefix": "The answer is"}),
+            "The answer is 42",
+        )
+        self.assertTrue(ok)
+        self.assertIn("starts with", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_full_equality_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "starts_with", "prefix": "hello"}), "hello"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_wrong_start_fails_with_partial_credit(self):
+        ok, detail, score = score_case(
+            _case({"type": "starts_with", "prefix": "hello world"}),
+            "hello there",
+        )
+        self.assertFalse(ok)
+        self.assertIn("6 of 11", detail)
+        self.assertAlmostEqual(score, 6 / 11)
+
+    def test_no_common_prefix_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "starts_with", "prefix": "hello"}), "goodbye"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_missing_prefix_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "starts_with"}), "hello")
+
+    def test_surrounding_whitespace_ignored(self):
+        ok, _, _ = score_case(
+            _case({"type": "starts_with", "prefix": "hello"}), "  hello world\n"
+        )
+        self.assertTrue(ok)
+
+    def test_empty_prefix_passes_vacuously(self):
+        ok, _, score = score_case(
+            _case({"type": "starts_with", "prefix": ""}), "anything at all"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+
 class TestNumericScorer(unittest.TestCase):
     def test_within_tolerance(self):
         ok, _, _ = score_case(

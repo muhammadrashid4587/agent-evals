@@ -454,6 +454,36 @@ def score_contains_any(output: str, substrings: list) -> tuple:
     )
 
 
+def score_starts_with(output: str, prefix: str) -> tuple:
+    """Pass when the output starts with the prefix string.
+
+    Surrounding whitespace is ignored on both sides, like ``exact``
+    and ``fuzzy``. Partial credit: the score is the fraction of the
+    prefix the output matches from the start (the longest common
+    prefix over the prefix length), so an output that gets the first
+    few words right still earns part of its weight. An empty prefix
+    passes vacuously: every string starts with it.
+    """
+    out = output.strip()
+    pre = prefix.strip()
+    if not pre:
+        return True, "starts with empty prefix", 1.0
+    common = 0
+    for a, b in zip(out, pre):
+        if a != b:
+            break
+        common += 1
+    score = common / len(pre)
+    if common == len(pre):
+        return True, f"starts with {pre!r}", 1.0
+    return (
+        False,
+        f"expected output to start with {pre!r}, "
+        f"matched {common} of {len(pre)} prefix characters; got {out!r}",
+        score,
+    )
+
+
 def score_regex(output: str, pattern: str) -> tuple:
     """Pass when the regex matches anywhere in the output."""
     try:
@@ -789,8 +819,8 @@ def score_judge(output: str, case: Case, judges: Optional[dict] = None) -> tuple
 def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     """Score one case's output. Returns (passed, detail, score) where
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
-    when the scorer gives partial credit (see ``score_contains_all`` and
-    ``score_judge``). ``judges`` is the registry of judge callables
+    when the scorer gives partial credit (see ``score_contains_all``,
+    ``score_fuzzy``, ``score_starts_with``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry."""
     spec = case.scorer
     kind = spec.get("type")
@@ -831,6 +861,10 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
         return score_fuzzy(
             output, str(spec["expected"]), float(spec.get("threshold", 0.8))
         )
+    if kind == "starts_with":
+        if "prefix" not in spec:
+            raise ValueError("starts_with scorer requires a 'prefix' value")
+        return score_starts_with(output, str(spec["prefix"]))
     if kind == "judge":
         return score_judge(output, case, judges)
     raise ValueError(f"unknown scorer type: {kind!r}")

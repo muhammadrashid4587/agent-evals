@@ -17,7 +17,7 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 - A small runner for evaluating an agent callable against a suite of cases.
 - Eleven scorers: exact match, substring, contains-all,
   contains-any, regex, JSON-schema shape, JSON-path value, JSON
-  subset, fuzzy similarity, numeric tolerance, and a judge scorer that scores
+  subset, fuzzy similarity, starts with, numeric tolerance, and a judge scorer that scores
   free-form output against a rubric with a pluggable judge (a
   deterministic built-in stub judge by default; bring your own LLM
   judge as a callable or an HTTP endpoint).
@@ -95,6 +95,7 @@ detail; the run continues with the remaining cases.
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
 | `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
 | `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8) |
+| `starts_with` | `{"prefix": "The answer is"}` | the output starts with the prefix (surrounding whitespace ignored) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
@@ -134,6 +135,17 @@ only, no model): the case passes when the ratio reaches
 credit like `contains_all`: the score is the ratio itself, so a
 near miss still earns most of its weight. An exact match is a
 ratio of 1.0; an empty `expected` only matches an empty output.
+
+The `starts_with` scorer is for output that must open with a fixed
+lead-in — an answer that has to start with "The answer is", a JSON
+blob that has to start with `{"status"`, a greeting that has to
+start with "Hello". It compares the stripped output against the
+stripped prefix, so leading whitespace in the output does not fail
+the case. It gives partial credit like `fuzzy`: the score is the
+fraction of the prefix the output matches from the start, so an
+output that gets the first few words right still earns part of its
+weight. An empty `prefix` passes vacuously: every string starts
+with it.
 
 ## LLM-as-judge scorer
 
@@ -1096,3 +1108,8 @@ make demo    # run both example suites through the CLI
   credit equal to the ratio, so a rephrased answer, a typo, or an
   extra word can still pass without an exact match.~~ (done in
   v0.30.0)
+- ~~`starts_with` scorer: `starts_with` passes when the output
+  starts with a fixed prefix, with partial credit equal to the
+  fraction of the prefix matched from the start, so an output that
+  gets the first few words right still earns part of its weight.~~
+  (done in v0.31.0)
