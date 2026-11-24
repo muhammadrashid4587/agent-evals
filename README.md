@@ -394,7 +394,15 @@ the lowest latency — the same rule the per-model comparison uses.
 A case both runs scored 0 on has no winner, and neither does an
 exact tie or a case present in only one run. The text summary prints
 `Case wins: baseline N, current M` and the JSON carries a
-`case_wins` count per run. `--fail-on-lose-per-case` turns the count
+`case_wins` count per run. The wins are also broken down per tag —
+which run won how many cases under each tag, with the cases no run
+won recorded as ties — so a tag one run keeps losing on is visible
+at a glance, the same breakdown the per-model comparison carries.
+The text summary prints a `Case wins by tag:` section and the JSON
+carries `case_wins_by_tag`. A case's tags come from the current
+run's report when it is in it, else the baseline's; a case carrying
+several tags counts under each of them, and untagged cases appear
+under no tag. `--fail-on-lose-per-case` turns the count
 into a gate: it exits 1 when the baseline run won strictly more
 individual cases than the current run (a tie in case wins is not a
 loss), so a current run that loses case by case still fails CI even
@@ -985,3 +993,10 @@ make demo    # run both example suites through the CLI
   (`Case wins by tag:`) and in the JSON (`case_wins_by_tag`), with
   each case's tags in its per-case row, so a tag one agent keeps
   losing on is visible at a glance.~~ (done in v0.25.0)
+- ~~Per-tag case wins in the two-run comparison: the two-run diff
+  breaks case wins down per tag the same way — which run won how
+  many cases under each tag, with the cases no run won recorded
+  as ties — in the text summary (`Case wins by tag:`) and in the
+  JSON (`case_wins_by_tag`), with each case's tags in its per-case
+  row, so a tag one run keeps losing on is visible at a glance.~~
+  (done in v0.26.0)

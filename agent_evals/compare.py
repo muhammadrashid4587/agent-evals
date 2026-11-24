@@ -50,7 +50,10 @@ when the baseline run won strictly more individual cases than the
 current run (a tie in case wins is not a loss), so a current run
 that loses case by case still fails CI even if it wins the
 aggregate. The comparison JSON carries a ``case_wins`` count per
-run.
+run, and a ``case_wins_by_tag`` breakdown — which run won how many
+cases under each tag, with the cases no run won recorded as ties —
+so a tag one run keeps losing on is visible at a glance, the same
+breakdown the per-model comparison carries.
 """
 
 from __future__ import annotations
@@ -91,6 +94,7 @@ class CaseChange:
     baseline_tokens: Optional[int] = None
     current_tokens: Optional[int] = None
     case_changed: Optional[bool] = None
+    tags: list = field(default_factory=list)
 
     @property
     def latency_delta_ms(self) -> Optional[float]:
@@ -172,6 +176,7 @@ class CaseChange:
             "kind": self.kind,
             "winner": self.winner,
             "case_changed": self.case_changed,
+            "tags": list(self.tags),
             "baseline_passed": self.baseline_passed,
             "current_passed": self.current_passed,
             "baseline_score": self.baseline_score,
@@ -374,6 +379,37 @@ class ReportComparison:
                 wins[change.winner] += 1
         return wins
 
+    def case_wins_by_tag(self) -> dict:
+        """Case wins broken down per tag, mirroring the per-model
+        comparison.
+
+        Maps each tag to ``{"cases": n, "ties": n, "wins":
+        {"baseline": n, "current": n}}``, sorted by tag. A case
+        carrying several tags counts under each of them; untagged
+        cases appear under no tag. A case with no winner — both
+        runs scored 0 on it, an exact tie, or a case present in
+        only one run — is a tie: it counts towards the tag's case
+        count but towards neither run's wins, so wins plus ties
+        always equals the tag's case count.
+        """
+        breakdown = {}
+        for change in self.changes:
+            for tag in change.tags:
+                entry = breakdown.setdefault(
+                    tag,
+                    {
+                        "cases": 0,
+                        "ties": 0,
+                        "wins": {"baseline": 0, "current": 0},
+                    },
+                )
+                entry["cases"] += 1
+                if change.winner is None:
+                    entry["ties"] += 1
+                else:
+                    entry["wins"][change.winner] += 1
+        return dict(sorted(breakdown.items()))
+
     @property
     def baseline_wins_more_cases(self) -> bool:
         """True when the baseline run won strictly more individual
@@ -407,6 +443,7 @@ class ReportComparison:
             "token_delta": self.token_delta,
             "winner": self.winner,
             "case_wins": self.case_wins(),
+            "case_wins_by_tag": self.case_wins_by_tag(),
             "verdict": self.verdict,
             "regressions": [c.case_id for c in self.regressions],
             "fixes": [c.case_id for c in self.fixes],
@@ -472,6 +509,14 @@ def compare_reports(baseline: dict, current: dict) -> ReportComparison:
             )
         else:
             case_changed = None
+        # A case's tags come from the current run when it is in it
+        # (the case as measured most recently), else the baseline's
+        # — a removed case still carries the tags it ran under.
+        # Reports written by the harness record tags per result;
+        # anything else is treated as untagged.
+        source = cur if cur is not None else base
+        tags = source.get("tags") if source else None
+        tags = list(tags) if isinstance(tags, list) else []
         changes.append(
             CaseChange(
                 case_id=case_id,
@@ -488,6 +533,7 @@ def compare_reports(baseline: dict, current: dict) -> ReportComparison:
                 baseline_tokens=base.get("tokens") if base else None,
                 current_tokens=cur.get("tokens") if cur else None,
                 case_changed=case_changed,
+                tags=tags,
             )
         )
     return ReportComparison(
@@ -674,6 +720,22 @@ def format_comparison(comp: ReportComparison) -> str:
         f"Case wins: baseline {wins['baseline']}, "
         f"current {wins['current']}"
     )
+    # Wins per tag: which run won how many cases under each tag.
+    # A case carrying several tags counts under each of them; a case
+    # with no winner is a tie, counted but won by nobody.
+    by_tag = comp.case_wins_by_tag()
+    if by_tag:
+        lines.append("")
+        lines.append("Case wins by tag:")
+        for tag, entry in by_tag.items():
+            count = entry["cases"]
+            noun = "case" if count == 1 else "cases"
+            lines.append(
+                f"  {tag} ({count} {noun}): "
+                f"baseline {entry['wins']['baseline']}, "
+                f"current {entry['wins']['current']}, "
+                f"ties {entry['ties']}"
+            )
     lines.append(f"Verdict: {comp.verdict}")
     lines.append("")
     lines.append(_format_side_by_side(comp))

@@ -27,8 +27,9 @@ def _report(suite="s", results=None, weighted_score=1.0, total_latency_ms=10.0,
     }
 
 
-def _result(case_id, passed, score=1.0, latency_ms=1.0, tokens=None):
-    return {
+def _result(case_id, passed, score=1.0, latency_ms=1.0, tokens=None,
+            tags=None):
+    result = {
         "case_id": case_id,
         "passed": passed,
         "detail": "ok" if passed else "fail",
@@ -39,6 +40,9 @@ def _result(case_id, passed, score=1.0, latency_ms=1.0, tokens=None):
         "score": score,
         "weight": 1.0,
     }
+    if tags is not None:
+        result["tags"] = tags
+    return result
 
 
 class TestCompareReports(unittest.TestCase):
@@ -371,6 +375,170 @@ class TestCaseWins(unittest.TestCase):
         self.assertIn(
             "Case wins: baseline 1, current 0", format_comparison(comp)
         )
+
+
+class TestCaseWinsByTag(unittest.TestCase):
+    def test_wins_broken_down_per_tag(self):
+        # Baseline wins the smoke case, current wins the slow one;
+        # each tag's breakdown says so, with no ties.
+        comp = compare_reports(
+            _report(results=[
+                _result("a", True, latency_ms=1.0, tags=["smoke"]),
+                _result("b", True, latency_ms=10.0, tags=["slow"]),
+            ]),
+            _report(results=[
+                _result("a", True, latency_ms=5.0, tags=["smoke"]),
+                _result("b", True, latency_ms=2.0, tags=["slow"]),
+            ]),
+        )
+        self.assertEqual(
+            comp.case_wins_by_tag(),
+            {
+                "slow": {
+                    "cases": 1, "ties": 0,
+                    "wins": {"baseline": 0, "current": 1},
+                },
+                "smoke": {
+                    "cases": 1, "ties": 0,
+                    "wins": {"baseline": 1, "current": 0},
+                },
+            },
+        )
+
+    def test_case_with_no_winner_is_a_tie_under_its_tag(self):
+        # Both runs scored 0 on the case: nobody won it, but it
+        # still counts towards the tag's case count.
+        comp = compare_reports(
+            _report(results=[
+                _result("a", False, score=0.0, tags=["smoke"]),
+            ]),
+            _report(results=[
+                _result("a", False, score=0.0, tags=["smoke"]),
+            ]),
+        )
+        self.assertEqual(
+            comp.case_wins_by_tag(),
+            {
+                "smoke": {
+                    "cases": 1, "ties": 1,
+                    "wins": {"baseline": 0, "current": 0},
+                },
+            },
+        )
+
+    def test_multi_tag_case_counts_under_each_tag(self):
+        comp = compare_reports(
+            _report(results=[
+                _result("a", True, latency_ms=1.0,
+                        tags=["smoke", "fast"]),
+            ]),
+            _report(results=[
+                _result("a", True, latency_ms=5.0,
+                        tags=["smoke", "fast"]),
+            ]),
+        )
+        by_tag = comp.case_wins_by_tag()
+        self.assertEqual(set(by_tag), {"smoke", "fast"})
+        for entry in by_tag.values():
+            self.assertEqual(entry["cases"], 1)
+            self.assertEqual(
+                entry["wins"], {"baseline": 1, "current": 0}
+            )
+
+    def test_untagged_cases_appear_under_no_tag(self):
+        comp = compare_reports(
+            _report(results=[
+                _result("a", True, latency_ms=1.0, tags=["smoke"]),
+                _result("b", True, latency_ms=1.0),
+            ]),
+            _report(results=[
+                _result("a", True, latency_ms=5.0, tags=["smoke"]),
+                _result("b", True, latency_ms=5.0),
+            ]),
+        )
+        self.assertEqual(
+            comp.case_wins_by_tag(),
+            {
+                "smoke": {
+                    "cases": 1, "ties": 0,
+                    "wins": {"baseline": 1, "current": 0},
+                },
+            },
+        )
+
+    def test_removed_case_keeps_baseline_tags_and_is_a_tie(self):
+        # A case only in the baseline has no winner, but it ran
+        # under its baseline tags, so it counts as a tie there.
+        comp = compare_reports(
+            _report(results=[
+                _result("old", True, tags=["smoke"]),
+            ]),
+            _report(results=[]),
+        )
+        self.assertEqual(
+            comp.case_wins_by_tag(),
+            {
+                "smoke": {
+                    "cases": 1, "ties": 1,
+                    "wins": {"baseline": 0, "current": 0},
+                },
+            },
+        )
+
+    def test_current_tags_win_when_a_case_is_retagged(self):
+        # The case moved tags between runs; the breakdown uses the
+        # current run's tags.
+        comp = compare_reports(
+            _report(results=[
+                _result("a", True, latency_ms=1.0, tags=["smoke"]),
+            ]),
+            _report(results=[
+                _result("a", True, latency_ms=5.0, tags=["fast"]),
+            ]),
+        )
+        self.assertEqual(
+            comp.case_wins_by_tag(),
+            {
+                "fast": {
+                    "cases": 1, "ties": 0,
+                    "wins": {"baseline": 1, "current": 0},
+                },
+            },
+        )
+
+    def test_case_wins_by_tag_are_in_json_and_text(self):
+        comp = compare_reports(
+            _report(results=[
+                _result("a", True, latency_ms=1.0, tags=["smoke"]),
+            ]),
+            _report(results=[
+                _result("a", True, latency_ms=5.0, tags=["smoke"]),
+            ]),
+        )
+        data = json.loads(json.dumps(comp.to_dict()))
+        self.assertEqual(
+            data["case_wins_by_tag"],
+            {
+                "smoke": {
+                    "cases": 1, "ties": 0,
+                    "wins": {"baseline": 1, "current": 0},
+                },
+            },
+        )
+        self.assertEqual(data["changes"][0]["tags"], ["smoke"])
+        text = format_comparison(comp)
+        self.assertIn("Case wins by tag:", text)
+        self.assertIn(
+            "smoke (1 case): baseline 1, current 0, ties 0", text
+        )
+
+    def test_no_tag_section_when_no_case_is_tagged(self):
+        comp = compare_reports(
+            _report(results=[_result("a", True)]),
+            _report(results=[_result("a", True)]),
+        )
+        self.assertEqual(comp.case_wins_by_tag(), {})
+        self.assertNotIn("Case wins by tag:", format_comparison(comp))
 
 
 class TestSideBySideTable(unittest.TestCase):
