@@ -484,6 +484,36 @@ def score_starts_with(output: str, prefix: str) -> tuple:
     )
 
 
+def score_ends_with(output: str, suffix: str) -> tuple:
+    """Pass when the output ends with the suffix string.
+
+    Surrounding whitespace is ignored on both sides, like ``exact``
+    and ``fuzzy``. Partial credit: the score is the fraction of the
+    suffix the output matches from the end (the longest common
+    suffix over the suffix length), so an output that gets the last
+    few words right still earns part of its weight. An empty suffix
+    passes vacuously: every string ends with it.
+    """
+    out = output.strip()
+    suf = suffix.strip()
+    if not suf:
+        return True, "ends with empty suffix", 1.0
+    common = 0
+    for a, b in zip(reversed(out), reversed(suf)):
+        if a != b:
+            break
+        common += 1
+    score = common / len(suf)
+    if common == len(suf):
+        return True, f"ends with {suf!r}", 1.0
+    return (
+        False,
+        f"expected output to end with {suf!r}, "
+        f"matched {common} of {len(suf)} suffix characters; got {out!r}",
+        score,
+    )
+
+
 def score_regex(output: str, pattern: str) -> tuple:
     """Pass when the regex matches anywhere in the output."""
     try:
@@ -820,7 +850,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     """Score one case's output. Returns (passed, detail, score) where
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
     when the scorer gives partial credit (see ``score_contains_all``,
-    ``score_fuzzy``, ``score_starts_with``, and ``score_judge``). ``judges`` is the registry of judge callables
+    ``score_fuzzy``, ``score_starts_with``, ``score_ends_with``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry."""
     spec = case.scorer
     kind = spec.get("type")
@@ -865,6 +895,10 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
         if "prefix" not in spec:
             raise ValueError("starts_with scorer requires a 'prefix' value")
         return score_starts_with(output, str(spec["prefix"]))
+    if kind == "ends_with":
+        if "suffix" not in spec:
+            raise ValueError("ends_with scorer requires a 'suffix' value")
+        return score_ends_with(output, str(spec["suffix"]))
     if kind == "judge":
         return score_judge(output, case, judges)
     raise ValueError(f"unknown scorer type: {kind!r}")

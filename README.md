@@ -17,7 +17,7 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 - A small runner for evaluating an agent callable against a suite of cases.
 - Eleven scorers: exact match, substring, contains-all,
   contains-any, regex, JSON-schema shape, JSON-path value, JSON
-  subset, fuzzy similarity, starts with, numeric tolerance, and a judge scorer that scores
+  subset, fuzzy similarity, starts with, ends with, numeric tolerance, and a judge scorer that scores
   free-form output against a rubric with a pluggable judge (a
   deterministic built-in stub judge by default; bring your own LLM
   judge as a callable or an HTTP endpoint).
@@ -96,6 +96,7 @@ detail; the run continues with the remaining cases.
 | `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
 | `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8) |
 | `starts_with` | `{"prefix": "The answer is"}` | the output starts with the prefix (surrounding whitespace ignored) |
+| `ends_with` | `{"suffix": "is 42"}` | the output ends with the suffix (surrounding whitespace ignored) |
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
@@ -146,6 +147,17 @@ fraction of the prefix the output matches from the start, so an
 output that gets the first few words right still earns part of its
 weight. An empty `prefix` passes vacuously: every string starts
 with it.
+
+The `ends_with` scorer is the mirror of `starts_with`, for output
+that must close with a fixed sign-off — an answer that has to end
+with "is 42", a JSON blob that has to end with `}`, a closing line
+that has to end with "Thank you". It compares the stripped output
+against the stripped suffix, so trailing whitespace in the output
+does not fail the case. It gives partial credit like `fuzzy`: the
+score is the fraction of the suffix the output matches from the
+end, so an output that gets the last few words right still earns
+part of its weight. An empty `suffix` passes vacuously: every
+string ends with it.
 
 ## LLM-as-judge scorer
 
@@ -1113,3 +1125,8 @@ make demo    # run both example suites through the CLI
   fraction of the prefix matched from the start, so an output that
   gets the first few words right still earns part of its weight.~~
   (done in v0.31.0)
+- ~~`ends_with` scorer: `ends_with` passes when the output
+  ends with a fixed suffix, with partial credit equal to the
+  fraction of the suffix matched from the end, so an output that
+  gets the last few words right still earns part of its weight.~~
+  (done in v0.32.0)

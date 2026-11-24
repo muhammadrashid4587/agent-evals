@@ -558,6 +558,57 @@ class TestStartsWithScorer(unittest.TestCase):
         self.assertEqual(score, 1.0)
 
 
+class TestEndsWithScorer(unittest.TestCase):
+    def test_suffix_match(self):
+        ok, detail, score = score_case(
+            _case({"type": "ends_with", "suffix": "is 42"}),
+            "The answer is 42",
+        )
+        self.assertTrue(ok)
+        self.assertIn("ends with", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_full_equality_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "ends_with", "suffix": "hello"}), "hello"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_wrong_end_fails_with_partial_credit(self):
+        ok, detail, score = score_case(
+            _case({"type": "ends_with", "suffix": "hello world"}),
+            "goodbye world",
+        )
+        self.assertFalse(ok)
+        self.assertIn("6 of 11", detail)
+        self.assertAlmostEqual(score, 6 / 11)
+
+    def test_no_common_suffix_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "ends_with", "suffix": "hello"}), "goodbye"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_missing_suffix_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "ends_with"}), "hello")
+
+    def test_surrounding_whitespace_ignored(self):
+        ok, _, _ = score_case(
+            _case({"type": "ends_with", "suffix": "world"}), "  hello world\n"
+        )
+        self.assertTrue(ok)
+
+    def test_empty_suffix_passes_vacuously(self):
+        ok, _, score = score_case(
+            _case({"type": "ends_with", "suffix": ""}), "anything at all"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+
 class TestNumericScorer(unittest.TestCase):
     def test_within_tolerance(self):
         ok, _, _ = score_case(
