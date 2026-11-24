@@ -19,14 +19,16 @@ Design
 
 * The ``exact`` scorer and the string scorers (``contains``,
   ``contains_all``, ``contains_any``, ``not_contains``,
-  ``starts_with``, ``ends_with``), and the ``fuzzy`` and ``regex``
-  scorers, also accept an optional ``"ignore_case": true``: the
-  expected strings and the output are case-folded before comparing
-  (``regex`` matches with ``re.IGNORECASE``), so ``"Hello"``
+  ``starts_with``, ``ends_with``), and the ``fuzzy``, ``regex``,
+  and ``contains_regex`` scorers, also accept an optional
+  ``"ignore_case": true``: the expected strings and the output are
+  case-folded before comparing (``regex`` and ``contains_regex``
+  match with ``re.IGNORECASE``), so ``"Hello"``
   matches ``"hello"``. Scores and partial credit are unchanged;
   the option defaults to off, and a non-boolean value is a scorer
   error.
       {"type": "regex", "pattern": "^\\d+$"}
+      {"type": "contains_regex", "pattern": "^\\d+$"}
       {"type": "json_schema", "schema": {"name": "str", "age": "int"}}
       {"type": "json_path", "path": "$.result.total", "expected": 42}
       {"type": "json_subset", "expected": {"status": "ok", "total": 42}}
@@ -849,6 +851,32 @@ def score_regex(output: str, pattern: str, ignore_case: bool = False) -> tuple:
     return ok, detail, 1.0 if ok else 0.0
 
 
+def score_contains_regex(output: str, pattern: Any, ignore_case: bool = False) -> tuple:
+    """Pass when the regex matches anywhere in the output.
+
+    The strict counterpart of ``score_regex``: the ``pattern`` must
+    be a string, so a suite that passes a number (or any other
+    non-string) where a pattern belongs is a scorer error instead
+    of silently matching the stringified value. An invalid regex
+    is a scorer error too. With ``ignore_case``, the match is
+    case-insensitive (``re.IGNORECASE``), like ``score_regex``.
+    All-or-nothing: 1.0 on a match, 0.0 otherwise.
+    """
+    if not isinstance(pattern, str):
+        raise ValueError(
+            f"contains_regex scorer requires a string 'pattern', "
+            f"got {type(pattern).__name__}"
+        )
+    flags = re.IGNORECASE if ignore_case else 0
+    try:
+        match = re.search(pattern, output, flags)
+    except re.error as exc:
+        raise ValueError(f"invalid regex {pattern!r}: {exc}") from exc
+    ok = match is not None
+    detail = "contains_regex matched" if ok else f"pattern {pattern!r} did not match"
+    return ok, detail, 1.0 if ok else 0.0
+
+
 def _check_shape(value: Any, schema: Any, path: str = "$") -> Optional[str]:
     """Return the first shape mismatch as a string, or None if it matches.
 
@@ -1297,10 +1325,12 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``starts_with``,
-    ``ends_with``) and the ``exact``, ``fuzzy``, and ``regex``
-    scorers accept an optional ``"ignore_case": true`` in the spec:
+    ``ends_with``) and the ``exact``, ``fuzzy``, ``regex``, and
+    ``contains_regex`` scorers accept an optional
+    ``"ignore_case": true`` in the spec:
     both the expected strings and the output are case-folded before
-    comparing (``regex`` matches with ``re.IGNORECASE``), so
+    comparing (``regex`` and ``contains_regex`` match with
+    ``re.IGNORECASE``), so
     ``"Hello"`` matches ``"hello"``; scores and partial credit are
     unchanged, and a non-boolean value is a scorer error."""
     spec = case.scorer
@@ -1339,6 +1369,14 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
         return score_regex(
             output,
             str(spec["pattern"]),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
+    if kind == "contains_regex":
+        if "pattern" not in spec:
+            raise ValueError("contains_regex scorer requires a 'pattern' value")
+        return score_contains_regex(
+            output,
+            spec["pattern"],
             _as_bool_option(spec, "ignore_case", kind),
         )
     if kind == "json_schema":

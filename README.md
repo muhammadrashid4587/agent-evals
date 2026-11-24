@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Seventeen scorers: exact match, substring, contains-all,
-  contains-any, not-contains, regex, JSON-schema shape, JSON-path value, JSON
+- Eighteen scorers: exact match, substring, contains-all,
+  contains-any, not-contains, regex, contains-regex, JSON-schema shape, JSON-path value, JSON
   subset, JSON equality, fuzzy similarity, starts with, ends with, length range,
   numeric range, numeric tolerance, and a judge scorer that scores
   free-form output against a rubric with a pluggable judge (a
@@ -93,6 +93,7 @@ detail; the run continues with the remaining cases.
 | `contains_any` | `{"substrings": ["hello", "hi"]}` | output contains at least one listed substring (empty list fails; optional `"ignore_case": true`) |
 | `not_contains` | `{"substrings": ["as an AI", "sorry"]}` | output contains none of the listed substrings (empty list passes; optional `"ignore_case": true`) |
 | `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match) |
+| `contains_regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match; a non-string `pattern` is a scorer error) |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
 | `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
@@ -240,14 +241,22 @@ outside the range scores 0.0. A non-numeric bound, `min` above
 is a scorer error, and a tolerance of 0 keeps the old behaviour
 exactly.
 
+The `contains_regex` scorer is the strict counterpart of
+`regex`: it passes when the regex matches anywhere in the output,
+like `regex`, but the `pattern` must be a string — a non-string
+pattern is a scorer error instead of being stringified, so a suite
+that passes a number where a pattern belongs fails loudly instead
+of matching the digits of that number. An invalid regex is a scorer
+error too. It is all-or-nothing: 1.0 on a match, 0.0 otherwise.
+
 The `exact` scorer and the six string scorers — `contains`, `contains_all`,
 `contains_any`, `not_contains`, `starts_with`, `ends_with` — and the
-`fuzzy` and `regex` scorers all accept an optional `"ignore_case": true`
+`fuzzy`, `regex`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
 in the spec, e.g.
 `{"type": "exact", "expected": "Hello", "ignore_case": true}`.
 When set, the expected strings and the output are case-folded
 (`str.casefold`, so non-ASCII case pairs compare equal too) before
-comparing — `regex` matches with `re.IGNORECASE` instead — so `"Hello"`
+comparing — `regex` and `contains_regex` match with `re.IGNORECASE` instead — so `"Hello"`
 matches `"hello"` and a forbidden phrase
 fails `not_contains` in any casing. Scores and partial credit are
 unchanged — a `contains_all` case that finds 3 of 4 substrings in
@@ -1289,3 +1298,9 @@ make demo    # run both example suites through the CLI
   `json_equals` tolerance (non-numeric, negative, NaN, or infinite
   rejected as a scorer error), and a tolerance of 0 keeps the old
   behaviour exactly.~~ (done in v0.41.0)
+- ~~`contains_regex` scorer: `contains_regex` passes when the regex
+  matches anywhere in the output — the strict counterpart of
+  `regex`, so a non-string `pattern` is a scorer error instead of
+  being stringified — with an invalid regex also a scorer error,
+  `ignore_case` composing through `re.IGNORECASE`, and the scorer
+  flowing through suite JSON like the other scorers.~~ (done in v0.42.0)

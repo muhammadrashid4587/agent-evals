@@ -289,6 +289,126 @@ class TestRegexScorer(unittest.TestCase):
             )
 
 
+class TestContainsRegexScorer(unittest.TestCase):
+    def test_match(self):
+        ok, detail, score = score_case(
+            _case({"type": "contains_regex", "pattern": r"\d+"}), "order 42"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        self.assertEqual(detail, "contains_regex matched")
+
+    def test_match_anywhere(self):
+        ok, _, _ = score_case(
+            _case({"type": "contains_regex", "pattern": r"error \d+"}),
+            "log: error 500 on retry",
+        )
+        self.assertTrue(ok)
+
+    def test_no_match(self):
+        ok, detail, score = score_case(
+            _case({"type": "contains_regex", "pattern": r"^\d+$"}), "4x2"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+        self.assertIn("did not match", detail)
+
+    def test_missing_pattern_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "contains_regex"}), "x")
+
+    def test_non_string_pattern_raises(self):
+        for bad in (42, 3.5, ["^\\d+$"], None, True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    score_case(
+                        _case({"type": "contains_regex", "pattern": bad}), "42"
+                    )
+
+    def test_invalid_pattern_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "contains_regex", "pattern": "("}), "x")
+
+    def test_ignore_case_matches(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "contains_regex",
+                    "pattern": r"hello",
+                    "ignore_case": True,
+                }
+            ),
+            "say HELLO there",
+        )
+        self.assertTrue(ok)
+
+    def test_ignore_case_false_is_case_sensitive(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "contains_regex",
+                    "pattern": r"hello",
+                    "ignore_case": False,
+                }
+            ),
+            "say HELLO there",
+        )
+        self.assertFalse(ok)
+
+    def test_ignore_case_defaults_off(self):
+        ok, _, _ = score_case(
+            _case({"type": "contains_regex", "pattern": r"hello"}),
+            "say HELLO there",
+        )
+        self.assertFalse(ok)
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "contains_regex",
+                        "pattern": r"hello",
+                        "ignore_case": "true",
+                    }
+                ),
+                "HELLO",
+            )
+
+    def test_flows_through_suite_json(self):
+        suite = Suite.from_dict(
+            {
+                "name": "regex-suite",
+                "cases": [
+                    {
+                        "id": "has-code",
+                        "prompt": "give me the code",
+                        "scorer": {
+                            "type": "contains_regex",
+                            "pattern": r"CODE-\d{4}",
+                        },
+                    },
+                    {
+                        "id": "no-code",
+                        "prompt": "give me the code",
+                        "scorer": {
+                            "type": "contains_regex",
+                            "pattern": r"CODE-\d{4}",
+                        },
+                    },
+                ],
+            }
+        )
+        # run_suite calls the agent once per case in order; use a
+        # stateful agent so each case gets its own output.
+        calls = iter(["your code is CODE-1234", "no code here"])
+        report = run_suite(suite, lambda prompt: next(calls))
+        self.assertTrue(report.results[0].passed)
+        self.assertEqual(report.results[0].score, 1.0)
+        self.assertFalse(report.results[1].passed)
+        self.assertEqual(report.results[1].score, 0.0)
+
+
 class TestJsonSchemaScorer(unittest.TestCase):
     def test_matching_shape(self):
         ok, _, _ = score_case(
