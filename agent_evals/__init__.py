@@ -5,7 +5,7 @@ unless you register a judge that calls one (see ``agent_evals.judge``).
 The agent under test is a plain Python callable.
 """
 
-__version__ = "0.38.0"
+__version__ = "0.39.0"
 
 from .evals import (
     Case,

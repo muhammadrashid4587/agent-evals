@@ -1249,6 +1249,220 @@ class TestRangeScorer(unittest.TestCase):
         self.assertEqual(report.results[0].score, 1.0)
 
 
+class TestJsonEqualsScorer(unittest.TestCase):
+    def test_exact_object_passes(self):
+        ok, detail, score = score_case(
+            _case(
+                {"type": "json_equals",
+                 "expected": {"status": "ok", "total": 42}}
+            ),
+            '{"status": "ok", "total": 42}',
+        )
+        self.assertTrue(ok)
+        self.assertIn("JSON values are equal", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_key_order_does_not_matter(self):
+        ok, _, _ = score_case(
+            _case(
+                {"type": "json_equals",
+                 "expected": {"a": 1, "b": 2}}
+            ),
+            '{"b": 2, "a": 1}',
+        )
+        self.assertTrue(ok)
+
+    def test_extra_key_fails(self):
+        # Full equality, unlike json_subset: extra keys fail.
+        ok, detail, score = score_case(
+            _case(
+                {"type": "json_equals", "expected": {"status": "ok"}}
+            ),
+            '{"status": "ok", "request_id": "abc"}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("expected", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_missing_key_fails(self):
+        ok, _, score = score_case(
+            _case(
+                {"type": "json_equals",
+                 "expected": {"status": "ok", "total": 42}}
+            ),
+            '{"status": "ok"}',
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_nested_objects_pass(self):
+        ok, _, _ = score_case(
+            _case(
+                {"type": "json_equals",
+                 "expected": {"result": {"total": 42, "items": [1, 2]}}}
+            ),
+            '{"result": {"items": [1, 2], "total": 42}}',
+        )
+        self.assertTrue(ok)
+
+    def test_nested_mismatch_fails(self):
+        ok, detail, score = score_case(
+            _case(
+                {"type": "json_equals",
+                 "expected": {"result": {"total": 42}}}
+            ),
+            '{"result": {"total": 43}}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("43", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_int_and_float_are_equal(self):
+        ok, _, _ = score_case(
+            _case({"type": "json_equals", "expected": 1}),
+            "1.0",
+        )
+        self.assertTrue(ok)
+
+    def test_int_vs_string_is_type_strict(self):
+        ok, _, score = score_case(
+            _case({"type": "json_equals", "expected": 1}),
+            '"1"',
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_bool_vs_int_is_type_strict(self):
+        ok, _, score = score_case(
+            _case({"type": "json_equals", "expected": True}),
+            "1",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+        ok, _, score = score_case(
+            _case({"type": "json_equals", "expected": 1}),
+            "true",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_list_order_matters_by_default(self):
+        ok, _, score = score_case(
+            _case({"type": "json_equals", "expected": [1, 2, 3]}),
+            "[3, 2, 1]",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_ignore_order_passes_on_reordered_arrays(self):
+        ok, _, score = score_case(
+            _case(
+                {"type": "json_equals", "expected": [1, 2, 3],
+                 "ignore_order": True}
+            ),
+            "[3, 1, 2]",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_ignore_order_is_still_a_multiset(self):
+        # [1, 1, 2] is not [1, 2, 2]: duplicates must match too.
+        ok, _, score = score_case(
+            _case(
+                {"type": "json_equals", "expected": [1, 1, 2],
+                 "ignore_order": True}
+            ),
+            "[1, 2, 2]",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_ignore_order_covers_nested_arrays(self):
+        ok, _, _ = score_case(
+            _case(
+                {"type": "json_equals",
+                 "expected": {"tags": ["b", "a"]},
+                 "ignore_order": True}
+            ),
+            '{"tags": ["a", "b"]}',
+        )
+        self.assertTrue(ok)
+
+    def test_ignore_order_non_bool_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "json_equals", "expected": [1],
+                     "ignore_order": "yes"}
+                ),
+                "[1]",
+            )
+
+    def test_invalid_json_output_scores_zero(self):
+        ok, detail, score = score_case(
+            _case({"type": "json_equals", "expected": {"a": 1}}),
+            "{not json",
+        )
+        self.assertFalse(ok)
+        self.assertIn("not valid JSON", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_scalar_outputs(self):
+        ok, _, _ = score_case(
+            _case({"type": "json_equals", "expected": "hello"}),
+            '"hello"',
+        )
+        self.assertTrue(ok)
+        ok, _, _ = score_case(
+            _case({"type": "json_equals", "expected": None}),
+            "null",
+        )
+        self.assertTrue(ok)
+        ok, _, _ = score_case(
+            _case({"type": "json_equals", "expected": 42}),
+            "42",
+        )
+        self.assertTrue(ok)
+
+    def test_missing_expected_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "json_equals"}), "{}")
+
+    def test_non_serialisable_expected_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "json_equals", "expected": {1, 2}}),
+                "[1, 2]",
+            )
+
+    def test_nan_expected_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "json_equals", "expected": float("nan")}),
+                "null",
+            )
+
+    def test_flows_through_suite_json(self):
+        suite = Suite.from_dict(
+            {
+                "name": "json-equals-demo",
+                "cases": [
+                    {
+                        "id": "status-ok",
+                        "prompt": "Return the status object.",
+                        "scorer": {
+                            "type": "json_equals",
+                            "expected": {"status": "ok", "total": 42},
+                        },
+                    }
+                ],
+            }
+        )
+        report = run_suite(suite, lambda prompt: '{"status": "ok", "total": 42}')
+        self.assertEqual(report.passed, 1)
+        self.assertEqual(report.results[0].score, 1.0)
+
+
 class TestIgnoreCaseScorers(unittest.TestCase):
     def test_contains_matches_other_case(self):
         ok, _, _ = score_case(

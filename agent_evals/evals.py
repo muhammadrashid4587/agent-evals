@@ -30,6 +30,7 @@ Design
       {"type": "json_schema", "schema": {"name": "str", "age": "int"}}
       {"type": "json_path", "path": "$.result.total", "expected": 42}
       {"type": "json_subset", "expected": {"status": "ok", "total": 42}}
+      {"type": "json_equals", "expected": {"status": "ok", "total": 42}}
       {"type": "fuzzy", "expected": "hello world", "threshold": 0.8}
       {"type": "numeric", "expected": 3.14159, "tolerance": 0.001}
       {"type": "judge", "judge": "stub", "rubric": {"criteria": [...]}}
@@ -1051,6 +1052,71 @@ def score_json_subset(output: str, expected: Any, tolerance: float = 0.0) -> tup
     return False, "; ".join(mismatches), score
 
 
+def _json_values_equal(got: Any, expected: Any, ignore_order: bool = False) -> bool:
+    """Deep equality for JSON values, with bool/int kept distinct.
+
+    Numbers compare numerically, so ``1`` equals ``1.0``; ``True``
+    never equals ``1``. Dicts compare key by key — extra keys fail,
+    unlike ``json_subset`` — and lists compare pairwise by position
+    unless ``ignore_order`` is set, in which case they compare as
+    multisets (each element encoded as canonical JSON, so nested
+    structure is covered too).
+    """
+    if isinstance(got, bool) or isinstance(expected, bool):
+        return got is expected
+    if isinstance(got, (int, float)) and isinstance(expected, (int, float)):
+        return float(got) == float(expected)
+    if isinstance(got, dict) and isinstance(expected, dict):
+        if set(got) != set(expected):
+            return False
+        return all(
+            _json_values_equal(got[k], expected[k], ignore_order)
+            for k in expected
+        )
+    if isinstance(got, list) and isinstance(expected, list):
+        if len(got) != len(expected):
+            return False
+        if ignore_order:
+            return sorted(_canonical_json(v) for v in got) == sorted(
+                _canonical_json(v) for v in expected
+            )
+        return all(
+            _json_values_equal(a, b, ignore_order)
+            for a, b in zip(got, expected)
+        )
+    return got == expected
+
+
+def score_json_equals(
+    output: str, expected: Any, ignore_order: bool = False
+) -> tuple:
+    """Pass when the output JSON is deeply equal to ``expected``.
+
+    Unlike ``json_subset``, this is full equality: extra keys in the
+    output fail the case, and lists must match pairwise by position
+    (or as multisets with ``ignore_order``). Numbers compare
+    numerically, so ``1`` equals ``1.0``; ``bool`` is never accepted
+    as ``int``, so ``true`` does not equal ``1`` and ``1`` does not
+    equal ``"1"``. An output that is not valid JSON scores 0.0, and
+    an ``expected`` that is not valid strict JSON (not serialisable,
+    or containing NaN/Infinity) is a scorer error.
+    """
+    try:
+        json.dumps(expected, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "json_equals scorer requires an 'expected' value that is "
+            f"valid JSON: {exc}"
+        ) from exc
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError as exc:
+        return False, f"output is not valid JSON: {exc}", 0.0
+    if _json_values_equal(value, expected, ignore_order):
+        return True, "JSON values are equal", 1.0
+    return False, f"expected {expected!r}, got {value!r}", 0.0
+
+
 def score_numeric(output: str, expected: float, tolerance: float = 0.0) -> tuple:
     """Pass when the first number in the output is within ``tolerance`` of
     ``expected``. The number may be embedded in surrounding text."""
@@ -1210,6 +1276,14 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
             raise ValueError("json_subset scorer requires an 'expected' object")
         return score_json_subset(
             output, spec["expected"], float(spec.get("tolerance", 0.0))
+        )
+    if kind == "json_equals":
+        if "expected" not in spec:
+            raise ValueError("json_equals scorer requires an 'expected' value")
+        return score_json_equals(
+            output,
+            spec["expected"],
+            _as_bool_option(spec, "ignore_order", kind),
         )
     if kind == "numeric":
         return score_numeric(
