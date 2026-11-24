@@ -1442,6 +1442,162 @@ class TestJsonEqualsScorer(unittest.TestCase):
                 "null",
             )
 
+    def test_tolerance_within_passes(self):
+        ok, _, score = score_case(
+            _case(
+                {"type": "json_equals", "expected": 3.14159,
+                 "tolerance": 0.001}
+            ),
+            "3.141",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_tolerance_outside_fails(self):
+        ok, _, score = score_case(
+            _case(
+                {"type": "json_equals", "expected": 3.14159,
+                 "tolerance": 0.001}
+            ),
+            "3.14",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_tolerance_applies_to_nested_numbers(self):
+        ok, _, _ = score_case(
+            _case(
+                {"type": "json_equals",
+                 "expected": {"result": {"total": 42.0, "items": [1.5, 2.5]}},
+                 "tolerance": 0.1}
+            ),
+            '{"result": {"total": 42.05, "items": [1.55, 2.45]}}',
+        )
+        self.assertTrue(ok)
+        ok, _, score = score_case(
+            _case(
+                {"type": "json_equals",
+                 "expected": {"result": {"total": 42.0}},
+                 "tolerance": 0.1}
+            ),
+            '{"result": {"total": 42.2}}',
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_tolerance_zero_is_exact(self):
+        ok, _, _ = score_case(
+            _case(
+                {"type": "json_equals", "expected": 1.5, "tolerance": 0}
+            ),
+            "1.5",
+        )
+        self.assertTrue(ok)
+        ok, _, score = score_case(
+            _case(
+                {"type": "json_equals", "expected": 1.5, "tolerance": 0}
+            ),
+            "1.5000001",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_tolerance_does_not_loosen_non_numbers(self):
+        # Strings still compare exactly; bool is still never an int.
+        ok, _, score = score_case(
+            _case(
+                {"type": "json_equals", "expected": {"a": "x", "b": True},
+                 "tolerance": 10}
+            ),
+            '{"a": "y", "b": 1}',
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_tolerance_with_ignore_order(self):
+        # Reordered arrays still match as multisets, now within
+        # tolerance — including the greedy-pairing trap: 1.1 must be
+        # free to match 1.2, not consumed by 1.0.
+        ok, _, score = score_case(
+            _case(
+                {"type": "json_equals", "expected": [1.0, 1.2],
+                 "ignore_order": True, "tolerance": 0.15}
+            ),
+            "[1.1, 1.0]",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case(
+                {"type": "json_equals", "expected": [1.0, 1.2],
+                 "ignore_order": True, "tolerance": 0.15}
+            ),
+            "[1.1, 1.5]",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_negative_tolerance_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "json_equals", "expected": 1,
+                     "tolerance": -0.5}
+                ),
+                "1",
+            )
+
+    def test_non_numeric_tolerance_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "json_equals", "expected": 1,
+                     "tolerance": "0.5"}
+                ),
+                "1",
+            )
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "json_equals", "expected": 1, "tolerance": True}
+                ),
+                "1",
+            )
+
+    def test_tolerance_with_invalid_json_still_scores_zero(self):
+        ok, detail, score = score_case(
+            _case(
+                {"type": "json_equals", "expected": {"a": 1},
+                 "tolerance": 0.5}
+            ),
+            "{not json",
+        )
+        self.assertFalse(ok)
+        self.assertIn("not valid JSON", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_tolerance_flows_through_suite_json(self):
+        suite = Suite.from_dict(
+            {
+                "name": "json-equals-tolerance-demo",
+                "cases": [
+                    {
+                        "id": "pi-close",
+                        "prompt": "Return pi.",
+                        "scorer": {
+                            "type": "json_equals",
+                            "expected": {"pi": 3.14159},
+                            "tolerance": 0.001,
+                        },
+                    }
+                ],
+            }
+        )
+        report = run_suite(suite, lambda prompt: '{"pi": 3.141}')
+        self.assertEqual(report.passed, 1)
+        self.assertEqual(report.results[0].score, 1.0)
+
+
     def test_flows_through_suite_json(self):
         suite = Suite.from_dict(
             {

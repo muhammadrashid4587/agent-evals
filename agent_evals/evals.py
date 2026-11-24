@@ -101,6 +101,7 @@ import concurrent.futures
 import difflib
 import hashlib
 import json
+import math
 import queue
 import re
 import threading
@@ -445,6 +446,27 @@ def _as_bool_option(spec: dict, key: str, kind: str) -> bool:
             f"got {value!r}"
         )
     return value
+
+
+def _validate_tolerance(tolerance: Any, kind: str) -> float:
+    """Validate a scorer's numeric ``tolerance`` option.
+
+    It must be a real number (not a bool, not a string, not NaN or
+    infinity) and at least 0. Anything else is a scorer error: a
+    negative tolerance would make even an exact match fail, and a
+    non-numeric one would fail confusingly inside the comparison.
+    """
+    if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)):
+        raise ValueError(
+            f"{kind} scorer requires a numeric 'tolerance', "
+            f"got {tolerance!r}"
+        )
+    tolerance = float(tolerance)
+    if not math.isfinite(tolerance) or tolerance < 0.0:
+        raise ValueError(
+            f"{kind} scorer requires a 'tolerance' >= 0, got {tolerance!r}"
+        )
+    return tolerance
 
 
 def score_contains(output: str, substring: str, ignore_case: bool = False) -> tuple:
@@ -1052,55 +1074,103 @@ def score_json_subset(output: str, expected: Any, tolerance: float = 0.0) -> tup
     return False, "; ".join(mismatches), score
 
 
-def _json_values_equal(got: Any, expected: Any, ignore_order: bool = False) -> bool:
+def _json_multiset_match(
+    got: list, expected: list, ignore_order: bool, tolerance: float
+) -> bool:
+    """Whether ``got`` matches ``expected`` as a multiset under
+    :func:`_json_values_equal` with the given ``tolerance``.
+
+    Greedy pairing can miss a valid match — e.g. expected ``[1.0,
+    1.2]`` vs got ``[1.1, 1.0]`` with tolerance 0.15 pairs 1.1 with
+    1.0 and then has nothing left for 1.2, even though 1.1 matches
+    1.2 and 1.0 matches 1.0 — so this is a maximum bipartite
+    matching (Kuhn's algorithm). Lists here are small eval values,
+    so the quadratic worst case is fine.
+    """
+    match_to: dict = {}
+
+    def _try_match(gi: int, seen: set) -> bool:
+        for ei, e in enumerate(expected):
+            if ei in seen:
+                continue
+            if not _json_values_equal(got[gi], e, ignore_order, tolerance):
+                continue
+            seen.add(ei)
+            if ei not in match_to or _try_match(match_to[ei], seen):
+                match_to[ei] = gi
+                return True
+        return False
+
+    for gi in range(len(got)):
+        if not _try_match(gi, set()):
+            return False
+    return True
+
+
+def _json_values_equal(
+    got: Any, expected: Any, ignore_order: bool = False, tolerance: float = 0.0
+) -> bool:
     """Deep equality for JSON values, with bool/int kept distinct.
 
-    Numbers compare numerically, so ``1`` equals ``1.0``; ``True``
-    never equals ``1``. Dicts compare key by key — extra keys fail,
-    unlike ``json_subset`` — and lists compare pairwise by position
-    unless ``ignore_order`` is set, in which case they compare as
-    multisets (each element encoded as canonical JSON, so nested
-    structure is covered too).
+    Numbers compare numerically, so ``1`` equals ``1.0``; with a
+    nonzero ``tolerance`` they compare within that tolerance
+    instead. ``True`` never equals ``1``. Dicts compare key by key —
+    extra keys fail, unlike ``json_subset`` — and lists compare
+    pairwise by position unless ``ignore_order`` is set, in which
+    case they compare as multisets (each element encoded as
+    canonical JSON, so nested structure is covered too). With a
+    nonzero tolerance the multiset comparison matches elements
+    pairwise instead, since canonical encodings cannot express
+    "within tolerance".
     """
     if isinstance(got, bool) or isinstance(expected, bool):
         return got is expected
     if isinstance(got, (int, float)) and isinstance(expected, (int, float)):
-        return float(got) == float(expected)
+        return abs(float(got) - float(expected)) <= tolerance
     if isinstance(got, dict) and isinstance(expected, dict):
         if set(got) != set(expected):
             return False
         return all(
-            _json_values_equal(got[k], expected[k], ignore_order)
+            _json_values_equal(got[k], expected[k], ignore_order, tolerance)
             for k in expected
         )
     if isinstance(got, list) and isinstance(expected, list):
         if len(got) != len(expected):
             return False
         if ignore_order:
-            return sorted(_canonical_json(v) for v in got) == sorted(
-                _canonical_json(v) for v in expected
-            )
+            if tolerance == 0.0:
+                return sorted(_canonical_json(v) for v in got) == sorted(
+                    _canonical_json(v) for v in expected
+                )
+            return _json_multiset_match(got, expected, ignore_order, tolerance)
         return all(
-            _json_values_equal(a, b, ignore_order)
+            _json_values_equal(a, b, ignore_order, tolerance)
             for a, b in zip(got, expected)
         )
     return got == expected
 
 
 def score_json_equals(
-    output: str, expected: Any, ignore_order: bool = False
+    output: str,
+    expected: Any,
+    ignore_order: bool = False,
+    tolerance: float = 0.0,
 ) -> tuple:
     """Pass when the output JSON is deeply equal to ``expected``.
 
     Unlike ``json_subset``, this is full equality: extra keys in the
     output fail the case, and lists must match pairwise by position
     (or as multisets with ``ignore_order``). Numbers compare
-    numerically, so ``1`` equals ``1.0``; ``bool`` is never accepted
-    as ``int``, so ``true`` does not equal ``1`` and ``1`` does not
-    equal ``"1"``. An output that is not valid JSON scores 0.0, and
-    an ``expected`` that is not valid strict JSON (not serialisable,
-    or containing NaN/Infinity) is a scorer error.
+    numerically, so ``1`` equals ``1.0``; with a ``tolerance`` they
+    compare within that tolerance instead, recursively, so a float
+    answer that is close but not exact still passes. ``bool`` is
+    never accepted as ``int``, so ``true`` does not equal ``1`` and
+    ``1`` does not equal ``"1"``. An output that is not valid JSON
+    scores 0.0, and an ``expected`` that is not valid strict JSON
+    (not serialisable, or containing NaN/Infinity) is a scorer
+    error, as is a non-numeric or negative ``tolerance``.
     """
+    tolerance = _validate_tolerance(tolerance, "json_equals")
     try:
         json.dumps(expected, allow_nan=False)
     except (TypeError, ValueError) as exc:
@@ -1112,7 +1182,7 @@ def score_json_equals(
         value = json.loads(output)
     except json.JSONDecodeError as exc:
         return False, f"output is not valid JSON: {exc}", 0.0
-    if _json_values_equal(value, expected, ignore_order):
+    if _json_values_equal(value, expected, ignore_order, tolerance):
         return True, "JSON values are equal", 1.0
     return False, f"expected {expected!r}, got {value!r}", 0.0
 
@@ -1284,6 +1354,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
             output,
             spec["expected"],
             _as_bool_option(spec, "ignore_order", kind),
+            spec.get("tolerance", 0.0),
         )
     if kind == "numeric":
         return score_numeric(

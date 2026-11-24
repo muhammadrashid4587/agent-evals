@@ -96,7 +96,7 @@ detail; the run continues with the remaining cases.
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
 | `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
-| `json_equals` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON is deeply equal to the expected value (optional `ignore_order` to compare arrays as multisets) |
+| `json_equals` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON is deeply equal to the expected value (optional `ignore_order` to compare arrays as multisets, optional `tolerance` for numbers) |
 | `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8; optional `"ignore_case": true` for a case-insensitive comparison) |
 | `starts_with` | `{"prefix": "The answer is"}` | the output starts with the prefix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `ends_with` | `{"suffix": "is 42"}` | the output ends with the suffix (surrounding whitespace ignored; optional `"ignore_case": true`) |
@@ -140,11 +140,16 @@ pass. Object key order does not matter, and lists must match pairwise
 by position unless `"ignore_order": true` is set, in which case
 arrays compare as multisets (duplicates still have to match, and the
 option applies to nested arrays too). Numbers compare numerically, so
-`1` equals `1.0`; `bool` is never accepted as `int`, so `true` does
-not equal `1` and `1` does not equal `"1"`. An output that is not
-valid JSON scores 0.0, and an `expected` value that is not valid
-strict JSON (not serialisable, or containing NaN/Infinity) is a scorer
-error, as is a missing `expected` or a non-boolean `ignore_order`.
+`1` equals `1.0`; with an optional `"tolerance"` they compare within
+that tolerance instead, recursively, so a float answer that is close
+but not exact still passes — `tolerance` composes with
+`ignore_order`, which then matches array elements pairwise rather
+than by canonical encoding. `bool` is never accepted as `int`, so
+`true` does not equal `1` and `1` does not equal `"1"`. An output
+that is not valid JSON scores 0.0, and an `expected` value that is
+not valid strict JSON (not serialisable, or containing NaN/Infinity)
+is a scorer error, as is a missing `expected`, a non-boolean
+`ignore_order`, or a non-numeric or negative `tolerance`.
 The score is all-or-nothing, like `exact`: 1.0 on a pass, 0.0 on a
 fail.
 
@@ -1261,3 +1266,10 @@ make demo    # run both example suites through the CLI
   that compares arrays as multisets, an invalid-JSON output scoring
   0.0, and a non-serialisable `expected` rejected as a scorer
   error.~~ (done in v0.39.0)
+- ~~`tolerance` for the `json_equals` scorer: an optional `tolerance`
+  compares numbers within that tolerance instead of requiring exact
+  numeric equality, recursively — deep equality otherwise unchanged,
+  `bool` still never accepted as `int`, invalid-JSON output still
+  scoring 0.0, `ignore_order` still comparing arrays as multisets
+  (matched pairwise under tolerance), and a non-numeric or negative
+  `tolerance` rejected as a scorer error.~~ (done in v0.40.0)
