@@ -28,7 +28,9 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
   that passes its checks but exceeds its latency budget does not fail
   the run unless `--fail-on-budget` is given, and a case that passes
   its checks but exceeds its token budget does not fail the run
-  unless `--fail-on-cost` is given). With `--repeat N` it
+  unless `--fail-on-cost` is given; `--fail-on-score 0.9` also fails
+  the run when a case passes its checks but scores below 0.9, so a
+  partial-credit pass can gate CI too). With `--repeat N` it
   runs the suite N times and flags flaky cases that pass sometimes
   and fail other times. With `--junit results.xml` it also writes the
   run as JUnit XML, so CI systems can ingest the results.
@@ -416,6 +418,30 @@ score the scorer actually produced.
 A non-numeric threshold, a boolean, or a value outside [0, 1] is
 rejected when the suite loads, the same way a bad weight or timeout
 is.
+
+## Score gate
+
+Pass `--fail-on-score THRESHOLD` (in [0, 1]) to make the CLI run fail
+when a case passes its checks but scores below the threshold, e.g.
+to gate a CI step on answer quality rather than just pass/fail:
+
+```bash
+python -m agent_evals.cli --suite examples/calculator.json \
+    --agent examples.calculator_agent:agent --fail-on-score 0.9
+```
+
+A case that passes only on partial credit is what trips it: a
+`contains_all` case with a per-case threshold of 0.75 that finds 3
+of 4 substrings (score 0.75) passes the run by default, but fails it
+with `--fail-on-score 0.9`, and a `fuzzy` case that passes at a
+similarity of 0.85 does the same. A score exactly at the threshold
+passes, the same as a per-case threshold. The gate only covers cases
+that passed: a case that fails its checks, times out, or errors
+already fails the run, and a budget or cost violation is not a scored
+result (its score was reset to 0.0 when it became a violation), so
+neither trips the gate. It composes with `--fail-on-budget` and
+`--fail-on-cost` — any of the gates can fail the run — and a threshold
+outside [0, 1], or NaN or infinity, is rejected as a CLI error.
 
 ## Latency budgets
 
@@ -1482,3 +1508,15 @@ make demo    # run both example suites through the CLI
   `fuzzy`, and a missing `expected`, a threshold outside [0, 1],
   or a non-boolean `ignore_case` is a scorer error.~~ (done in
   v0.49.0)
+- ~~`--fail-on-score` CI gate for the run CLI:
+  `python -m agent_evals.cli --suite ... --agent ... --fail-on-score
+  0.9` exits 1 when a case passes its checks but scores below 0.9 —
+  a partial-credit pass at a per-case threshold, or a `fuzzy` /
+  `levenshtein` pass at a similarity under the bar — and 0
+  otherwise, so answer quality can gate CI, not just pass/fail; a
+  score exactly at the threshold passes, a case that fails its
+  checks, times out, or errors already fails the run, and a budget
+  or cost violation is not a scored result, so neither trips the
+  gate; it composes with `--fail-on-budget` and `--fail-on-cost`,
+  and a threshold outside [0, 1] is rejected as a CLI error.~~
+  (done in v0.50.0)

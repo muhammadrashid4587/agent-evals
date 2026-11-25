@@ -15,6 +15,8 @@ whose agent reported more tokens than its ``max_tokens`` budget is
 reported as a cost violation, not a pass, but does not fail the run
 unless ``--fail-on-cost`` is given. ``--report`` writes the JSON
 report; ``--junit`` writes the same run as JUnit XML for CI ingestion.
+``--fail-on-score 0.9`` exits 1 when a case passes its checks but
+scores below 0.9, so a partial-credit pass can still fail the run.
 ``--workers N`` runs cases concurrently on a thread pool (default 1); the agent must be
 thread-safe for more than 1. ``--repeat N`` runs the whole suite N
 times and reports per-case pass rates, flagging flaky cases; the run
@@ -107,6 +109,17 @@ def main(argv=None) -> int:
         "never trip it)",
     )
     parser.add_argument(
+        "--fail-on-score",
+        type=float,
+        default=None,
+        metavar="THRESHOLD",
+        help="exit 1 when a case passes its checks but scores below "
+        "THRESHOLD, in [0, 1] (by default a partial-credit pass is "
+        "still a pass); a case that fails its checks, times out, "
+        "or errors already fails the run, so this gate only covers "
+        "passed cases scoring below the bar",
+    )
+    parser.add_argument(
         "--repeat",
         type=int,
         default=1,
@@ -167,6 +180,12 @@ def main(argv=None) -> int:
         parser.error("--workers must be a positive integer")
     if args.repeat < 1:
         parser.error("--repeat must be a positive integer")
+    if args.fail_on_score is not None and not (
+        0.0 <= args.fail_on_score <= 1.0
+    ):
+        # The chained comparison also rejects NaN and infinity: no
+        # comparison with them is true.
+        parser.error("--fail-on-score must be in [0, 1]")
 
     loaded = load_suite(args.suite)
     suite = loaded
@@ -246,6 +265,28 @@ def main(argv=None) -> int:
     if args.junit:
         report.save_junit(args.junit)
         print(f"JUnit report written to {args.junit}")
+    if args.fail_on_score is not None:
+        # Only a case that passed its checks can trip this gate: a
+        # case that failed, timed out, or errored already fails the
+        # run, and a budget/cost violation is not a scored result
+        # (its score was reset to 0.0 when it became a violation),
+        # so the gate looks at passed cases only. A score exactly
+        # at the threshold passes, the same as a per-case threshold.
+        below = [
+            r
+            for r in report.results
+            if r.passed and r.score < args.fail_on_score
+        ]
+        if below:
+            print(
+                f"\nScore gate FAILED: {len(below)} case(s) passed "
+                f"but scored below {args.fail_on_score:g}: "
+                + ", ".join(
+                    f"{r.case_id} ({r.score:.2f})" for r in below
+                ),
+                file=sys.stderr,
+            )
+            return 1
     if args.fail_on_budget or args.fail_on_cost:
         return 0 if report.passed == report.total else 1
     # Without --fail-on-budget / --fail-on-cost, only genuine check

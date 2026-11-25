@@ -3285,6 +3285,192 @@ class TestTokenBudgets(unittest.TestCase):
                 sys.modules.pop("token_agent", None)
 
 
+class TestFailOnScore(unittest.TestCase):
+    def _score_suite(self, threshold=None):
+        # A contains_all case over four substrings with a per-case
+        # threshold of 0.75: an agent answering three of the four
+        # passes with a score of 0.75, so it is exactly the kind of
+        # partial-credit pass the --fail-on-score gate is for.
+        case = {
+            "id": "mostly",
+            "prompt": "list a b c d",
+            "scorer": {
+                "type": "contains_all",
+                "substrings": ["a", "b", "c", "d"],
+            },
+        }
+        if threshold is not None:
+            case["threshold"] = threshold
+        return {"name": "cli-s", "cases": [case]}
+
+    def _partial_agent_src(self):
+        return "def agent(prompt):\n    return \"a b c\"\n"
+
+    def _run_cli(self, tmp, suite_data, args, agent_src=None):
+        from agent_evals.cli import main
+
+        path = os.path.join(tmp, "suite.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(suite_data, f)
+        if agent_src is not None:
+            with open(os.path.join(tmp, "partial_agent.py"), "w") as f:
+                f.write(agent_src)
+            sys.path.insert(0, tmp)
+        try:
+            return main(
+                ["--suite", path, "--agent", "partial_agent:agent"] + args
+            )
+        finally:
+            if agent_src is not None:
+                sys.path.remove(tmp)
+                sys.modules.pop("partial_agent", None)
+
+    def test_cli_fail_on_score_flag(self):
+        # The agent finds 3 of 4 substrings: score 0.75, passed at
+        # the case threshold 0.75. Without the flag the run passes;
+        # with --fail-on-score 0.9 the same pass fails the run, and
+        # at the score itself (0.75) it passes, since the gate only
+        # trips below the threshold.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                self._run_cli(
+                    tmp,
+                    self._score_suite(threshold=0.75),
+                    [],
+                    agent_src=self._partial_agent_src(),
+                ),
+                0,
+            )
+            self.assertEqual(
+                self._run_cli(
+                    tmp,
+                    self._score_suite(threshold=0.75),
+                    ["--fail-on-score", "0.9"],
+                    agent_src=self._partial_agent_src(),
+                ),
+                1,
+            )
+            self.assertEqual(
+                self._run_cli(
+                    tmp,
+                    self._score_suite(threshold=0.75),
+                    ["--fail-on-score", "0.75"],
+                    agent_src=self._partial_agent_src(),
+                ),
+                0,
+            )
+            self.assertEqual(
+                self._run_cli(
+                    tmp,
+                    self._score_suite(threshold=0.75),
+                    ["--fail-on-score", "0.5"],
+                    agent_src=self._partial_agent_src(),
+                ),
+                0,
+            )
+
+    def test_cli_fail_on_score_rejects_out_of_range(self):
+        from agent_evals.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._score_suite(threshold=0.75), f)
+            for bad in ("1.5", "-0.1", "nan", "inf"):
+                with self.assertRaises(SystemExit) as ctx:
+                    main(
+                        [
+                            "--suite",
+                            path,
+                            "--agent",
+                            "partial_agent:agent",
+                            "--fail-on-score",
+                            bad,
+                        ]
+                    )
+                self.assertEqual(ctx.exception.code, 2)
+
+    def test_cli_fail_on_score_ignores_budget_violation(self):
+        # A budget violation records a score of 0.0, but that is not
+        # a scored result — the answer was right, just slow — so the
+        # score gate must not trip on it. Without --fail-on-budget
+        # the run still passes even with --fail-on-score 0.9.
+        from agent_evals.cli import main
+
+        data = {
+            "name": "cli-sb",
+            "cases": [
+                {
+                    "id": "slow",
+                    "prompt": "2 + 3",
+                    "scorer": {"type": "exact", "expected": "5"},
+                    "max_latency_ms": 0.01,
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            code = main(
+                [
+                    "--suite",
+                    path,
+                    "--agent",
+                    "examples.calculator_agent:agent",
+                    "--fail-on-score",
+                    "0.9",
+                ]
+            )
+            self.assertEqual(code, 0)
+
+    def test_cli_fail_on_score_composes_with_fail_on_budget(self):
+        # Either gate can fail the run: a low-score pass trips the
+        # score gate even when --fail-on-budget is also given and
+        # there is no budget violation at all.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                self._run_cli(
+                    tmp,
+                    self._score_suite(threshold=0.75),
+                    ["--fail-on-score", "0.9", "--fail-on-budget"],
+                    agent_src=self._partial_agent_src(),
+                ),
+                1,
+            )
+
+    def test_cli_fail_on_score_does_not_mask_genuine_failure(self):
+        # A case that fails its checks fails the run with or without
+        # the flag: the gate adds failures, it never hides one.
+        data = {
+            "name": "cli-sf",
+            "cases": [
+                {
+                    "id": "wrong",
+                    "prompt": "2 + 3",
+                    "scorer": {"type": "exact", "expected": "6"},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            from agent_evals.cli import main
+
+            code = main(
+                [
+                    "--suite",
+                    path,
+                    "--agent",
+                    "examples.calculator_agent:agent",
+                    "--fail-on-score",
+                    "0.9",
+                ]
+            )
+            self.assertEqual(code, 1)
+
+
 class TestOutputDiff(unittest.TestCase):
     def test_identical_outputs_have_no_diff(self):
         self.assertIsNone(make_output_diff("same\nlines", "same\nlines"))
