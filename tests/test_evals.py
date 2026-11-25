@@ -849,6 +849,159 @@ class TestFuzzyScorer(unittest.TestCase):
             )
 
 
+class TestLevenshteinScorer(unittest.TestCase):
+    def test_exact_match(self):
+        ok, _, score = score_case(
+            _case({"type": "levenshtein", "expected": "hello world"}),
+            "hello world",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_one_typo_passes_with_edit_distance_score(self):
+        ok, detail, score = score_case(
+            _case({"type": "levenshtein", "expected": "hello world"}),
+            "hello wrld",
+        )
+        self.assertTrue(ok)
+        self.assertIn("distance 1", detail)
+        self.assertIn("0.91", detail)
+        self.assertAlmostEqual(score, 10 / 11)
+
+    def test_classic_kitten_sitting_distance(self):
+        ok, detail, score = score_case(
+            _case({"type": "levenshtein", "expected": "kitten"}),
+            "sitting",
+        )
+        self.assertFalse(ok)
+        self.assertIn("distance 3", detail)
+        self.assertAlmostEqual(score, 4 / 7)
+
+    def test_short_answer_charges_more_per_typo(self):
+        # The same single edit costs 1/5 of a short answer but only
+        # 1/11 of a long one: edit distance charges per edit, so
+        # short answers are punished harder than fuzzy would.
+        ok, _, score = score_case(
+            _case({"type": "levenshtein", "expected": "hello"}),
+            "hallo",
+        )
+        self.assertTrue(ok)
+        self.assertAlmostEqual(score, 0.8)
+
+    def test_far_miss_fails_with_partial_credit(self):
+        ok, detail, score = score_case(
+            _case({"type": "levenshtein", "expected": "hello world"}),
+            "goodbye moon",
+        )
+        self.assertFalse(ok)
+        self.assertIn("levenshtein distance", detail)
+        self.assertLess(score, 0.8)
+        self.assertGreater(score, 0.0)
+
+    def test_threshold_is_respected(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "levenshtein",
+                    "expected": "hello world",
+                    "threshold": 0.99,
+                }
+            ),
+            "hello wrld",
+        )
+        self.assertFalse(ok)
+
+    def test_threshold_zero_passes_anything(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "levenshtein",
+                    "expected": "hello world",
+                    "threshold": 0,
+                }
+            ),
+            "something else entirely",
+        )
+        self.assertTrue(ok)
+
+    def test_threshold_above_one_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "levenshtein", "expected": "hello", "threshold": 1.5}
+                ),
+                "hello",
+            )
+
+    def test_negative_threshold_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "levenshtein", "expected": "hello", "threshold": -0.1}
+                ),
+                "hello",
+            )
+
+    def test_missing_expected_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "levenshtein"}), "hello")
+
+    def test_surrounding_whitespace_ignored(self):
+        ok, _, _ = score_case(
+            _case({"type": "levenshtein", "expected": "hello"}), "  hello\n"
+        )
+        self.assertTrue(ok)
+
+    def test_both_empty_match(self):
+        ok, _, score = score_case(
+            _case({"type": "levenshtein", "expected": ""}), ""
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_empty_expected_only_matches_empty(self):
+        ok, _, score = score_case(
+            _case({"type": "levenshtein", "expected": ""}), "hello"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_ignore_case_matches(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "levenshtein",
+                    "expected": "Hello World",
+                    "ignore_case": True,
+                }
+            ),
+            "hello world",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_ignore_case_defaults_off(self):
+        ok, _, score = score_case(
+            _case({"type": "levenshtein", "expected": "HELLO"}),
+            "hello",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "levenshtein",
+                        "expected": "hello",
+                        "ignore_case": "true",
+                    }
+                ),
+                "hello",
+            )
+
+
 class TestStartsWithScorer(unittest.TestCase):
     def test_prefix_match(self):
         ok, detail, score = score_case(

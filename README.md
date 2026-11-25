@@ -15,9 +15,9 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Nineteen scorers: exact match, substring, contains-all,
+- Twenty scorers: exact match, substring, contains-all,
   contains-any, not-contains, regex, contains-regex, JSON-schema shape, JSON-path value, JSON
-  subset, JSON equality, fuzzy similarity, starts with, ends with, one of,
+  subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
   numeric range, numeric tolerance, and a judge scorer that scores
   free-form output against a rubric with a pluggable judge (a
@@ -100,6 +100,7 @@ detail; the run continues with the remaining cases.
 | `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
 | `json_equals` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON is deeply equal to the expected value (optional `ignore_order` to compare arrays as multisets, optional `tolerance` for numbers) |
 | `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8; optional `"ignore_case": true` for a case-insensitive comparison) |
+| `levenshtein` | `{"expected": "hello world", "threshold": 0.8}` | the output is close enough to the expected string by edit distance (similarity `1 - distance / max_len` at or above `threshold`, default 0.8; optional `"ignore_case": true` for a case-insensitive comparison) |
 | `starts_with` | `{"prefix": "The answer is"}` | the output starts with the prefix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `ends_with` | `{"suffix": "is 42"}` | the output ends with the suffix (surrounding whitespace ignored; optional `"ignore_case": true`) |
 | `one_of` | `{"values": ["yes", "no", "maybe"]}` | the output equals one of the listed values (surrounding whitespace ignored; optional `"ignore_case": true`) |
@@ -165,6 +166,25 @@ only, no model): the case passes when the ratio reaches
 credit like `contains_all`: the score is the ratio itself, so a
 near miss still earns most of its weight. An exact match is a
 ratio of 1.0; an empty `expected` only matches an empty output.
+
+The `levenshtein` scorer is the edit-distance cousin of `fuzzy`,
+for output that should be close to an expected string where the
+cost of being wrong is counted in edits, not in matching blocks —
+a code snippet with a one-character typo, a command with a
+misspelled flag, a short answer where a single wrong letter
+should hurt more than it would in a paragraph. Similarity is
+`1 - distance / max_len`, where `distance` is the Levenshtein
+edit distance (insertions, deletions, substitutions) and
+`max_len` is the longer of the two stripped strings, so the same
+one-character typo costs 1/5 of a five-letter answer but only
+1/11 of an eleven-letter one. The case passes when the similarity
+reaches `threshold` (default 0.8, must be in [0, 1]). It gives
+partial credit like `fuzzy`: the score is the similarity itself,
+so a near miss still earns most of its weight. An exact match is
+a similarity of 1.0; two empty strings match at 1.0, and an empty
+string against a non-empty one scores 0.0. The detail names the
+distance and the similarity, e.g. `levenshtein distance 1,
+similarity 0.91 >= threshold 0.80`.
 
 The `starts_with` scorer is for output that must open with a fixed
 lead-in — an answer that has to start with "The answer is", a JSON
@@ -265,7 +285,7 @@ error too. It is all-or-nothing: 1.0 on a match, 0.0 otherwise.
 
 The `exact` scorer and the seven string scorers — `contains`, `contains_all`,
 `contains_any`, `not_contains`, `starts_with`, `ends_with`, `one_of` — and the
-`fuzzy`, `regex`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
+`fuzzy`, `levenshtein`, `regex`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
 in the spec, e.g.
 `{"type": "exact", "expected": "Hello", "ignore_case": true}`.
 When set, the expected strings and the output are case-folded
@@ -1449,3 +1469,16 @@ make demo    # run both example suites through the CLI
   section when the flag is given, and the two narrow gates
   combine, while the default gate (any case flaky in the latest
   report) is unchanged without the flags.~~ (done in v0.48.0)
+- ~~`levenshtein` scorer: an edit-distance similarity scorer —
+  `{"type": "levenshtein", "expected": "hello world",
+  "threshold": 0.8}` passes when `1 - distance / max_len` reaches
+  the threshold (default 0.8, must be in [0, 1]), where the
+  distance is the Levenshtein edit distance (insertions,
+  deletions, substitutions) on the stripped strings, so a
+  one-character typo costs more in a short answer than in a long
+  one; the score is the similarity itself, so a near miss still
+  earns partial credit, and the detail names the distance and the
+  similarity. It accepts an optional `"ignore_case": true` like
+  `fuzzy`, and a missing `expected`, a threshold outside [0, 1],
+  or a non-boolean `ignore_case` is a scorer error.~~ (done in
+  v0.49.0)

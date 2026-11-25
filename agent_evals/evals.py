@@ -19,8 +19,8 @@ Design
 
 * The ``exact`` scorer and the string scorers (``contains``,
   ``contains_all``, ``contains_any``, ``not_contains``,
-  ``starts_with``, ``ends_with``), and the ``fuzzy``, ``regex``,
-  and ``contains_regex`` scorers, also accept an optional
+  ``starts_with``, ``ends_with``), and the ``fuzzy``,
+  ``levenshtein``, ``regex``, and ``contains_regex`` scorers, also accept an optional
   ``"ignore_case": true``: the expected strings and the output are
   case-folded before comparing (``regex`` and ``contains_regex``
   match with ``re.IGNORECASE``), so ``"Hello"``
@@ -34,6 +34,7 @@ Design
       {"type": "json_subset", "expected": {"status": "ok", "total": 42}}
       {"type": "json_equals", "expected": {"status": "ok", "total": 42}}
       {"type": "fuzzy", "expected": "hello world", "threshold": 0.8}
+      {"type": "levenshtein", "expected": "hello world", "threshold": 0.8}
       {"type": "numeric", "expected": 3.14159, "tolerance": 0.001}
       {"type": "judge", "judge": "stub", "rubric": {"criteria": [...]}}
 
@@ -1353,6 +1354,84 @@ def score_fuzzy(
     return ok, detail, ratio
 
 
+def _levenshtein_distance(a: str, b: str) -> int:
+    """The edit distance between ``a`` and ``b``: the minimum number
+    of single-character insertions, deletions, and substitutions
+    needed to turn one into the other.
+
+    Classic dynamic programming with two rows, so the memory is
+    O(min(len(a), len(b))) instead of the full matrix. Deterministic,
+    standard library only, no model.
+    """
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    # Keep the shorter string as the row, so the working row is small.
+    if len(a) > len(b):
+        a, b = b, a
+    previous = list(range(len(a) + 1))
+    for j, b_char in enumerate(b, start=1):
+        current = [j]
+        for i, a_char in enumerate(a, start=1):
+            cost = 0 if a_char == b_char else 1
+            current.append(
+                min(
+                    previous[i] + 1,  # deletion
+                    current[i - 1] + 1,  # insertion
+                    previous[i - 1] + cost,  # substitution
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def score_levenshtein(
+    output: str, expected: str, threshold: float = 0.8, ignore_case: bool = False
+) -> tuple:
+    """Pass when the output is close enough to the expected string,
+    measured by edit distance.
+
+    Similarity is ``1 - distance / max_len``, where ``distance`` is
+    the Levenshtein edit distance and ``max_len`` is the longer of
+    the two stripped strings — so a one-character typo in a long
+    answer scores near 1.0 and a short answer with the same typo
+    scores much lower, which is what an edit-distance scorer is
+    for: it charges per edit, where ``fuzzy`` (SequenceMatcher)
+    charges per matching block. Pass when the similarity reaches
+    ``threshold`` (default 0.8), which must be in [0, 1]. Partial
+    credit: the score is the similarity itself, so a near miss
+    still earns most of its weight. An exact match is a similarity
+    of 1.0; two empty strings match at 1.0, and an empty string
+    against a non-empty one scores 0.0. With ``ignore_case``, both
+    strings are case-folded before the distance is computed, so
+    ``"Hello World"`` and ``"hello world"`` score 1.0.
+    """
+    threshold = float(threshold)
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("levenshtein scorer requires a 'threshold' in [0, 1]")
+    out = _fold(output.strip(), ignore_case)
+    exp = _fold(expected.strip(), ignore_case)
+    max_len = max(len(out), len(exp))
+    if max_len == 0:
+        similarity = 1.0
+        distance = 0
+    else:
+        distance = _levenshtein_distance(out, exp)
+        similarity = 1.0 - distance / max_len
+    ok = similarity >= threshold
+    detail = (
+        f"levenshtein distance {distance}, similarity {similarity:.2f} "
+        f">= threshold {threshold:.2f}"
+        if ok
+        else f"levenshtein distance {distance}, similarity {similarity:.2f} "
+        f"< threshold {threshold:.2f}"
+    )
+    return ok, detail, similarity
+
+
 def score_judge(output: str, case: Case, judges: Optional[dict] = None) -> tuple:
     """Score one case's output with a judge.
 
@@ -1399,11 +1478,12 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     """Score one case's output. Returns (passed, detail, score) where
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
     when the scorer gives partial credit (see ``score_contains_all``,
-    ``score_not_contains``, ``score_fuzzy``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
+    ``score_not_contains``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``starts_with``,
-    ``ends_with``, ``one_of``) and the ``exact``, ``fuzzy``, ``regex``, and
+    ``ends_with``, ``one_of``) and the ``exact``, ``fuzzy``,
+    ``levenshtein``, ``regex``, and
     ``contains_regex`` scorers accept an optional
     ``"ignore_case": true`` in the spec:
     both the expected strings and the output are case-folded before
@@ -1491,6 +1571,15 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
         if "expected" not in spec:
             raise ValueError("fuzzy scorer requires an 'expected' value")
         return score_fuzzy(
+            output,
+            str(spec["expected"]),
+            float(spec.get("threshold", 0.8)),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
+    if kind == "levenshtein":
+        if "expected" not in spec:
+            raise ValueError("levenshtein scorer requires an 'expected' value")
+        return score_levenshtein(
             output,
             str(spec["expected"]),
             float(spec.get("threshold", 0.8)),
