@@ -1764,6 +1764,88 @@ def score_stopword_ratio(
     )
 
 
+def score_content_word_ratio(
+    output: str,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+    ignore_case: bool = False,
+) -> tuple:
+    """Pass when the output's content word ratio falls in ``[min, max]``.
+
+    The complement of ``score_stopword_ratio``: where the stopword
+    ratio counts words in the built-in English stopword list
+    (``STOPWORDS``), the content word ratio counts the words that
+    are not in that list divided by the total word count, so 1.0
+    means the output is nothing but content words and a low ratio
+    means it is padded with function words — the same fraction as
+    ``1 - stopword_ratio``. A summary that must stay
+    information-dense pins a floor directly, instead of capping
+    filler with a ``stopword_ratio`` ceiling; a natural reply that
+    must not read like a keyword list pins a ceiling. Words are
+    the whitespace-separated tokens of the stripped output,
+    counted the same way ``word_count`` counts words, and a word
+    is a content word by exact token like ``unique_words``, so
+    ``"the,"`` and ``"the"`` are different words and the first is
+    a content word even though the second is a stopword — the
+    tokenization is deliberately naive, it knows nothing about
+    punctuation. The list itself is lowercase, so without
+    ``ignore_case`` a capitalised ``"The"`` at the start of a
+    sentence is a content word; with ``ignore_case`` words are
+    case-folded before comparing, so it is a stopword. At least
+    one bound is required, and a missing bound is unbounded on
+    that side, so ``{"min": 0.6}`` only sets a floor and ``{"max":
+    0.9}`` only sets a ceiling, and bounds must lie in [0, 1]
+    because a ratio is a fraction of the output's words. Partial
+    credit mirrors ``count``: below the minimum the score is
+    ``ratio / min``, above the maximum it falls linearly to 0 at
+    twice the maximum, so an output just outside the range still
+    earns most of its weight and one wildly outside earns
+    nothing. A maximum of 0 gives no partial credit above it: any
+    content word scores 0.0. An output with no words has no ratio
+    to measure: it scores 0.0 unless the minimum is 0 (or there
+    is no minimum), in which case a ratio of 0 is in range and it
+    passes.
+    """
+    words = output.strip().split()
+    total = len(words)
+    if total == 0:
+        if minimum is not None and minimum > 0:
+            return False, "no words in output", 0.0
+        return (
+            True,
+            "content word ratio 0.000 (0 of 0 words are content words)",
+            1.0,
+        )
+    folded = [_fold(word, ignore_case) for word in words]
+    content = sum(1 for word in folded if word not in STOPWORDS)
+    ratio = content / total
+    if minimum is not None and ratio < minimum:
+        score = ratio / minimum
+        return (
+            False,
+            f"content word ratio {ratio:.3f} ({content} of {total} words "
+            f"are content words), below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and ratio > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - ratio) / maximum)
+        return (
+            False,
+            f"content word ratio {ratio:.3f} ({content} of {total} words "
+            f"are content words), above maximum {maximum}",
+            score,
+        )
+    return (
+        True,
+        f"content word ratio {ratio:.3f} ({content} of {total} words "
+        f"are content words)",
+        1.0,
+    )
+
+
 def _as_density_bound(spec: dict, key: str, kind: str) -> Optional[float]:
     """Read an optional keyword-density bound from a scorer spec.
 
@@ -2409,7 +2491,8 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``score_sentence_count``, ``score_avg_sentence_length``,
     ``score_readability``,
     ``score_keyword_density``, ``score_type_token_ratio``,
-    ``score_hapax_ratio``, ``score_stopword_ratio``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
+    ``score_hapax_ratio``, ``score_stopword_ratio``,
+    ``score_content_word_ratio``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``count``, ``starts_with``,
@@ -2417,7 +2500,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``levenshtein``, ``regex``,
     ``contains_regex``, ``regex_count``, ``unique_words``, and
     ``keyword_density``, ``type_token_ratio``, ``hapax_ratio``, and
-    ``stopword_ratio``
+    ``stopword_ratio``, and ``content_word_ratio``
     scorers accept an optional
     ``"ignore_case": true`` in the spec:
     both the expected strings and the output are case-folded before
@@ -2668,6 +2751,24 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
                 f"got {minimum} > {maximum}"
             )
         return score_stopword_ratio(
+            output,
+            minimum,
+            maximum,
+            _as_bool_option(spec, "ignore_case", kind),
+        )
+    if kind == "content_word_ratio":
+        minimum = _as_density_bound(spec, "min", kind)
+        maximum = _as_density_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "content_word_ratio scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "content_word_ratio scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_content_word_ratio(
             output,
             minimum,
             maximum,

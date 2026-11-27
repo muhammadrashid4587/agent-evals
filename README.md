@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Thirty-one scorers: exact match, substring, contains-all,
-  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, readability, type-token ratio, hapax ratio, stopword ratio, regex, regex-count,
+- Thirty-two scorers: exact match, substring, contains-all,
+  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
@@ -112,6 +112,7 @@ detail; the run continues with the remaining cases.
 | `type_token_ratio` | `{"min": 0.5, "max": 0.9}` | the output's type-token ratio (distinct words / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `hapax_ratio` | `{"min": 0.5, "max": 0.9}` | the output's hapax ratio (words used exactly once / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `stopword_ratio` | `{"min": 0.1, "max": 0.4}` | the output's stopword ratio (words in the built-in English stopword list / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
+| `content_word_ratio` | `{"min": 0.6, "max": 0.9}` | the output's content word ratio (words not in the built-in English stopword list / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `contains_regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match; a non-string `pattern` is a scorer error) |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
@@ -546,6 +547,42 @@ range and it passes. A non-numeric, non-finite, or boolean bound,
 a bound outside [0, 1], `min` above `max`, or neither bound given
 is a scorer error, and a non-boolean `ignore_case` is one too.
 
+The `content_word_ratio` scorer is the complement of
+`stopword_ratio`: where the stopword ratio counts words in the
+built-in English stopword list, the content word ratio counts the
+words that are not in that list — divided by the total word count,
+so 1.0 means the output is nothing but content words and a low
+ratio means it is padded with function words, the same fraction
+as `1 - stopword_ratio`. A summary that must stay
+information-dense pins a floor directly, instead of capping
+filler with a `stopword_ratio` ceiling; a natural reply that must
+not read like a keyword list pins a ceiling. Words are the
+whitespace-separated tokens of the stripped output, counted the
+same way `word_count` counts words, and a word is a content word
+by exact token like `unique_words`, so `"the,"` and `"the"` are
+different words and the first is a content word even though the
+second is a stopword — the tokenization is deliberately naive,
+it knows nothing about punctuation. The list itself is
+lowercase, so without `"ignore_case"` a capitalised `"The"` at
+the start of a sentence is a content word; with `"ignore_case":
+true` words are case-folded before comparing, so it is a
+stopword. It passes when the ratio falls in `[min, max]`; at
+least one bound is required, and a missing bound is unbounded on
+that side, so `{"min": 0.6}` only sets a floor and `{"max": 0.9}`
+only sets a ceiling, and bounds must lie in [0, 1] because a
+ratio is a fraction of the output's words. It gives partial
+credit like `count`: below the minimum the score is `ratio /
+min`, above the maximum it falls linearly to 0 at twice the
+maximum, so an output just outside the range still earns most of
+its weight and one wildly outside earns nothing; a maximum of 0
+gives no partial credit above it, so any content word scores
+0.0. An output with no words has no ratio to measure: it scores
+0.0 unless the minimum is 0 (or there is no minimum), in which
+case a ratio of 0 is in range and it passes. A non-numeric,
+non-finite, or boolean bound, a bound outside [0, 1], `min`
+above `max`, or neither bound given is a scorer error, and a
+non-boolean `ignore_case` is one too.
+
 The `length` scorer is for output that must be a certain size — a
 summary that has to fit in a tweet, an answer that has to be at least
 a paragraph, a code snippet that must not ramble. It passes when the
@@ -601,7 +638,7 @@ error too. It is all-or-nothing: 1.0 on a match, 0.0 otherwise.
 
 The `exact` scorer and the eight string scorers — `contains`, `contains_all`,
 `contains_any`, `not_contains`, `count`, `starts_with`, `ends_with`, `one_of` — and the
-`fuzzy`, `levenshtein`, `regex`, `regex_count`, `unique_words`, `keyword_density`, `type_token_ratio`, `hapax_ratio`, `stopword_ratio`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
+`fuzzy`, `levenshtein`, `regex`, `regex_count`, `unique_words`, `keyword_density`, `type_token_ratio`, `hapax_ratio`, `stopword_ratio`, `content_word_ratio`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
 in the spec, e.g.
 `{"type": "exact", "expected": "Hello", "ignore_case": true}`.
 When set, the expected strings and the output are case-folded
@@ -2102,7 +2139,16 @@ make demo    # run both example suites through the CLI
   non-finite, or boolean bound, a bound outside [0, 1], `min`
   above `max`, or neither bound given rejected as a scorer
   error.~~ (done in v0.64.0)
-- `content_word_ratio` scorer: the complement of `stopword_ratio`
+- ~~`content_word_ratio` scorer: the complement of `stopword_ratio`
   — content words (words not in the stopword list) / total words
   — for cases that pin information density directly instead of
-  capping filler.
+  capping filler, with words counted like `word_count` and
+  content words matched by exact token like `unique_words`, so
+  `"the,"` is a content word even though `"the"` is a stopword,
+  partial credit like `count`, a maximum of 0 forbidding any
+  content word, an output with no words scoring 0.0 unless the
+  minimum is 0, an optional `"ignore_case": true` that
+  case-folds words before comparing against the lowercase list,
+  and a non-numeric, non-finite, or boolean bound, a bound
+  outside [0, 1], `min` above `max`, or neither bound given
+  rejected as a scorer error.~~ (done in v0.65.0)
