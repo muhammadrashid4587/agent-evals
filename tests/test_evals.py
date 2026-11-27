@@ -1605,6 +1605,257 @@ class TestAvgSentenceLengthScorer(unittest.TestCase):
             )
 
 
+class TestSentenceLengthVarianceScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        # Sentences of 2 and 4 words: mean 3, population variance 1.0.
+        ok, detail, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 1, "max": 1}),
+            "One two. Three four five six.",
+        )
+        self.assertTrue(ok)
+        self.assertIn(
+            "sentence length variance 1.00 (sentence lengths 2, 4)",
+            detail,
+        )
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        # Sentences of 1 and 3 words: mean 2, variance 1.0.
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 1, "max": 1}),
+            "One. Two three four.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_uniform_sentences_have_zero_variance(self):
+        # Two two-word sentences: every length equals the mean.
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 0, "max": 0}),
+            "One two. Three four.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        # A single sentence always has a variance of 0.
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 0, "max": 0}),
+            "One two three.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_fractional_bounds_accepted(self):
+        # Sentences of 1 and 2 words: mean 1.5, variance 0.25 —
+        # a variance is a squared word count, so bounds need not
+        # be integers.
+        ok, _, score = score_case(
+            _case(
+                {"type": "sentence_length_variance", "min": 0.25, "max": 0.25}
+            ),
+            "One. Two three.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_min_only_passes(self):
+        # Variance 1.0, above a 0.5 minimum.
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 0.5}),
+            "One two. Three four five six.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        # Variance 0, below a 0.5 maximum.
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "max": 0.5}),
+            "One two. Three four.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # Variance 0.25 of a 1 minimum: score 0.25.
+        ok, detail, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 1}),
+            "One. Two three.",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 1", detail)
+        self.assertAlmostEqual(score, 0.25)
+
+    def test_above_maximum_partial_credit(self):
+        # Sentences of 1 and 7 words: mean 4, variance 9, of a 5
+        # maximum: (2*5 - 9) / 5 = 0.2.
+        ok, detail, score = score_case(
+            _case({"type": "sentence_length_variance", "max": 5}),
+            "One. Two three four five six seven eight.",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 5", detail)
+        self.assertAlmostEqual(score, 0.2)
+
+    def test_twice_maximum_scores_zero(self):
+        # Sentences of 1, 1, and 7 words: mean 3, variance 8 —
+        # twice a 4 maximum, so nothing.
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "max": 4}),
+            "One. Two. Three four five six seven eight nine.",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_variation(self):
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "max": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "max": 0}),
+            "One two. Three four five six.",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_scores_zero(self):
+        ok, detail, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 0.5}),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertIn("no sentences in output", detail)
+        self.assertEqual(score, 0.0)
+        # Punctuation alone is no sentence either.
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 1}),
+            "...",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_passes_when_min_zero(self):
+        # No sentences: a variance of 0 is in range when the
+        # minimum is 0, and when there is no minimum at all.
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "max": 5}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_unterminated_sentence_has_zero_variance(self):
+        # No terminal punctuation: still one sentence, variance 0.
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 0, "max": 0}),
+            "Hello world foo bar",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_repeated_punctuation_is_one_terminator(self):
+        # "Wait... Really?" is two one-word sentences, variance 0.
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 0, "max": 0}),
+            "Wait... Really?",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_abbreviation_is_naive(self):
+        # "Mr. Smith went home." counts as two sentences of 1 and
+        # 3 words: variance 1.0, the same limit avg_sentence_length
+        # has, inherited unchanged.
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "min": 1, "max": 1}),
+            "Mr. Smith went home.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_agrees_with_avg_sentence_length(self):
+        # The same output's mean and variance are measured by two
+        # scorers: sentences of 2 and 4 words average 3.0 and vary
+        # by 1.0, so both bands pin exactly.
+        output = "One two. Three four five six."
+        ok, _, _ = score_case(
+            _case({"type": "avg_sentence_length", "min": 3, "max": 3}),
+            output,
+        )
+        self.assertTrue(ok)
+        ok, _, _ = score_case(
+            _case({"type": "sentence_length_variance", "min": 1, "max": 1}),
+            output,
+        )
+        self.assertTrue(ok)
+        # And the two scorers can disagree: sentences of 1 and 6
+        # words average 3.5 (in [3, 4]) but vary by 6.25.
+        output = "One. Two three four five six seven."
+        ok, _, _ = score_case(
+            _case({"type": "avg_sentence_length", "min": 3, "max": 4}),
+            output,
+        )
+        self.assertTrue(ok)
+        ok, _, score = score_case(
+            _case({"type": "sentence_length_variance", "max": 1}),
+            output,
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.0)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "sentence_length_variance"}), "One. Two.")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "sentence_length_variance", "min": 2, "max": 1}),
+                "One. Two.",
+            )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "sentence_length_variance", "min": -1}),
+                "One.",
+            )
+
+    def test_string_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "sentence_length_variance", "min": "1"}),
+                "One.",
+            )
+
+    def test_bool_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "sentence_length_variance", "min": True}),
+                "One.",
+            )
+
+    def test_non_finite_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "sentence_length_variance", "min": float("nan")}),
+                "One.",
+            )
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "sentence_length_variance", "max": float("inf")}),
+                "One.",
+            )
+
+
 class TestReadabilityScorer(unittest.TestCase):
     def test_within_bounds_passes(self):
         # "The cat sat. The dog ran." — 6 words, 2 sentences, 6

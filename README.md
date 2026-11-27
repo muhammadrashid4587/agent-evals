@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Thirty-three scorers: exact match, substring, contains-all,
-  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
+- Thirty-four scorers: exact match, substring, contains-all,
+  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, sentence length variance, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON-path
   numeric range, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
@@ -109,6 +109,7 @@ detail; the run continues with the remaining cases.
 | `sentence_count` | `{"min": 2, "max": 5}` | the output has a bounded number of sentences (at least one of `min`/`max` required) |
 | `keyword_density` | `{"keywords": ["step", "verify"], "min": 0.02, "max": 0.10}` | the output's keyword density (keyword occurrences / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `avg_sentence_length` | `{"min": 8, "max": 25}` | the output's average words per sentence falls in a bounded range (at least one of `min`/`max` required) |
+| `sentence_length_variance` | `{"min": 1, "max": 4}` | the output's sentence-length variance (population variance of words per sentence) falls in a bounded range (at least one of `min`/`max` required) |
 | `readability` | `{"min": 60, "max": 90}` | the output's Flesch reading ease falls in a bounded range (at least one of `min`/`max` required) |
 | `type_token_ratio` | `{"min": 0.5, "max": 0.9}` | the output's type-token ratio (distinct words / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `hapax_ratio` | `{"min": 0.5, "max": 0.9}` | the output's hapax ratio (words used exactly once / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
@@ -440,6 +441,47 @@ of 0 is in range and it passes. Case is irrelevant to counting
 words and sentences, so there is no `"ignore_case"` option. A
 non-integer or negative bound, `min` above `max`, or neither
 bound given is a scorer error.
+
+The `sentence_length_variance` scorer is the variance counterpart
+of `avg_sentence_length`: where the average says how long the
+output's sentences are, the variance says how much their lengths
+vary — an answer whose sentences have to stay a steady length, a
+summary that must mix short punches with longer ones, a reply that
+must not drone on at one fixed length. The variance is the
+population variance of the per-sentence word counts (the mean of
+the squared deviations from the mean length), so a single sentence
+always has a variance of 0 and two sentences of 2 and 4 words have
+a variance of 1.0. Sentences are split exactly like
+`sentence_count` (non-empty segments split on runs of terminal
+punctuation, so an unterminated trailing sentence still counts and
+repeated punctuation is one terminator), and words are the
+whitespace-separated tokens of each sentence, counted the same way
+`word_count` counts words. The split is deliberately naive about
+abbreviations, so `"Mr. Smith went home."` counts as two sentences
+— the same limit `sentence_count` has, inherited unchanged. It
+passes when the variance falls in `[min, max]`; at least one bound
+is required, and a missing bound is unbounded on that side, so
+`{"min": 1}` only sets a floor and `{"max": 4}` only sets a ceiling.
+Bounds are non-negative numbers — a variance is a squared word
+count, so it can be fractional and is never negative. It gives
+partial credit like `count`: below the minimum the score is
+`variance / min`, above the maximum it falls linearly to 0 at
+twice the maximum, so an output just outside the range still earns
+most of its weight and one wildly outside earns nothing; a maximum
+of 0 gives no partial credit above it, so any variation in sentence
+length scores 0.0. An output with no sentences has no variance to
+measure: it scores 0.0 unless the minimum is 0 (or there is no
+minimum), in which case a variance of 0 is in range and it passes.
+Case is irrelevant to counting words and sentences, so there is no
+`"ignore_case"` option. A non-numeric, non-finite, or boolean
+bound, a negative bound, `min` above `max`, or neither bound given
+is a scorer error. The same output scored the same way agrees with
+`avg_sentence_length` on the mean — sentences of 2 and 4 words
+average 3.0 and vary by 1.0 — and the two scorers can disagree: an
+output whose sentences average 3.5 but vary by 6.25 passes the
+average band and fails a tight variance band, so a case that pins
+the variance catches uneven pacing where an average case would
+pass it — both consistency checks are pinned in the tests.
 
 The `readability` scorer is the reading-ease counterpart of
 `avg_sentence_length`: it passes when the output's Flesch reading
@@ -2198,3 +2240,17 @@ make demo    # run both example suites through the CLI
   as a scorer error. A band collapsed to one value with a tolerance
   agrees with `json_path`, and the same number agrees with `range`
   — both consistency checks pinned in tests.~~ (done in v0.66.0)
+- ~~`sentence_length_variance` scorer: the variance counterpart of
+  `avg_sentence_length` — it checks that the population variance
+  of the output's per-sentence word counts falls in `[min, max]`,
+  e.g. two sentences of 2 and 4 words have a variance of 1.0,
+  using the same naive sentence split as `sentence_count`, with
+  at least one of `min`/`max` required, non-negative fractional
+  bounds allowed, partial credit like `count`, a maximum of 0
+  forbidding any variation in sentence length, an output with no
+  sentences scoring 0.0 unless the minimum is 0, and a
+  non-numeric, non-finite, or boolean bound, a negative bound,
+  `min` above `max`, or neither bound given rejected as a scorer
+  error. The same output agrees with `avg_sentence_length` on
+  the mean, and the two scorers can disagree — both consistency
+  checks pinned in tests.~~ (done in v0.67.0)

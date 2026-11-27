@@ -1294,6 +1294,79 @@ def score_avg_sentence_length(
     return True, detail, 1.0
 
 
+def score_sentence_length_variance(
+    output: str,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> tuple:
+    """Pass when the output's sentence-length variance falls in
+    ``[min, max]``.
+
+    The variance counterpart of ``score_avg_sentence_length``:
+    where the average says how long sentences are, the variance
+    says how much their lengths vary — an answer whose sentences
+    have to stay a steady length, a summary that must mix short
+    punches with longer ones, a reply that must not drone on at
+    one fixed length. The variance is the population variance of
+    the per-sentence word counts (the mean of the squared
+    deviations from the mean length), so a single sentence always
+    has a variance of 0 and two sentences of 2 and 4 words have a
+    variance of 1.0. Sentences are split exactly like
+    ``sentence_count`` (see :func:`_split_sentences`), and words
+    are the whitespace-separated tokens of each sentence, counted
+    the same way ``word_count`` counts words. The split inherits
+    ``sentence_count``'s naive abbreviation behaviour: ``"Mr.
+    Smith went home."`` counts as two sentences. At least one
+    bound is required, and a missing bound is unbounded on that
+    side, so ``{"min": 1}`` only sets a floor and ``{"max": 4}``
+    only sets a ceiling. Bounds are non-negative numbers — a
+    variance is a squared word count, so it can be fractional and
+    is never negative. Partial credit mirrors ``count``: below
+    the minimum the score is ``variance / min``, above the
+    maximum it falls linearly to 0 at twice the maximum, so an
+    output just outside the range still earns most of its weight
+    and one wildly outside earns nothing. A maximum of 0 gives no
+    partial credit above it: any variation in sentence length
+    scores 0.0. An output with no sentences has no variance to
+    measure: it scores 0.0 unless the minimum is 0 (or there is
+    no minimum), in which case a variance of 0 is in range and it
+    passes. Case is irrelevant to counting words and sentences,
+    so there is no ``ignore_case`` option — the variance is the
+    same whatever the casing.
+    """
+    sentences = _split_sentences(output)
+    lengths = [len(sentence.split()) for sentence in sentences]
+    n = len(lengths)
+    if n == 0:
+        if minimum is not None and minimum > 0:
+            return False, "no sentences in output", 0.0
+        return True, "sentence length variance 0.00 (0 sentences)", 1.0
+    mean = sum(lengths) / n
+    variance = sum((length - mean) ** 2 for length in lengths) / n
+    detail = (
+        f"sentence length variance {variance:.2f} "
+        f"(sentence lengths {', '.join(str(length) for length in lengths)})"
+    )
+    if minimum is not None and variance < minimum:
+        score = variance / minimum
+        return (
+            False,
+            f"{detail}, below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and variance > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - variance) / maximum)
+        return (
+            False,
+            f"{detail}, above maximum {maximum}",
+            score,
+        )
+    return True, detail, 1.0
+
+
 def _count_syllables(word: str) -> int:
     """Count the syllables in one word, heuristically.
 
@@ -1866,6 +1939,31 @@ def _as_density_bound(spec: dict, key: str, kind: str) -> Optional[float]:
     if not math.isfinite(value) or value < 0.0 or value > 1.0:
         raise ValueError(
             f"{kind} scorer requires {key!r} to be a number in [0, 1], "
+            f"got {value!r}"
+        )
+    return value
+
+
+def _as_variance_bound(spec: dict, key: str, kind: str) -> Optional[float]:
+    """Read an optional sentence-length-variance bound from a scorer spec.
+
+    A bound must be a finite non-negative number: ``True``/``False``
+    are rejected (``bool`` is a subclass of ``int``), and a string,
+    NaN, infinity, or a negative value is a scorer error — a
+    variance is a squared word count, so it can be fractional but
+    never negative. Absent means no bound on that side.
+    """
+    if key not in spec or spec[key] is None:
+        return None
+    value = spec[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"{kind} scorer requires {key!r} to be a non-negative number"
+        )
+    value = float(value)
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError(
+            f"{kind} scorer requires {key!r} to be a non-negative number, "
             f"got {value!r}"
         )
     return value
@@ -2585,7 +2683,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``score_not_contains``, ``score_count``, ``score_regex_count``,
     ``score_word_count``, ``score_unique_words``,
     ``score_sentence_count``, ``score_avg_sentence_length``,
-    ``score_readability``,
+    ``score_sentence_length_variance``, ``score_readability``,
     ``score_keyword_density``, ``score_type_token_ratio``,
     ``score_hapax_ratio``, ``score_stopword_ratio``,
     ``score_content_word_ratio``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, ``score_json_path_numeric``, and ``score_judge``). ``judges`` is the registry of judge callables
@@ -2760,6 +2858,19 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
                 f"got {minimum} > {maximum}"
             )
         return score_avg_sentence_length(output, minimum, maximum)
+    if kind == "sentence_length_variance":
+        minimum = _as_variance_bound(spec, "min", kind)
+        maximum = _as_variance_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "sentence_length_variance scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "sentence_length_variance scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_sentence_length_variance(output, minimum, maximum)
     if kind == "readability":
         minimum = _as_range_bound(spec, "min", kind)
         maximum = _as_range_bound(spec, "max", kind)
