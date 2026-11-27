@@ -1158,6 +1158,23 @@ def score_unique_words(
     return True, f"unique word count {n}", 1.0
 
 
+def _split_sentences(text: str) -> list:
+    """Split stripped ``text`` into its sentences.
+
+    Sentences are the non-empty segments split on runs of terminal
+    punctuation (``.``, ``!``, ``?``), so an unterminated trailing
+    sentence still counts — ``"Hello world"`` is one sentence,
+    ``"Hello. World."`` is two — and repeated punctuation
+    (``"Wait... Really?"``) is one terminator, not three. The split
+    is deliberately naive: it knows nothing about abbreviations, so
+    ``"Mr. Smith went home."`` counts as two sentences.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    return [segment for segment in re.split(r"[.!?]+", text) if segment.strip()]
+
+
 def score_sentence_count(
     output: str,
     minimum: Optional[int] = None,
@@ -1188,11 +1205,7 @@ def score_sentence_count(
     ``ignore_case`` option — the count is the same whatever the
     casing.
     """
-    text = output.strip()
-    if not text:
-        n = 0
-    else:
-        n = sum(1 for segment in re.split(r"[.!?]+", text) if segment.strip())
+    n = len(_split_sentences(output))
     if minimum is not None and n < minimum:
         score = n / minimum if minimum else 0.0
         return (
@@ -1211,6 +1224,73 @@ def score_sentence_count(
             score,
         )
     return True, f"sentence count {n}", 1.0
+
+
+def score_avg_sentence_length(
+    output: str,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> tuple:
+    """Pass when the output's average words per sentence falls in
+    ``[min, max]``.
+
+    The average-length counterpart of ``score_sentence_count``: an
+    answer whose sentences have to stay short and punchy, a summary
+    that must not ramble in long sentences, a reply that must read
+    at a steady pace. Sentences are split exactly like
+    ``sentence_count`` (see :func:`_split_sentences`), and words
+    are the whitespace-separated tokens of each sentence, counted
+    the same way ``word_count`` counts words — so a token glued to
+    its neighbour by punctuation with no space between them still
+    counts inside its own sentence (``"one...two"`` is two
+    one-word sentences, not one word in two sentences). The split
+    inherits ``sentence_count``'s naive abbreviation behaviour:
+    ``"Mr. Smith went home."`` counts as two sentences. At least
+    one bound is required, and a missing bound is unbounded on
+    that side, so ``{"min": 8}`` only sets a floor and ``{"max":
+    25}`` only sets a ceiling. Partial credit mirrors ``count``:
+    below the minimum the score is ``avg / min``, above the
+    maximum it falls linearly to 0 at twice the maximum, so an
+    output just outside the range still earns most of its weight
+    and one wildly outside earns nothing. A maximum of 0 gives no
+    partial credit above it: any sentence scores 0.0. An output
+    with no sentences has no average to measure: it scores 0.0
+    unless the minimum is 0 (or there is no minimum), in which
+    case an average of 0 is in range and it passes. Case is
+    irrelevant to counting words and sentences, so there is no
+    ``ignore_case`` option — the average is the same whatever the
+    casing.
+    """
+    sentences = _split_sentences(output)
+    total_words = sum(len(sentence.split()) for sentence in sentences)
+    n = len(sentences)
+    if n == 0:
+        if minimum is not None and minimum > 0:
+            return False, "no sentences in output", 0.0
+        return True, "average sentence length 0.00 words (0 words in 0 sentences)", 1.0
+    avg = total_words / n
+    detail = (
+        f"average sentence length {avg:.2f} words "
+        f"({total_words} words in {n} sentence(s))"
+    )
+    if minimum is not None and avg < minimum:
+        score = avg / minimum
+        return (
+            False,
+            f"{detail}, below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and avg > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - avg) / maximum)
+        return (
+            False,
+            f"{detail}, above maximum {maximum}",
+            score,
+        )
+    return True, detail, 1.0
 
 
 def _as_density_bound(spec: dict, key: str, kind: str) -> Optional[float]:
@@ -1855,7 +1935,8 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     when the scorer gives partial credit (see ``score_contains_all``,
     ``score_not_contains``, ``score_count``, ``score_regex_count``,
     ``score_word_count``, ``score_unique_words``,
-    ``score_sentence_count``, ``score_keyword_density``,
+    ``score_sentence_count``, ``score_avg_sentence_length``,
+    ``score_keyword_density``,
     ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
@@ -2013,6 +2094,19 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
                 f"got {minimum} > {maximum}"
             )
         return score_sentence_count(output, minimum, maximum)
+    if kind == "avg_sentence_length":
+        minimum = _as_length_bound(spec, "min", kind)
+        maximum = _as_length_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "avg_sentence_length scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "avg_sentence_length scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_avg_sentence_length(output, minimum, maximum)
     if kind == "keyword_density":
         keywords = _as_keyword_list(spec, kind)
         minimum = _as_density_bound(spec, "min", kind)

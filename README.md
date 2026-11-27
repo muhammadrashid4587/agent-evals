@@ -107,6 +107,7 @@ detail; the run continues with the remaining cases.
 | `unique_words` | `{"min": 5, "max": 20}` | the output has a bounded number of distinct words (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `sentence_count` | `{"min": 2, "max": 5}` | the output has a bounded number of sentences (at least one of `min`/`max` required) |
 | `keyword_density` | `{"keywords": ["step", "verify"], "min": 0.02, "max": 0.10}` | the output's keyword density (keyword occurrences / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
+| `avg_sentence_length` | `{"min": 8, "max": 25}` | the output's average words per sentence falls in a bounded range (at least one of `min`/`max` required) |
 | `contains_regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match; a non-string `pattern` is a scorer error) |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
@@ -371,6 +372,37 @@ comparing, so `"Step"` matches `"step"`. An empty or missing
 non-numeric bound, a bound outside [0, 1], `min` above `max`, or
 neither bound given is a scorer error, and a non-boolean
 `ignore_case` is one too.
+
+The `avg_sentence_length` scorer is the average-length counterpart
+of `sentence_count`: it passes when the output's average words per
+sentence falls in `[min, max]` — an answer whose sentences have to
+stay short and punchy, a summary that must not ramble in long
+sentences, a reply that must read at a steady pace. Sentences are
+split exactly like `sentence_count` (non-empty segments split on
+runs of terminal punctuation, so an unterminated trailing sentence
+still counts and repeated punctuation is one terminator), and
+words are the whitespace-separated tokens of each sentence,
+counted the same way `word_count` counts words — so a token glued
+to its neighbour by punctuation with no space between them still
+counts inside its own sentence (`"one...two"` is two one-word
+sentences, not one word in two sentences). The split is
+deliberately naive about abbreviations, so `"Mr. Smith went
+home."` counts as two sentences — the same limit `sentence_count`
+has, inherited unchanged. It passes when the average falls in
+`[min, max]`; at least one bound is required, and a missing bound
+is unbounded on that side, so `{"min": 8}` only sets a floor and
+`{"max": 25}` only sets a ceiling. It gives partial credit like
+`count`: below the minimum the score is `avg / min`, above the
+maximum it falls linearly to 0 at twice the maximum, so an output
+just outside the range still earns most of its weight and one
+wildly outside earns nothing; a maximum of 0 gives no partial
+credit above it, so any sentence scores 0.0. An output with no
+sentences has no average to measure: it scores 0.0 unless the
+minimum is 0 (or there is no minimum), in which case an average
+of 0 is in range and it passes. Case is irrelevant to counting
+words and sentences, so there is no `"ignore_case"` option. A
+non-integer or negative bound, `min` above `max`, or neither
+bound given is a scorer error.
 
 The `length` scorer is for output that must be a certain size — a
 summary that has to fit in a tweet, an answer that has to be at least
@@ -1850,10 +1882,10 @@ make demo    # run both example suites through the CLI
   non-numeric bound, a bound outside [0, 1], `min` above `max`, or
   neither bound given rejected as a scorer error.~~ (done in
   v0.58.0)
-- `avg_sentence_length` scorer: `avg_sentence_length` passes when
+- ~~`avg_sentence_length` scorer: `avg_sentence_length` passes when
   the output's average words per sentence falls in `[min, max]` —
   `{"type": "avg_sentence_length", "min": 8, "max": 25}` — with
   sentences split like `sentence_count` and words counted like
   `word_count`, partial credit like `count`, and a non-integer or
   negative bound, `min` above `max`, or neither bound given
-  rejected as a scorer error.
+  rejected as a scorer error.~~ (done in v0.59.0)

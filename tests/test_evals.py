@@ -1405,6 +1405,206 @@ class TestKeywordDensityScorer(unittest.TestCase):
             )
 
 
+class TestAvgSentenceLengthScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        # 7 words in 2 sentences: average 3.5.
+        ok, detail, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 3, "max": 4}),
+            "One two three. Four five six seven.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("average sentence length 3.50", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        # 10 words in 2 sentences: average exactly 5.
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 5, "max": 5}),
+            "One two three four five. Six seven eight nine ten.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_min_only_passes(self):
+        # 9 words in 2 sentences: average 4.5, above a 3 minimum.
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 3}),
+            "One two three four. Five six seven eight nine.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        # 4 words in 2 sentences: average 2, below a 5 maximum.
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "max": 5}),
+            "Short one. Short two.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # Average 5 of a 10 minimum: halfway to the floor, score 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 10}),
+            "One two three four five. Six seven eight nine ten.",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 10", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_fractional_average_partial_credit(self):
+        # 10 words in one sentence, 15 in the other: average 12.5
+        # of a 10 maximum, so (2*10 - 12.5) / 10 = 0.75.
+        first = " ".join(["word"] * 10) + "."
+        second = " ".join(["word"] * 15) + "."
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "max": 10}),
+            f"{first} {second}",
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.75)
+
+    def test_zero_average_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 2}),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+        # Punctuation alone is no sentence either.
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 1}),
+            "...",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_passes_when_min_zero(self):
+        # No sentences: an average of 0 is in range when the
+        # minimum is 0, and when there is no minimum at all.
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "max": 5}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_above_maximum_partial_credit(self):
+        # Average 15 of a 10 maximum: halfway to 2x the max, score 0.5.
+        sentence = " ".join(["word"] * 15) + "."
+        ok, detail, score = score_case(
+            _case({"type": "avg_sentence_length", "max": 10}),
+            " ".join([sentence] * 3),
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 10", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_twice_maximum_scores_zero(self):
+        sentence = " ".join(["word"] * 20) + "."
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "max": 10}),
+            " ".join([sentence] * 2),
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_sentence(self):
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "max": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "max": 0}),
+            "One sentence here.",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_unterminated_sentence_counts(self):
+        # No terminal punctuation: still one sentence of four words.
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 4, "max": 4}),
+            "Hello world foo bar",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_mixed_terminators_count(self):
+        # Three two-word sentences: average exactly 2.
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 2, "max": 2}),
+            "Really now? Yes indeed! Absolutely right.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_repeated_punctuation_is_one_terminator(self):
+        # "Wait... Really?" is two one-word sentences, average 1.
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 1, "max": 1}),
+            "Wait... Really?",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_abbreviation_is_naive(self):
+        # "Mr. Smith went home." is two sentences ("Mr", "Smith went
+        # home"): 4 words in 2 sentences, average 2 — the same naive
+        # split sentence_count uses, abbreviations and all.
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 2, "max": 2}),
+            "Mr. Smith went home.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_words_counted_within_each_sentence(self):
+        # Punctuation with no space between the words still splits
+        # the sentences, and each sentence's words are counted
+        # inside it: "one...two" is two one-word sentences.
+        ok, _, score = score_case(
+            _case({"type": "avg_sentence_length", "min": 1, "max": 1}),
+            "one...two",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "avg_sentence_length"}), "One. Two.")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "avg_sentence_length", "min": 10, "max": 5}),
+                "One. Two.",
+            )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "avg_sentence_length", "min": -1}),
+                "One.",
+            )
+
+    def test_non_integer_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "avg_sentence_length", "min": 2.5}),
+                "One.",
+            )
+
+
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
         ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")
