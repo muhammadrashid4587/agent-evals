@@ -1158,6 +1158,61 @@ def score_unique_words(
     return True, f"unique word count {n}", 1.0
 
 
+def score_sentence_count(
+    output: str,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> tuple:
+    """Pass when the output has a bounded number of sentences.
+
+    The sentence-count counterpart of ``score_word_count``: an
+    answer that has to be at least two sentences, a summary that
+    has to fit in one sentence, a reply that must not ramble on
+    for a paragraph. Sentences are the non-empty segments of the
+    stripped output split on runs of terminal punctuation
+    (``.``, ``!``, ``?``), so an unterminated trailing sentence
+    still counts — ``"Hello world"`` is one sentence, ``"Hello.
+    World."`` is two — and repeated punctuation (``"Wait... Really?"``)
+    is one terminator, not three. The split is deliberately naive:
+    it knows nothing about abbreviations, so ``"Mr. Smith went
+    home."`` counts as two sentences. At least one bound is
+    required, and a missing bound is unbounded on that side, so
+    ``{"min": 2}`` only sets a floor and ``{"max": 1}`` only sets
+    a ceiling. Partial credit mirrors ``count``: below the minimum
+    the score is ``n / min`` (0 when the output has no sentences),
+    above the maximum it falls linearly to 0 at twice the maximum,
+    so an output just outside the range still earns most of its
+    weight and one wildly outside earns nothing. A maximum of 0
+    gives no partial credit above it: any sentence scores 0.0.
+    Case is irrelevant to counting sentences, so there is no
+    ``ignore_case`` option — the count is the same whatever the
+    casing.
+    """
+    text = output.strip()
+    if not text:
+        n = 0
+    else:
+        n = sum(1 for segment in re.split(r"[.!?]+", text) if segment.strip())
+    if minimum is not None and n < minimum:
+        score = n / minimum if minimum else 0.0
+        return (
+            False,
+            f"sentence count {n}, below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and n > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - n) / maximum)
+        return (
+            False,
+            f"sentence count {n}, above maximum {maximum}",
+            score,
+        )
+    return True, f"sentence count {n}", 1.0
+
+
 def _check_shape(value: Any, schema: Any, path: str = "$") -> Optional[str]:
     """Return the first shape mismatch as a string, or None if it matches.
 
@@ -1682,6 +1737,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     when the scorer gives partial credit (see ``score_contains_all``,
     ``score_not_contains``, ``score_count``, ``score_regex_count``,
     ``score_word_count``, ``score_unique_words``,
+    ``score_sentence_count``,
     ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
@@ -1825,6 +1881,19 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
             maximum,
             _as_bool_option(spec, "ignore_case", kind),
         )
+    if kind == "sentence_count":
+        minimum = _as_length_bound(spec, "min", kind)
+        maximum = _as_length_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "sentence_count scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "sentence_count scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_sentence_count(output, minimum, maximum)
     if kind == "json_schema":
         return score_json_schema(output, spec["schema"])
     if kind == "json_path":

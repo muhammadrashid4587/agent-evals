@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Twenty-four scorers: exact match, substring, contains-all,
-  contains-any, not-contains, count, word count, unique words, regex, regex-count,
+- Twenty-five scorers: exact match, substring, contains-all,
+  contains-any, not-contains, count, word count, unique words, sentence count, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
@@ -105,6 +105,7 @@ detail; the run continues with the remaining cases.
 | `regex_count` | `{"pattern": "\\d+", "min": 2, "max": 3}` | the regex matches a bounded number of times (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `word_count` | `{"min": 10, "max": 50}` | the output has a bounded number of words (at least one of `min`/`max` required) |
 | `unique_words` | `{"min": 5, "max": 20}` | the output has a bounded number of distinct words (at least one of `min`/`max` required; optional `"ignore_case": true`) |
+| `sentence_count` | `{"min": 2, "max": 5}` | the output has a bounded number of sentences (at least one of `min`/`max` required) |
 | `contains_regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match; a non-string `pattern` is a scorer error) |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
@@ -319,6 +320,26 @@ case-folds words before deduping, so `"The"` and `"the"` count as
 one word. A non-integer or negative bound, `min` above `max`, or
 neither bound given is a scorer error, and a non-boolean
 `ignore_case` is one too.
+
+The `sentence_count` scorer is the sentence-count counterpart of
+`word_count`: it passes when the output has a bounded number of
+sentences — an answer that has to be at least two sentences, a
+summary that has to fit in one sentence, a reply that must not
+ramble on for a paragraph. Sentences are the non-empty segments
+of the stripped output split on runs of terminal punctuation
+(`.`, `!`, `?`), so an unterminated trailing sentence still
+counts — `"Hello world"` is one sentence, `"Hello. World."` is
+two — and repeated punctuation (`"Wait... Really?"`) is one
+terminator, not three. The split is deliberately naive: it knows
+nothing about abbreviations, so `"Mr. Smith went home."` counts
+as two sentences. It passes when the sentence count falls in
+`[min, max]`; at least one bound is required, and a missing bound
+is unbounded on that side. It gives partial credit like `count`,
+and a maximum of 0 gives no partial credit above it, so any
+sentence scores 0.0. Case is irrelevant to counting sentences,
+so there is no `"ignore_case"` option. A non-integer or negative
+bound, `min` above `max`, or neither bound given is a scorer
+error.
 
 The `length` scorer is for output that must be a certain size — a
 summary that has to fit in a tweet, an answer that has to be at least
@@ -1764,3 +1785,18 @@ make demo    # run both example suites through the CLI
   deduping (so `"The"` and `"the"` count as one word), and a
   non-integer or negative bound, `min` above `max`, or neither
   bound given rejected as a scorer error.~~ (done in v0.56.0)
+- ~~`sentence_count` scorer: `sentence_count` passes when the
+  output has a bounded number of sentences — `{"type":
+  "sentence_count", "min": 2, "max": 5}` — with at least one of
+  `min`/`max` required, sentences counted as the non-empty
+  segments of the stripped output split on runs of terminal
+  punctuation (`.`, `!`, `?`), so an unterminated trailing
+  sentence still counts and repeated punctuation is one
+  terminator, partial credit like `count` (below the minimum the
+  score is `n / min`, above the maximum it falls linearly to 0 at
+  twice the maximum), a maximum of 0 forbidding any sentence, and
+  a non-integer or negative bound, `min` above `max`, or neither
+  bound given rejected as a scorer error. Case is irrelevant to
+  counting sentences, so there is no `ignore_case` option, and
+  the split is deliberately naive about abbreviations.~~ (done in
+  v0.57.0)

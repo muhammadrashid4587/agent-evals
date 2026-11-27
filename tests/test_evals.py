@@ -891,6 +891,149 @@ class TestUniqueWordsScorer(unittest.TestCase):
             )
 
 
+class TestSentenceCountScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        ok, detail, score = score_case(
+            _case({"type": "sentence_count", "min": 2, "max": 3}),
+            "One sentence. Two sentences.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("sentence count 2", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        ok, _, score = score_case(
+            _case({"type": "sentence_count", "min": 2, "max": 2}),
+            "One. Two.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_min_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "sentence_count", "min": 3}),
+            "One. Two. Three. Four.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "sentence_count", "max": 1}),
+            "Just one.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # 1 of a 2 minimum: score falls linearly to 0 at 0 sentences.
+        ok, detail, score = score_case(
+            _case({"type": "sentence_count", "min": 2}),
+            "Only one.",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 2", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_zero_sentences_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "sentence_count", "min": 2}),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+        # Punctuation alone is no sentence either.
+        ok, _, score = score_case(
+            _case({"type": "sentence_count", "min": 1}),
+            "...",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_above_maximum_partial_credit(self):
+        # 3 of a 2 maximum: halfway to 2x the max, so score 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "sentence_count", "max": 2}),
+            "One. Two. Three.",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 2", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_twice_maximum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "sentence_count", "max": 2}),
+            "One. Two. Three. Four.",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_sentence(self):
+        ok, _, score = score_case(
+            _case({"type": "sentence_count", "max": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "sentence_count", "max": 0}),
+            "One sentence here.",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_unterminated_sentence_counts(self):
+        # No terminal punctuation: still one sentence.
+        ok, _, score = score_case(
+            _case({"type": "sentence_count", "min": 1, "max": 1}),
+            "Hello world",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_mixed_terminators_count(self):
+        ok, _, score = score_case(
+            _case({"type": "sentence_count", "min": 3, "max": 3}),
+            "Really? Yes! Absolutely.",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_repeated_punctuation_is_one_terminator(self):
+        # "Wait... Really?" is two sentences, not four.
+        ok, _, score = score_case(
+            _case({"type": "sentence_count", "min": 2, "max": 2}),
+            "Wait... Really?",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "sentence_count"}), "One. Two.")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "sentence_count", "min": 3, "max": 1}),
+                "One. Two.",
+            )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "sentence_count", "min": -1}),
+                "One.",
+            )
+
+    def test_non_integer_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "sentence_count", "min": 1.5}),
+                "One.",
+            )
+
+
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
         ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")
