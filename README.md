@@ -1054,6 +1054,27 @@ how many cases under the tag were flaky, and the text summary ends
 with a `Per-tag pass rates:` section. A case carrying several tags
 counts under each of them; untagged cases appear under no tag.
 
+The stability report also captures each case's actual output, so a
+flaky or changed case can be inspected without re-running the
+suite: each case carries `"output"` — a bounded excerpt of the
+output from the last repetition — plus `"distinct_outputs"`, every
+distinct output seen across the repetitions in first-seen order,
+and `"distinct_output_count"`; the text summary has a `Case
+outputs (last run):` section listing every case's last output,
+with the other answers a flaky case gave under `also saw:`. A case
+whose last run produced no output — a timeout or an agent error —
+has `"output": null` and an empty distinct list. Excerpts are
+capped at 500 characters (a longer output is cut with a marker
+naming how much was cut) and at most 5 distinct outputs are kept
+per case, so a case that answers differently every run stays
+bounded. Outputs are redacted before capture: API-key-shaped
+strings (`sk-…`), GitHub and Slack tokens, `Bearer` tokens, and
+labelled secrets (`api_key=…`, `password: …`, `token=…`) are
+replaced with `[REDACTED]`. That is a shape check, not a
+guarantee — a secret in an unusual shape still lands in the
+report — so do not put real secrets in prompts you eval, and
+treat stability reports as potentially containing agent output.
+
 ### Flaky-case history across stability reports
 
 One stability report says which cases flipped in a single burst of
@@ -1520,3 +1541,16 @@ make demo    # run both example suites through the CLI
   gate; it composes with `--fail-on-budget` and `--fail-on-cost`,
   and a threshold outside [0, 1] is rejected as a CLI error.~~
   (done in v0.50.0)
+- ~~Per-case output capture in `--repeat` stability reports: each
+  case carries its actual output — `"output"` is a bounded excerpt
+  of the last run's answer and `"distinct_outputs"` lists every
+  distinct answer seen across the repetitions, so a flaky case's
+  flipping answers can be inspected without re-running the suite —
+  in the JSON report and in a `Case outputs (last run):` section of
+  the text summary, with a case that produced no output shown as
+  `(no output)`; excerpts are capped at 500 characters and at most
+  5 distinct outputs are kept per case, and secret-shaped text
+  (API keys, `Bearer` and GitHub/Slack tokens, labelled
+  `api_key=`/`password=`/`token=` values) is redacted to
+  `[REDACTED]` before capture, with the handling documented in the
+  README.~~ (done in v0.51.0)

@@ -33,12 +33,16 @@ threshold-aware: a case's pass threshold (see ``Case.threshold``
 in ``evals``) decides the verdict in every run, so a case whose
 scorer passes it on a low score still fails when the score is
 below its threshold — and the report carries the threshold per
-case, so the reason is visible instead of a bare fail.
+case, so the reason is visible instead of a bare fail. The report
+also captures each case's actual output — a bounded excerpt of the
+last run, plus the distinct outputs seen across repetitions — so a
+flaky or changed case can be inspected without re-running it.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -51,6 +55,66 @@ __all__ = [
     "format_stability",
     "repeat_suite",
 ]
+
+# How much of an agent's output a stability report keeps per case:
+# excerpts are capped at this many characters, so a chatty agent
+# cannot bloat the report, and at most this many distinct outputs
+# are kept per case, so a case that answers differently every run
+# stays bounded too.
+OUTPUT_EXCERPT_MAX_CHARS = 500
+MAX_DISTINCT_OUTPUTS = 5
+
+# Secret-shaped text is redacted before an output is captured, so a
+# stability report never stores an API key or token verbatim: the
+# value is replaced with ``[REDACTED]`` and the surrounding text is
+# kept, so the excerpt stays readable. This is a shape check, not a
+# guarantee — an agent that returns a secret in an unusual shape
+# still leaks it, so do not put real secrets in prompts you eval.
+_SECRET_PATTERNS = [
+    # OpenAI-style keys and GitHub tokens.
+    (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), "sk-[REDACTED]"),
+    (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED]"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED]"),
+    (re.compile(r"xox[baprs]-[A-Za-z0-9-]+"), "[REDACTED]"),
+    # Bearer tokens: keep the scheme, drop the credential.
+    (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/-]+"), r"\1[REDACTED]"),
+    # Labelled secrets: api_key=..., password: ..., token= ...
+    (
+        re.compile(
+            r"((?:api[_-]?key|password|passwd|secret|token)\s*[:=]\s*)\S+",
+            re.IGNORECASE,
+        ),
+        r"\1[REDACTED]",
+    ),
+]
+
+
+def _redact_output(text: str) -> str:
+    """Replace secret-shaped substrings in ``text`` with
+    ``[REDACTED]`` (see ``_SECRET_PATTERNS``)."""
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _output_excerpt(text: Any) -> Optional[str]:
+    """Bound one agent output for the stability report: redact
+    secret-shaped text, then truncate to
+    ``OUTPUT_EXCERPT_MAX_CHARS`` characters with a marker naming
+    how much was cut. Returns ``None`` for an empty output — a
+    timed-out case or an agent error produced nothing to inspect.
+    """
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    if not text:
+        return None
+    redacted = _redact_output(text)
+    if len(redacted) > OUTPUT_EXCERPT_MAX_CHARS:
+        return (
+            f"{redacted[:OUTPUT_EXCERPT_MAX_CHARS]}… "
+            f"[+{len(redacted) - OUTPUT_EXCERPT_MAX_CHARS} chars]"
+        )
+    return redacted
 
 
 @dataclass
@@ -71,6 +135,18 @@ class CaseStability:
     threshold-aware count, and ``below_threshold`` says whether the
     case's mean score clears its threshold, which is why a case
     with a healthy-looking mean score can still fail every run.
+    ``output`` is a bounded excerpt of the agent's output from the
+    last repetition (``None`` when that run produced no output — a
+    timeout or an agent error), and ``distinct_outputs`` is every
+    distinct excerpt seen across the repetitions, first-seen order,
+    capped at ``MAX_DISTINCT_OUTPUTS``; ``distinct_output_count``
+    is how many distinct outputs there were in total, so a cap
+    that dropped some is visible. A flaky case's distinct outputs
+    are the answers that flipped it, so the case can be inspected
+    without re-running the suite. Excerpts are redacted for
+    secret-shaped text and truncated to
+    ``OUTPUT_EXCERPT_MAX_CHARS`` characters (see
+    ``_output_excerpt``).
     """
 
     case_id: str
@@ -81,6 +157,9 @@ class CaseStability:
     timeouts: int = 0
     tags: list = field(default_factory=list)
     threshold: Optional[float] = None
+    output: Optional[str] = None
+    distinct_outputs: list = field(default_factory=list)
+    distinct_output_count: int = 0
 
     @property
     def pass_rate(self) -> float:
@@ -119,6 +198,9 @@ class CaseStability:
             "tags": list(self.tags),
             "threshold": self.threshold,
             "below_threshold": self.below_threshold,
+            "output": self.output,
+            "distinct_outputs": list(self.distinct_outputs),
+            "distinct_output_count": self.distinct_output_count,
         }
 
 
@@ -284,7 +366,13 @@ def repeat_suite(
     order: list = []
     by_id: dict = {}
     for case in suite.cases:
-        aggregate[case.id] = {"passes": 0, "latency": 0.0, "score": 0.0, "timeouts": 0}
+        aggregate[case.id] = {
+            "passes": 0,
+            "latency": 0.0,
+            "score": 0.0,
+            "timeouts": 0,
+            "outputs": [],
+        }
         order.append(case.id)
         by_id[case.id] = case
     for _ in range(repetitions):
@@ -295,20 +383,38 @@ def repeat_suite(
             entry["latency"] += result.latency_ms
             entry["score"] += result.score
             entry["timeouts"] += 1 if result.timed_out else 0
+            entry["outputs"].append(result.output)
     ended = datetime.now(timezone.utc).isoformat()
-    cases = [
-        CaseStability(
-            case_id=case_id,
-            runs=repetitions,
-            passes=aggregate[case_id]["passes"],
-            mean_latency_ms=aggregate[case_id]["latency"] / repetitions,
-            mean_score=aggregate[case_id]["score"] / repetitions,
-            timeouts=aggregate[case_id]["timeouts"],
-            tags=list(by_id[case_id].tags),
-            threshold=by_id[case_id].threshold,
+    cases = []
+    for case_id in order:
+        entry = aggregate[case_id]
+        # Distinct output excerpts, first-seen order: the answers
+        # that flipped a flaky case, so it can be inspected without
+        # re-running. Dedupe on the excerpt, not the raw output —
+        # two raw outputs that redact to the same excerpt are the
+        # same answer as far as the report is concerned.
+        distinct: list = []
+        for raw in entry["outputs"]:
+            excerpt = _output_excerpt(raw)
+            if excerpt is not None and excerpt not in distinct:
+                distinct.append(excerpt)
+        cases.append(
+            CaseStability(
+                case_id=case_id,
+                runs=repetitions,
+                passes=entry["passes"],
+                mean_latency_ms=entry["latency"] / repetitions,
+                mean_score=entry["score"] / repetitions,
+                timeouts=entry["timeouts"],
+                tags=list(by_id[case_id].tags),
+                threshold=by_id[case_id].threshold,
+                output=_output_excerpt(entry["outputs"][-1])
+                if entry["outputs"]
+                else None,
+                distinct_outputs=distinct[:MAX_DISTINCT_OUTPUTS],
+                distinct_output_count=len(distinct),
+            )
         )
-        for case_id in order
-    ]
     return StabilityReport(
         suite=suite.name,
         repetitions=repetitions,
@@ -408,6 +514,22 @@ def format_stability(report: StabilityReport) -> str:
             "the scorer: their mean score does not reach the bar "
             "the case has to clear.",
         ]
+    # Every case's last-run output, so a flaky or changed case can
+    # be inspected without re-running the suite. A flaky case with
+    # more than one distinct answer lists the other answers too —
+    # those are the outputs that flipped it. Excerpts are bounded
+    # (see _output_excerpt); the JSON report carries the same
+    # excerpts plus the full distinct-output list.
+    lines += ["", "Case outputs (last run):"]
+    for c in report.cases:
+        if c.output is None:
+            lines.append(f"  {c.case_id}: (no output)")
+        else:
+            lines.append(f"  {c.case_id}: {c.output!r}")
+        if c.flaky and len(c.distinct_outputs) > 1:
+            for other in c.distinct_outputs:
+                if other != c.output:
+                    lines.append(f"    also saw: {other!r}")
     breakdown = report.tag_breakdown
     if breakdown:
         # A tag that keeps failing — or keeps flipping — is visible at

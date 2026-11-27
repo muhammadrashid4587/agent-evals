@@ -441,7 +441,10 @@ class TestStabilityThresholds(unittest.TestCase):
             text,
         )
         # The passing case is not in the below-threshold section.
+        # (Bound the section: the case-outputs section that follows
+        # lists every case, including the passing ones.)
         section = text.split("Below their pass threshold")[1]
+        section = section.split("Case outputs (last run):")[0]
         self.assertNotIn("meets-threshold", section)
         self.assertNotIn("plain", section)
 
@@ -473,6 +476,81 @@ class TestStabilityThresholds(unittest.TestCase):
             self.assertEqual(by_id["below-threshold"]["threshold"], 0.9)
             self.assertEqual(by_id["below-threshold"]["passes"], 0)
             self.assertIsNone(by_id["plain"]["threshold"])
+
+class TestOutputCapture(unittest.TestCase):
+    def test_output_captured_per_case(self):
+        report = repeat_suite(_suite(), _alternating_agent(), repetitions=4)
+        by_id = {c.case_id: c for c in report.cases}
+        # Stable cases: one distinct output, the last run's answer.
+        self.assertEqual(by_id["stable-pass"].output, "19")
+        self.assertEqual(by_id["stable-pass"].distinct_outputs, ["19"])
+        self.assertEqual(by_id["stable-pass"].distinct_output_count, 1)
+        # The flaky case flipped between two answers; both are kept,
+        # first-seen order, and the last run's answer is the output.
+        flaky = by_id["flaky"]
+        self.assertEqual(flaky.distinct_outputs, ["19", "20"])
+        self.assertEqual(flaky.distinct_output_count, 2)
+        self.assertEqual(flaky.output, "20")
+        # The JSON report carries the same fields.
+        by_json = {c["case_id"]: c for c in report.to_dict()["cases"]}
+        self.assertEqual(by_json["flaky"]["output"], "20")
+        self.assertEqual(by_json["flaky"]["distinct_outputs"], ["19", "20"])
+        self.assertEqual(by_json["flaky"]["distinct_output_count"], 2)
+        self.assertEqual(by_json["stable-pass"]["output"], "19")
+
+    def test_long_output_truncated_with_marker(self):
+        def agent(prompt):
+            return "x" * 1000
+
+        report = repeat_suite(_suite(), agent, repetitions=2)
+        by_id = {c.case_id: c for c in report.cases}
+        excerpt = by_id["stable-pass"].output
+        self.assertTrue(excerpt.startswith("x" * 500))
+        self.assertTrue(excerpt.endswith("[+500 chars]"))
+        self.assertLessEqual(len(excerpt), 520)
+
+    def test_secret_shaped_output_redacted(self):
+        def agent(prompt):
+            return (
+                "key sk-abcdefgh12345678 and "
+                "Bearer abcdefghij.klmnop.qrstuv plus "
+                "api_key=topsecretvalue"
+            )
+
+        report = repeat_suite(_suite(), agent, repetitions=1)
+        output = report.cases[0].output
+        self.assertIn("sk-[REDACTED]", output)
+        self.assertIn("Bearer [REDACTED]", output)
+        self.assertIn("api_key=[REDACTED]", output)
+        self.assertNotIn("abcdefgh12345678", output)
+        self.assertNotIn("topsecretvalue", output)
+
+    def test_no_output_when_agent_errors(self):
+        def agent(prompt):
+            raise RuntimeError("boom")
+
+        report = repeat_suite(_suite(), agent, repetitions=2)
+        for case in report.cases:
+            self.assertIsNone(case.output)
+            self.assertEqual(case.distinct_outputs, [])
+            self.assertEqual(case.distinct_output_count, 0)
+
+    def test_format_stability_shows_outputs(self):
+        report = repeat_suite(_suite(), _alternating_agent(), repetitions=4)
+        text = format_stability(report)
+        self.assertIn("Case outputs (last run):", text)
+        self.assertIn("stable-pass: '19'", text)
+        # The flaky case's last answer plus the other answer it gave.
+        self.assertIn("flaky: '20'", text)
+        self.assertIn("also saw: '19'", text)
+
+    def test_format_stability_marks_missing_output(self):
+        def agent(prompt):
+            raise RuntimeError("boom")
+
+        report = repeat_suite(_suite(), agent, repetitions=1)
+        text = format_stability(report)
+        self.assertIn("stable-pass: (no output)", text)
 
 
 if __name__ == "__main__":
