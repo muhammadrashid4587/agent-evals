@@ -1061,6 +1061,103 @@ def score_regex_count(
     return True, f"pattern {pattern!r} matched {n} time(s)", 1.0
 
 
+def score_word_count(
+    output: str,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> tuple:
+    """Pass when the output has a bounded number of words.
+
+    The word-count counterpart of ``score_length`` with
+    ``unit="words"``: an answer that has to be at least a paragraph,
+    a summary that has to fit in a tweet, a reply that must not
+    ramble. Words are the whitespace-separated tokens of the
+    stripped output, the same word count ``length`` uses, so
+    punctuation stays attached to its word and runs of whitespace
+    count as one separator. At least one bound is required, and a
+    missing bound is unbounded on that side, so ``{"min": 10}``
+    only sets a floor and ``{"max": 50}`` only sets a ceiling.
+    Partial credit mirrors ``count``: below the minimum the score
+    is ``n / min`` (0 when the output has no words), above the
+    maximum it falls linearly to 0 at twice the maximum, so an
+    output just outside the range still earns most of its weight
+    and one wildly outside earns nothing. A maximum of 0 gives no
+    partial credit above it: any word scores 0.0. Case is
+    irrelevant to counting words, so there is no ``ignore_case``
+    option — the count is the same whatever the casing.
+    """
+    n = len(output.strip().split())
+    if minimum is not None and n < minimum:
+        score = n / minimum if minimum else 0.0
+        return (
+            False,
+            f"word count {n}, below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and n > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - n) / maximum)
+        return (
+            False,
+            f"word count {n}, above maximum {maximum}",
+            score,
+        )
+    return True, f"word count {n}", 1.0
+
+
+def score_unique_words(
+    output: str,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+    ignore_case: bool = False,
+) -> tuple:
+    """Pass when the output has a bounded number of distinct words.
+
+    The vocabulary counterpart of ``score_word_count``: an answer
+    that has to use at least five different terms, a summary that
+    must not repeat the same word over and over, a reply that must
+    stay lexically varied. Words are the whitespace-separated
+    tokens of the stripped output, the same word count ``length``
+    uses, and distinctness is by exact token, so ``"hello,"`` and
+    ``"hello"`` are different words. At least one bound is
+    required, and a missing bound is unbounded on that side, so
+    ``{"min": 5}`` only sets a floor and ``{"max": 20}`` only sets
+    a ceiling. Partial credit mirrors ``count``: below the minimum
+    the score is ``n / min`` (0 when the output has no words),
+    above the maximum it falls linearly to 0 at twice the maximum,
+    so an output just outside the range still earns most of its
+    weight and one wildly outside earns nothing. A maximum of 0
+    gives no partial credit above it: any word scores 0.0. With
+    ``ignore_case``, words are case-folded before deduping, so
+    ``"The"`` and ``"the"`` count as one word; the detail still
+    names the count, not the folded words.
+    """
+    words = output.strip().split()
+    if ignore_case:
+        words = [word.casefold() for word in words]
+    n = len(set(words))
+    if minimum is not None and n < minimum:
+        score = n / minimum if minimum else 0.0
+        return (
+            False,
+            f"unique word count {n}, below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and n > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - n) / maximum)
+        return (
+            False,
+            f"unique word count {n}, above maximum {maximum}",
+            score,
+        )
+    return True, f"unique word count {n}", 1.0
+
+
 def _check_shape(value: Any, schema: Any, path: str = "$") -> Optional[str]:
     """Return the first shape mismatch as a string, or None if it matches.
 
@@ -1584,13 +1681,14 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
     when the scorer gives partial credit (see ``score_contains_all``,
     ``score_not_contains``, ``score_count``, ``score_regex_count``,
+    ``score_word_count``, ``score_unique_words``,
     ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``count``, ``starts_with``,
     ``ends_with``, ``one_of``) and the ``exact``, ``fuzzy``,
     ``levenshtein``, ``regex``,
-    ``contains_regex``, and ``regex_count`` scorers accept an optional
+    ``contains_regex``, ``regex_count``, and ``unique_words`` scorers accept an optional
     ``"ignore_case": true`` in the spec:
     both the expected strings and the output are case-folded before
     comparing (``regex``, ``contains_regex``, and ``regex_count`` match with
@@ -1692,6 +1790,37 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
         return score_regex_count(
             output,
             pattern,
+            minimum,
+            maximum,
+            _as_bool_option(spec, "ignore_case", kind),
+        )
+    if kind == "word_count":
+        minimum = _as_length_bound(spec, "min", kind)
+        maximum = _as_length_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "word_count scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "word_count scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_word_count(output, minimum, maximum)
+    if kind == "unique_words":
+        minimum = _as_length_bound(spec, "min", kind)
+        maximum = _as_length_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "unique_words scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "unique_words scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_unique_words(
+            output,
             minimum,
             maximum,
             _as_bool_option(spec, "ignore_case", kind),

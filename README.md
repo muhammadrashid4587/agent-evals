@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Twenty-two scorers: exact match, substring, contains-all,
-  contains-any, not-contains, count, regex, regex-count,
+- Twenty-four scorers: exact match, substring, contains-all,
+  contains-any, not-contains, count, word count, unique words, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
@@ -103,6 +103,8 @@ detail; the run continues with the remaining cases.
 | `count` | `{"substring": "step", "min": 2, "max": 3}` | output contains the substring a bounded number of times (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match) |
 | `regex_count` | `{"pattern": "\\d+", "min": 2, "max": 3}` | the regex matches a bounded number of times (at least one of `min`/`max` required; optional `"ignore_case": true`) |
+| `word_count` | `{"min": 10, "max": 50}` | the output has a bounded number of words (at least one of `min`/`max` required) |
+| `unique_words` | `{"min": 5, "max": 20}` | the output has a bounded number of distinct words (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `contains_regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match; a non-string `pattern` is a scorer error) |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
@@ -281,6 +283,43 @@ invalid regex, a non-integer or negative bound, `min` above
 optional `"ignore_case": true`, matching with `re.IGNORECASE` like
 `regex` and `contains_regex`.
 
+The `word_count` scorer is the word-count counterpart of `length`
+with `"unit": "words"`: it passes when the output has a bounded
+number of words — an answer that has to be at least a paragraph, a
+summary that has to fit in a tweet, a reply that must not ramble.
+Words are the whitespace-separated tokens of the stripped output,
+the same word count `length` uses, so punctuation stays attached
+to its word and runs of whitespace count as one separator. It
+passes when the count falls in `[min, max]`; at least one bound is
+required, and a missing bound is unbounded on that side, so
+`{"min": 10}` only sets a floor and `{"max": 50}` only sets a
+ceiling. It gives partial credit like `count`: below the minimum
+the score is `n / min` (0 when the output has no words), above the
+maximum it falls linearly to 0 at twice the maximum, so an output
+just outside the range still earns most of its weight and one
+wildly outside earns nothing; a maximum of 0 gives no partial
+credit above it, so any word scores 0.0. Case is irrelevant to
+counting words, so there is no `"ignore_case"` option. A
+non-integer or negative bound, `min` above `max`, or neither bound
+given is a scorer error.
+
+The `unique_words` scorer is the vocabulary counterpart of
+`word_count`: it passes when the output has a bounded number of
+distinct words — an answer that has to use at least five different
+terms, a summary that must not repeat the same word over and over,
+a reply that must stay lexically varied. Words are the
+whitespace-separated tokens of the stripped output, and
+distinctness is by exact token, so `"hello,"` and `"hello"` are
+different words. It passes when the distinct count falls in `[min,
+max]`; at least one bound is required, and a missing bound is
+unbounded on that side. It gives partial credit like `count`, and
+a maximum of 0 gives no partial credit above it, so any word
+scores 0.0. It accepts an optional `"ignore_case": true`, which
+case-folds words before deduping, so `"The"` and `"the"` count as
+one word. A non-integer or negative bound, `min` above `max`, or
+neither bound given is a scorer error, and a non-boolean
+`ignore_case` is one too.
+
 The `length` scorer is for output that must be a certain size — a
 summary that has to fit in a tweet, an answer that has to be at least
 a paragraph, a code snippet that must not ramble. It passes when the
@@ -336,7 +375,7 @@ error too. It is all-or-nothing: 1.0 on a match, 0.0 otherwise.
 
 The `exact` scorer and the eight string scorers — `contains`, `contains_all`,
 `contains_any`, `not_contains`, `count`, `starts_with`, `ends_with`, `one_of` — and the
-`fuzzy`, `levenshtein`, `regex`, `regex_count`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
+`fuzzy`, `levenshtein`, `regex`, `regex_count`, `unique_words`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
 in the spec, e.g.
 `{"type": "exact", "expected": "Hello", "ignore_case": true}`.
 When set, the expected strings and the output are case-folded
@@ -1702,3 +1741,26 @@ make demo    # run both example suites through the CLI
   and a missing or non-string `pattern`, an invalid regex, a
   non-integer or negative bound, `min` above `max`, or neither
   bound given rejected as a scorer error.~~ (done in v0.55.0)
+- ~~`word_count` scorer: `word_count` passes when the output has a
+  bounded number of words — `{"type": "word_count", "min": 10,
+  "max": 50}` — with at least one of `min`/`max` required, words
+  counted as the whitespace-separated tokens of the stripped
+  output (the same word count `length` uses with `"unit":
+  "words"`), partial credit like `count` (below the minimum the
+  score is `n / min`, above the maximum it falls linearly to 0 at
+  twice the maximum), a maximum of 0 forbidding any word, and a
+  non-integer or negative bound, `min` above `max`, or neither
+  bound given rejected as a scorer error. Case is irrelevant to
+  counting words, so there is no `ignore_case` option.~~ (done in
+  v0.56.0)
+- ~~`unique_words` scorer: `unique_words` passes when the output
+  has a bounded number of distinct words — `{"type":
+  "unique_words", "min": 5, "max": 20}` — with at least one of
+  `min`/`max` required, words counted as the whitespace-separated
+  tokens of the stripped output with distinctness by exact token
+  (so `"hello,"` and `"hello"` are different words), partial
+  credit like `count`, a maximum of 0 forbidding any word, an
+  optional `"ignore_case": true` that case-folds words before
+  deduping (so `"The"` and `"the"` count as one word), and a
+  non-integer or negative bound, `min` above `max`, or neither
+  bound given rejected as a scorer error.~~ (done in v0.56.0)

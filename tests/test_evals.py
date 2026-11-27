@@ -584,6 +584,313 @@ class TestRegexCountScorer(unittest.TestCase):
             )
 
 
+class TestWordCountScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        ok, detail, score = score_case(
+            _case({"type": "word_count", "min": 2, "max": 3}),
+            "one two",
+        )
+        self.assertTrue(ok)
+        self.assertIn("word count 2", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        ok, _, score = score_case(
+            _case({"type": "word_count", "min": 2, "max": 2}),
+            "one two",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_min_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "word_count", "min": 3}),
+            "one two three four five",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "word_count", "max": 1}),
+            "one",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # 1 of a 2 minimum: score falls linearly to 0 at 0 words.
+        ok, detail, score = score_case(
+            _case({"type": "word_count", "min": 2}),
+            "only",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 2", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_zero_words_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "word_count", "min": 2}),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_above_maximum_partial_credit(self):
+        # 3 of a 2 maximum: halfway to 2x the max, so score 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "word_count", "max": 2}),
+            "one two three",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 2", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_twice_maximum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "word_count", "max": 2}),
+            "one two three four",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_word(self):
+        ok, _, score = score_case(
+            _case({"type": "word_count", "max": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "word_count", "max": 0}),
+            "one word here",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_whitespace_runs_count_as_one_separator(self):
+        ok, _, score = score_case(
+            _case({"type": "word_count", "min": 2, "max": 2}),
+            "  one   two\n",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_punctuation_stays_attached(self):
+        # "hello," and "hello" are different tokens, like length's
+        # word unit: this is two words, not one.
+        ok, _, score = score_case(
+            _case({"type": "word_count", "min": 2, "max": 2}),
+            "hello, hello",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "word_count"}), "one two")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "word_count", "min": 3, "max": 1}),
+                "one two",
+            )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "word_count", "min": -1}),
+                "one",
+            )
+
+    def test_non_integer_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "word_count", "min": 1.5}),
+                "one",
+            )
+
+
+class TestUniqueWordsScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        ok, detail, score = score_case(
+            _case({"type": "unique_words", "min": 2, "max": 3}),
+            "one two one",
+        )
+        self.assertTrue(ok)
+        self.assertIn("unique word count 2", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        ok, _, score = score_case(
+            _case({"type": "unique_words", "min": 2, "max": 2}),
+            "one two",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_min_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "unique_words", "min": 3}),
+            "one two three one",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "unique_words", "max": 1}),
+            "same same same",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # 1 of a 2 minimum: score falls linearly to 0 at 0 words.
+        ok, detail, score = score_case(
+            _case({"type": "unique_words", "min": 2}),
+            "same same same",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 2", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_zero_words_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "unique_words", "min": 2}),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_above_maximum_partial_credit(self):
+        # 3 of a 2 maximum: halfway to 2x the max, so score 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "unique_words", "max": 2}),
+            "one two three",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 2", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_twice_maximum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "unique_words", "max": 2}),
+            "one two three four",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_word(self):
+        ok, _, score = score_case(
+            _case({"type": "unique_words", "max": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "unique_words", "max": 0}),
+            "one word here",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_repeated_words_count_once(self):
+        # Five words, two distinct: a min of 3 fails at 2/3.
+        ok, _, score = score_case(
+            _case({"type": "unique_words", "min": 3}),
+            "yes yes yes no no",
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 2 / 3)
+
+    def test_ignore_case_folds_before_deduping(self):
+        # Without ignore_case, "The" and "the" are two words.
+        ok, _, score = score_case(
+            _case({"type": "unique_words", "min": 2, "max": 2}),
+            "The the the",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        # With ignore_case they fold to one word: below a 2 minimum.
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "unique_words",
+                    "min": 2,
+                    "max": 2,
+                    "ignore_case": True,
+                }
+            ),
+            "The the the",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 2", detail)
+        self.assertAlmostEqual(score, 0.5)
+        # And a folded single word passes a max of 1.
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "unique_words",
+                    "min": 1,
+                    "max": 1,
+                    "ignore_case": True,
+                }
+            ),
+            "The the THE",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_case_sensitive_by_default(self):
+        # Without ignore_case, "The" and "the" are different words.
+        ok, _, score = score_case(
+            _case({"type": "unique_words", "min": 2, "max": 2}),
+            "The the",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "unique_words"}), "one two")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "unique_words", "min": 3, "max": 1}),
+                "one two",
+            )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "unique_words", "min": -1}),
+                "one",
+            )
+
+    def test_non_integer_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "unique_words", "min": 1.5}),
+                "one",
+            )
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "unique_words",
+                        "min": 1,
+                        "ignore_case": "yes",
+                    }
+                ),
+                "one",
+            )
+
+
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
         ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")
