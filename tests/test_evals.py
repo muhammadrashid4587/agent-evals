@@ -2196,6 +2196,214 @@ class TestHapaxRatioScorer(unittest.TestCase):
             )
 
 
+class TestStopwordRatioScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        # "the cat sat on the mat" — "the" twice, "on" once:
+        # 3 of 6 words are stopwords, a ratio of 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "stopword_ratio", "min": 0.4, "max": 0.6}),
+            "the cat sat on the mat",
+        )
+        self.assertTrue(ok)
+        self.assertIn("stopword ratio 0.500 (3 of 6 words are stopwords)", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        # Every word a stopword: a ratio of exactly 1.0.
+        ok, _, score = score_case(
+            _case({"type": "stopword_ratio", "min": 1.0, "max": 1.0}),
+            "the cat and the dog",
+        )
+        self.assertFalse(ok)  # "cat" and "dog" are content words
+        ok, _, score = score_case(
+            _case({"type": "stopword_ratio", "min": 1.0, "max": 1.0}),
+            "the and of the",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_min_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "stopword_ratio", "min": 0.5}),
+            "the and of the",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        # "cats dogs birds" — no stopwords at all: 0.0.
+        ok, _, score = score_case(
+            _case({"type": "stopword_ratio", "max": 0.5}),
+            "cats dogs birds",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # 0.25 of a 0.5 minimum: 0.25 / 0.5 = 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "stopword_ratio", "min": 0.5}),
+            "the cats sat quietly",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 0.5", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_no_stopwords_score_zero_below_minimum(self):
+        # 0 of 3 words are stopwords: a ratio of 0, so no partial
+        # credit below a 0.5 minimum.
+        ok, _, score = score_case(
+            _case({"type": "stopword_ratio", "min": 0.5}),
+            "cats dogs birds",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_above_maximum_partial_credit(self):
+        # 1.0 of a 0.8 maximum: (2*0.8 - 1.0) / 0.8 = 0.75.
+        ok, detail, score = score_case(
+            _case({"type": "stopword_ratio", "max": 0.8}),
+            "the and of the",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 0.8", detail)
+        self.assertAlmostEqual(score, 0.75)
+
+    def test_twice_maximum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "stopword_ratio", "max": 0.4}),
+            "the and of the",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_stopword(self):
+        ok, _, score = score_case(
+            _case({"type": "stopword_ratio", "max": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "stopword_ratio", "max": 0}),
+            "the cat",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_scores_zero(self):
+        ok, detail, score = score_case(
+            _case({"type": "stopword_ratio", "min": 0.5}),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertIn("no words in output", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_passes_when_min_zero(self):
+        # No words: a ratio of 0 is in range when the minimum is 0,
+        # and when there is no minimum at all.
+        ok, _, score = score_case(
+            _case({"type": "stopword_ratio", "min": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "stopword_ratio", "max": 0.9}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_ignore_case_folds_before_counting(self):
+        # Without ignore_case, "The" is not in the lowercase list,
+        # so only "and" counts: a ratio of 1/3.
+        ok, _, score = score_case(
+            _case(
+                {"type": "stopword_ratio", "min": 0.9, "max": 1.0}
+            ),
+            "The and cat",
+        )
+        self.assertFalse(ok)
+        # With ignore_case "The" folds to "the" and counts: 2/3,
+        # still below a 0.9 minimum, so the score is (2/3) / 0.9.
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "stopword_ratio",
+                    "min": 0.9,
+                    "max": 1.0,
+                    "ignore_case": True,
+                }
+            ),
+            "The and cat",
+        )
+        self.assertFalse(ok)
+        self.assertIn("stopword ratio 0.667 (2 of 3 words are stopwords)", detail)
+        self.assertAlmostEqual(score, (2 / 3) / 0.9)
+
+    def test_tokenization_is_naive_about_punctuation(self):
+        # "the," is not the stopword "the": a ratio of 0.0.
+        ok, detail, score = score_case(
+            _case({"type": "stopword_ratio", "min": 0.0, "max": 0.0}),
+            "the, cat",
+        )
+        self.assertTrue(ok)
+        self.assertIn("stopword ratio 0.000 (0 of 2 words are stopwords)", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "stopword_ratio"}), "One. Two.")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "stopword_ratio", "min": 0.9, "max": 0.5}),
+                "One. Two.",
+            )
+
+    def test_non_numeric_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "stopword_ratio", "min": "high"}),
+                "One.",
+            )
+
+    def test_bool_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "stopword_ratio", "min": True}),
+                "One.",
+            )
+
+    def test_bound_outside_unit_interval_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "stopword_ratio", "min": 1.5}),
+                "One.",
+            )
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "stopword_ratio", "max": -0.1}),
+                "One.",
+            )
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "stopword_ratio",
+                        "min": 0.5,
+                        "ignore_case": "true",
+                    }
+                ),
+                "One.",
+            )
+
+
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
         ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")
