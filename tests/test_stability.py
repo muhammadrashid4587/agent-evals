@@ -106,6 +106,81 @@ class TestRepeatSuite(unittest.TestCase):
         self.assertIn("FLAKY", text)
         self.assertIn("repeated 2x", text)
 
+    def test_score_spread_from_alternating_agent(self):
+        # The "flaky" case scores 1.0 and 0.0 on alternate runs, so
+        # its score spread is the full range; the stable cases
+        # score the same every run, so their spread is 0.
+        report = repeat_suite(_suite(), _alternating_agent(), repetitions=4)
+        by_id = {c.case_id: c for c in report.cases}
+        flaky = by_id["flaky"]
+        self.assertEqual(flaky.min_score, 0.0)
+        self.assertEqual(flaky.max_score, 1.0)
+        self.assertEqual(flaky.score_spread, 1.0)
+        self.assertEqual(flaky.mean_score, 0.5)
+        for case_id in ("stable-pass", "stable-fail"):
+            case = by_id[case_id]
+            self.assertEqual(case.min_score, case.max_score)
+            self.assertEqual(case.score_spread, 0.0)
+
+    def test_latency_extremes_bracket_the_mean(self):
+        report = repeat_suite(_suite(), lambda prompt: "19", repetitions=3)
+        for case in report.cases:
+            self.assertIsNotNone(case.min_latency_ms)
+            self.assertIsNotNone(case.max_latency_ms)
+            self.assertLessEqual(case.min_latency_ms, case.mean_latency_ms)
+            self.assertLessEqual(case.mean_latency_ms, case.max_latency_ms)
+            self.assertEqual(
+                case.latency_spread_ms,
+                case.max_latency_ms - case.min_latency_ms,
+            )
+            self.assertGreaterEqual(case.latency_spread_ms, 0.0)
+
+    def test_latency_spread_grows_with_a_slow_run(self):
+        # The "flip" prompt answers after a 50 ms sleep every other
+        # call, so the flaky case's max latency is far above its min
+        # while the other cases stay fast.
+        import time
+
+        calls = {"n": 0}
+
+        def agent(prompt):
+            if prompt == "flip":
+                calls["n"] += 1
+                if calls["n"] % 2 == 0:
+                    time.sleep(0.05)
+            return "19"
+
+        report = repeat_suite(_suite(), agent, repetitions=4)
+        by_id = {c.case_id: c for c in report.cases}
+        flaky = by_id["flaky"]
+        self.assertGreater(flaky.latency_spread_ms, 20.0)
+        self.assertLess(by_id["stable-pass"].latency_spread_ms, 20.0)
+
+    def test_spread_fields_in_dict_and_summary(self):
+        report = repeat_suite(_suite(), _alternating_agent(), repetitions=2)
+        data = report.to_dict()
+        flaky_case = next(c for c in data["cases"] if c["case_id"] == "flaky")
+        self.assertEqual(flaky_case["min_score"], 0.0)
+        self.assertEqual(flaky_case["max_score"], 1.0)
+        self.assertEqual(flaky_case["score_spread"], 1.0)
+        self.assertIn("min_latency_ms", flaky_case)
+        self.assertIn("max_latency_ms", flaky_case)
+        self.assertIn("latency_spread_ms", flaky_case)
+        text = format_stability(report)
+        self.assertIn("latency ms", text)
+        self.assertIn("0.00-1.00", text)
+        # A case with no recorded extremes renders a dash, not a crash.
+        from agent_evals.stability import CaseStability
+
+        bare = CaseStability(
+            case_id="bare", runs=0, passes=0,
+            mean_latency_ms=0.0, mean_score=0.0,
+        )
+        self.assertEqual(bare.latency_spread_ms, 0.0)
+        self.assertEqual(bare.score_spread, 0.0)
+        self.assertIsNone(bare.to_dict()["min_latency_ms"])
+        self.assertIsNone(bare.to_dict()["min_score"])
+
 
 class TestStabilityTagFilter(unittest.TestCase):
     def test_tag_filter_recorded_in_dict(self):

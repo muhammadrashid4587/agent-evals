@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Twenty-six scorers: exact match, substring, contains-all,
-  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, regex, regex-count,
+- Twenty-seven scorers: exact match, substring, contains-all,
+  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
@@ -1187,7 +1187,17 @@ print(format_stability(stability))
 ```
 
 Each case gets a pass rate over the N runs plus its mean latency and
-mean score. A case is **flaky** when its pass rate is strictly between
+mean score. Each case also carries its min/max latency and min/max
+score across the repetitions, with the spread between them
+(`"min_latency_ms"`, `"max_latency_ms"`, `"latency_spread_ms"`,
+`"min_score"`, `"max_score"`, `"score_spread"` in the JSON, and
+`latency ms` / `score` range columns in the text table, e.g.
+`0.0-3.4` and `0.50-1.00`), so a case whose mean looks steady but
+whose slowest run was far above its fastest — or whose score wobbled
+while still passing — is visible instead of averaged away: a case
+with a wide latency spread is one slow run away from tripping its
+budget, and a case with a wide score spread is answering
+inconsistently even when it passed every time. A case is **flaky** when its pass rate is strictly between
 0 and 1: it passed at least once and failed at least once, so the
 verdict is not reproducible. That is the signal to look at the agent
 (nondeterminism, a race, a timeout that is too tight) or at the case
@@ -1889,3 +1899,12 @@ make demo    # run both example suites through the CLI
   `word_count`, partial credit like `count`, and a non-integer or
   negative bound, `min` above `max`, or neither bound given
   rejected as a scorer error.~~ (done in v0.59.0)
+- ~~Per-case min/max latency and score spread in stability reports:
+  each case in a `--repeat` report carries its min/max latency and
+  min/max score across the repetitions, with the spread between them
+  (`"min_latency_ms"`, `"max_latency_ms"`, `"latency_spread_ms"`,
+  `"min_score"`, `"max_score"`, `"score_spread"` in the JSON, and
+  `latency ms` / `score` range columns in the text summary), so a
+  case whose mean looks steady but whose slowest run was far above
+  its fastest — or whose score wobbled while still passing — is
+  visible instead of averaged away.~~ (done in v0.60.0)

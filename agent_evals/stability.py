@@ -5,7 +5,12 @@ one: an agent that answers nondeterministically (sampling, retries,
 timeouts under load) passes a case sometimes and fails it other
 times. ``repeat_suite`` runs the whole suite ``repetitions`` times
 and aggregates per case, so a case whose pass rate is strictly
-between 0 and 1 is flagged ``flaky``.
+between 0 and 1 is flagged ``flaky``. Each case also carries its
+min/max latency and min/max score across the repetitions, with
+the spread between them, so a case whose mean looks steady but
+whose slowest run was ten times its fastest — or whose score
+wobbled while still passing — is visible instead of averaged
+away.
 
 A flaky case is not the same as a failing case: it passed at least
 once, so the agent can do it, but the verdict is not reproducible.
@@ -166,7 +171,14 @@ class CaseStability:
     ``pass_rate`` is ``passes / runs``. A case is ``flaky`` when it
     passed at least once and failed at least once: 0 < pass_rate < 1.
     ``mean_latency_ms`` and ``mean_score`` are the averages across
-    the runs; ``timeouts`` counts the runs in which the case timed out.
+    the runs; ``min_latency_ms`` / ``max_latency_ms`` and
+    ``min_score`` / ``max_score`` are the extremes, so the spread
+    (``latency_spread_ms`` / ``score_spread``) says how much a case
+    wobbled even when its mean looks steady — a case whose mean
+    latency is fine but whose max is ten times its min is one slow
+    run away from tripping its budget, and a case whose score spread
+    is wide is answering inconsistently even if it passed every
+    time. ``timeouts`` counts the runs in which the case timed out.
     ``tags`` is the case's tag list, carried so the stability report
     can break pass rates down per tag. ``threshold`` is the case's
     pass threshold (``None`` when the case carries none, meaning a
@@ -208,6 +220,10 @@ class CaseStability:
     passes: int
     mean_latency_ms: float
     mean_score: float
+    min_latency_ms: Optional[float] = None
+    max_latency_ms: Optional[float] = None
+    min_score: Optional[float] = None
+    max_score: Optional[float] = None
     timeouts: int = 0
     tags: list = field(default_factory=list)
     threshold: Optional[float] = None
@@ -219,6 +235,23 @@ class CaseStability:
     @property
     def pass_rate(self) -> float:
         return (self.passes / self.runs) if self.runs else 0.0
+
+    @property
+    def latency_spread_ms(self) -> float:
+        """How far apart the case's fastest and slowest runs were:
+        ``max_latency_ms - min_latency_ms``. 0.0 when no latency
+        was recorded (a case built without run data)."""
+        if self.min_latency_ms is None or self.max_latency_ms is None:
+            return 0.0
+        return self.max_latency_ms - self.min_latency_ms
+
+    @property
+    def score_spread(self) -> float:
+        """How far apart the case's best and worst scores were:
+        ``max_score - min_score``. 0.0 when no score was recorded."""
+        if self.min_score is None or self.max_score is None:
+            return 0.0
+        return self.max_score - self.min_score
 
     @property
     def fails(self) -> int:
@@ -264,7 +297,29 @@ class CaseStability:
             "pass_rate": round(self.pass_rate, 4),
             "flaky": self.flaky,
             "mean_latency_ms": round(self.mean_latency_ms, 3),
+            "min_latency_ms": (
+                round(self.min_latency_ms, 3)
+                if self.min_latency_ms is not None
+                else None
+            ),
+            "max_latency_ms": (
+                round(self.max_latency_ms, 3)
+                if self.max_latency_ms is not None
+                else None
+            ),
+            "latency_spread_ms": round(self.latency_spread_ms, 3),
             "mean_score": round(self.mean_score, 4),
+            "min_score": (
+                round(self.min_score, 4)
+                if self.min_score is not None
+                else None
+            ),
+            "max_score": (
+                round(self.max_score, 4)
+                if self.max_score is not None
+                else None
+            ),
+            "score_spread": round(self.score_spread, 4),
             "timeouts": self.timeouts,
             "tags": list(self.tags),
             "threshold": self.threshold,
@@ -449,7 +504,11 @@ def repeat_suite(
         aggregate[case.id] = {
             "passes": 0,
             "latency": 0.0,
+            "min_latency": None,
+            "max_latency": None,
             "score": 0.0,
+            "min_score": None,
+            "max_score": None,
             "timeouts": 0,
             "outputs": [],
         }
@@ -461,7 +520,27 @@ def repeat_suite(
             entry = aggregate[result.case_id]
             entry["passes"] += 1 if result.passed else 0
             entry["latency"] += result.latency_ms
+            entry["min_latency"] = (
+                result.latency_ms
+                if entry["min_latency"] is None
+                else min(entry["min_latency"], result.latency_ms)
+            )
+            entry["max_latency"] = (
+                result.latency_ms
+                if entry["max_latency"] is None
+                else max(entry["max_latency"], result.latency_ms)
+            )
             entry["score"] += result.score
+            entry["min_score"] = (
+                result.score
+                if entry["min_score"] is None
+                else min(entry["min_score"], result.score)
+            )
+            entry["max_score"] = (
+                result.score
+                if entry["max_score"] is None
+                else max(entry["max_score"], result.score)
+            )
             entry["timeouts"] += 1 if result.timed_out else 0
             entry["outputs"].append(result.output)
     ended = datetime.now(timezone.utc).isoformat()
@@ -484,7 +563,11 @@ def repeat_suite(
                 runs=repetitions,
                 passes=entry["passes"],
                 mean_latency_ms=entry["latency"] / repetitions,
+                min_latency_ms=entry["min_latency"],
+                max_latency_ms=entry["max_latency"],
                 mean_score=entry["score"] / repetitions,
+                min_score=entry["min_score"],
+                max_score=entry["max_score"],
                 timeouts=entry["timeouts"],
                 tags=list(by_id[case_id].tags),
                 threshold=by_id[case_id].threshold,
@@ -526,6 +609,22 @@ def _format_tag_filter(tag_filter: Optional[dict]) -> str:
     return "; ".join(parts)
 
 
+def _format_latency_range(case: CaseStability) -> str:
+    """Render a case's latency extremes as ``min-max`` in ms, e.g.
+    ``1.2-3.4`` — ``-`` when no latency was recorded."""
+    if case.min_latency_ms is None or case.max_latency_ms is None:
+        return "-"
+    return f"{case.min_latency_ms:.1f}-{case.max_latency_ms:.1f}"
+
+
+def _format_score_range(case: CaseStability) -> str:
+    """Render a case's score extremes as ``min-max``, e.g.
+    ``0.50-1.00`` — ``-`` when no score was recorded."""
+    if case.min_score is None or case.max_score is None:
+        return "-"
+    return f"{case.min_score:.2f}-{case.max_score:.2f}"
+
+
 def _format_threshold(case: CaseStability) -> str:
     """Render a case's pass threshold for the summary table, e.g.
     ``>=0.75`` — ``-`` when the case carries no threshold and a
@@ -548,8 +647,8 @@ def format_stability(report: StabilityReport) -> str:
         f"Always failing: {len(report.always_failing)}",
         "",
         f"{'case':<22} {'pass rate':<10} {'passes':<8} {'mean ms':>8}  "
-        f"{'threshold':<10} verdict",
-        "-" * 71,
+        f"{'latency ms':<13} {'score':<9} {'threshold':<10} verdict",
+        "-" * 95,
     ]
     for c in report.cases:
         if c.flaky:
@@ -561,6 +660,7 @@ def format_stability(report: StabilityReport) -> str:
         lines.append(
             f"{c.case_id:<22} {c.pass_rate * 100:>8.1f}%  "
             f"{c.passes}/{c.runs:<6} {c.mean_latency_ms:>8.1f}  "
+            f"{_format_latency_range(c):<13} {_format_score_range(c):<9} "
             f"{_format_threshold(c):<10} {verdict}"
         )
     if report.flaky_cases:
