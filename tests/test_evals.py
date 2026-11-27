@@ -1988,6 +1988,214 @@ class TestTypeTokenRatioScorer(unittest.TestCase):
             )
 
 
+class TestHapaxRatioScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        # "one two three one" — only "two" and "three" are used
+        # once: a hapax ratio of 2/4 = 0.5. The type-token ratio
+        # of the same output is 3/4, so the two measures differ.
+        ok, detail, score = score_case(
+            _case({"type": "hapax_ratio", "min": 0.4, "max": 0.6}),
+            "one two three one",
+        )
+        self.assertTrue(ok)
+        self.assertIn("hapax ratio 0.500 (2 of 4 words used once)", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        # Every word used once: a ratio of exactly 1.0.
+        ok, _, score = score_case(
+            _case({"type": "hapax_ratio", "min": 1.0, "max": 1.0}),
+            "one two three",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_min_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "hapax_ratio", "min": 0.5}),
+            "one two three",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        # "same same same" — no word used once: 0.0.
+        ok, _, score = score_case(
+            _case({"type": "hapax_ratio", "max": 0.5}),
+            "same same same",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # 0.25 of a 0.5 minimum: 0.25 / 0.5 = 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "hapax_ratio", "min": 0.5}),
+            "one two one one",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 0.5", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_repeated_words_score_low(self):
+        # 0 of 3 words used once: a ratio of 0, so no partial
+        # credit below a 0.5 minimum.
+        ok, _, score = score_case(
+            _case({"type": "hapax_ratio", "min": 0.5}),
+            "same same same",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_above_maximum_partial_credit(self):
+        # 1.0 of a 0.8 maximum: (2*0.8 - 1.0) / 0.8 = 0.75.
+        ok, detail, score = score_case(
+            _case({"type": "hapax_ratio", "max": 0.8}),
+            "one two three",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 0.8", detail)
+        self.assertAlmostEqual(score, 0.75)
+
+    def test_twice_maximum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "hapax_ratio", "max": 0.4}),
+            "one two three",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_word(self):
+        ok, _, score = score_case(
+            _case({"type": "hapax_ratio", "max": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "hapax_ratio", "max": 0}),
+            "one word here",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_scores_zero(self):
+        ok, detail, score = score_case(
+            _case({"type": "hapax_ratio", "min": 0.5}),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertIn("no words in output", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_passes_when_min_zero(self):
+        # No words: a ratio of 0 is in range when the minimum is 0,
+        # and when there is no minimum at all.
+        ok, _, score = score_case(
+            _case({"type": "hapax_ratio", "min": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "hapax_ratio", "max": 0.9}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_ignore_case_folds_before_counting(self):
+        # Without ignore_case, "The", "the", and "cat" are three
+        # different words used once each: a ratio of 1.0.
+        ok, _, score = score_case(
+            _case(
+                {"type": "hapax_ratio", "min": 0.9, "max": 1.0}
+            ),
+            "The the cat",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        # With ignore_case "The" and "the" fold to one word used
+        # twice: only "cat" is used once, a ratio of 1/3, below a
+        # 0.9 minimum, so the score is (1/3) / 0.9.
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "hapax_ratio",
+                    "min": 0.9,
+                    "max": 1.0,
+                    "ignore_case": True,
+                }
+            ),
+            "The the cat",
+        )
+        self.assertFalse(ok)
+        self.assertIn("hapax ratio 0.333 (1 of 3 words used once)", detail)
+        self.assertAlmostEqual(score, (1 / 3) / 0.9)
+
+    def test_tokenization_is_naive_about_punctuation(self):
+        # "hello," and "hello" are different tokens, each used
+        # once, so the ratio is 1.0 — same naive tokenization as
+        # word_count and unique_words.
+        ok, detail, score = score_case(
+            _case({"type": "hapax_ratio", "min": 1.0, "max": 1.0}),
+            "hello, hello",
+        )
+        self.assertTrue(ok)
+        self.assertIn("hapax ratio 1.000 (2 of 2 words used once)", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "hapax_ratio"}), "One. Two.")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "hapax_ratio", "min": 0.9, "max": 0.5}),
+                "One. Two.",
+            )
+
+    def test_non_numeric_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "hapax_ratio", "min": "high"}),
+                "One.",
+            )
+
+    def test_bool_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "hapax_ratio", "min": True}),
+                "One.",
+            )
+
+    def test_bound_outside_unit_interval_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "hapax_ratio", "min": 1.5}),
+                "One.",
+            )
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "hapax_ratio", "max": -0.1}),
+                "One.",
+            )
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "hapax_ratio",
+                        "min": 0.5,
+                        "ignore_case": "true",
+                    }
+                ),
+                "One.",
+            )
+
+
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
         ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")
