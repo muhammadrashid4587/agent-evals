@@ -15,8 +15,9 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Twenty-one scorers: exact match, substring, contains-all,
-  contains-any, not-contains, count, regex, contains-regex, JSON-schema shape, JSON-path value, JSON
+- Twenty-two scorers: exact match, substring, contains-all,
+  contains-any, not-contains, count, regex, regex-count,
+  contains-regex, JSON-schema shape, JSON-path value, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
   numeric range, numeric tolerance, and a judge scorer that scores
@@ -101,6 +102,7 @@ detail; the run continues with the remaining cases.
 | `not_contains` | `{"substrings": ["as an AI", "sorry"]}` | output contains none of the listed substrings (empty list passes; optional `"ignore_case": true`) |
 | `count` | `{"substring": "step", "min": 2, "max": 3}` | output contains the substring a bounded number of times (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match) |
+| `regex_count` | `{"pattern": "\\d+", "min": 2, "max": 3}` | the regex matches a bounded number of times (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `contains_regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match; a non-string `pattern` is a scorer error) |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
@@ -256,6 +258,29 @@ one, a non-string one, a non-integer or negative bound, `min`
 above `max`, or neither bound given is a scorer error. It accepts
 an optional `"ignore_case": true` like the other string scorers.
 
+The `regex_count` scorer is the regex counterpart of `count`: it
+passes when a regex matches a bounded number of times — an answer
+that has to cite a date at least twice, a numbered list that has to
+have at least three items, a reply that must not repeat a
+boilerplate phrase more than once. It passes when the pattern
+matches at least `min` times and at most `max` times; at least one
+bound is required, and a missing bound is unbounded on that side,
+so `{"min": 2}` only sets a floor and `{"max": 1}` only sets a
+ceiling. Matches are counted non-overlapping (`re.finditer`
+advances past each match, so `"aa"` matches once in `"aaa"`, not
+twice), and a pattern with capturing groups still counts matches,
+not groups, so `(ab)+` matches `"abab"` once. It gives partial
+credit like `count`: below the minimum the score is `n / min` (0
+when the pattern never matches), above the maximum it falls
+linearly to 0 at twice the maximum, so an output just outside the
+range still earns most of its weight and one wildly outside earns
+nothing; a maximum of 0 gives no partial credit above it, so any
+match scores 0.0. A missing `pattern`, a non-string one, an
+invalid regex, a non-integer or negative bound, `min` above
+`max`, or neither bound given is a scorer error. It accepts an
+optional `"ignore_case": true`, matching with `re.IGNORECASE` like
+`regex` and `contains_regex`.
+
 The `length` scorer is for output that must be a certain size — a
 summary that has to fit in a tweet, an answer that has to be at least
 a paragraph, a code snippet that must not ramble. It passes when the
@@ -311,7 +336,7 @@ error too. It is all-or-nothing: 1.0 on a match, 0.0 otherwise.
 
 The `exact` scorer and the eight string scorers — `contains`, `contains_all`,
 `contains_any`, `not_contains`, `count`, `starts_with`, `ends_with`, `one_of` — and the
-`fuzzy`, `levenshtein`, `regex`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
+`fuzzy`, `levenshtein`, `regex`, `regex_count`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
 in the spec, e.g.
 `{"type": "exact", "expected": "Hello", "ignore_case": true}`.
 When set, the expected strings and the output are case-folded
@@ -1665,3 +1690,15 @@ make demo    # run both example suites through the CLI
   `substring`, a non-integer or negative bound, `min` above `max`,
   or neither bound given rejected as a scorer error.~~ (done in
   v0.54.0)
+- ~~`regex_count` scorer: `regex_count` passes when a regex matches
+  a bounded number of times — `{"type": "regex_count",
+  "pattern": "\\d+", "min": 2, "max": 3}` — with at least one
+  of `min`/`max` required, non-overlapping matches counted with
+  `re.finditer` (a pattern with capturing groups counts matches,
+  not groups), partial credit like `count` (below the minimum the
+  score is `n / min`, above the maximum it falls linearly to 0 at
+  twice the maximum), a maximum of 0 forbidding any match, an
+  optional `"ignore_case": true` matching with `re.IGNORECASE`,
+  and a missing or non-string `pattern`, an invalid regex, a
+  non-integer or negative bound, `min` above `max`, or neither
+  bound given rejected as a scorer error.~~ (done in v0.55.0)

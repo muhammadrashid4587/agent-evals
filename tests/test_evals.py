@@ -404,6 +404,186 @@ class TestCountScorer(unittest.TestCase):
             )
 
 
+class TestRegexCountScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "regex_count",
+                    "pattern": r"\d+",
+                    "min": 2,
+                    "max": 3,
+                }
+            ),
+            "item 1, item 2",
+        )
+        self.assertTrue(ok)
+        self.assertIn(r"pattern '\\d+' matched 2 time(s)", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        ok, _, score = score_case(
+            _case({"type": "regex_count", "pattern": r"x", "min": 2, "max": 2}),
+            "x x",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_min_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "regex_count", "pattern": r"\d+", "min": 3}),
+            "1 2 3 4 5",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "regex_count", "pattern": r"\bTODO\b", "max": 1}),
+            "TODO: fix this",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # 1 of a 2 minimum: score falls linearly to 0 at 0 matches.
+        ok, detail, score = score_case(
+            _case({"type": "regex_count", "pattern": r"\d+", "min": 2}),
+            "only 1 here",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 2", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_zero_matches_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "regex_count", "pattern": r"\d+", "min": 2}),
+            "nothing here",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_above_maximum_partial_credit(self):
+        # 3 of a 2 maximum: halfway to 2x the max, so score 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "regex_count", "pattern": r"x", "max": 2}),
+            "x x x",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 2", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_twice_maximum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "regex_count", "pattern": r"x", "max": 2}),
+            "x x x x",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_match(self):
+        ok, _, score = score_case(
+            _case({"type": "regex_count", "pattern": r"x", "max": 0}),
+            "clean output",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "regex_count", "pattern": r"x", "max": 0}),
+            "one x here",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_non_overlapping_matches(self):
+        # "aaa" matches "aa" once non-overlapping, not twice.
+        ok, _, score = score_case(
+            _case({"type": "regex_count", "pattern": "aa", "min": 2}),
+            "aaa",
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_capturing_groups_count_matches_not_groups(self):
+        # "(ab)+" matches "abab" once and "ab" once: 2 matches, not 4 groups.
+        ok, _, score = score_case(
+            _case({"type": "regex_count", "pattern": r"(ab)+", "min": 2, "max": 2}),
+            "abab ab",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_ignore_case(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "regex_count",
+                    "pattern": r"step",
+                    "min": 2,
+                    "ignore_case": True,
+                }
+            ),
+            "STEP one, step two",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_missing_pattern_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "regex_count", "min": 1}), "hello")
+
+    def test_non_string_pattern_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "regex_count", "pattern": 42, "min": 1}), "hello"
+            )
+
+    def test_invalid_regex_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "regex_count", "pattern": r"([", "min": 1}), "hello"
+            )
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "regex_count", "pattern": r"x"}), "x x")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "regex_count", "pattern": r"x", "min": 3, "max": 1}
+                ),
+                "x x",
+            )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "regex_count", "pattern": r"x", "min": -1}), "x"
+            )
+
+    def test_non_integer_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "regex_count", "pattern": r"x", "min": 1.5}), "x"
+            )
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "regex_count",
+                        "pattern": r"x",
+                        "min": 1,
+                        "ignore_case": "yes",
+                    }
+                ),
+                "x",
+            )
+
+
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
         ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")

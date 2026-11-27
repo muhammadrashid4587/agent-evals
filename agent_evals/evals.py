@@ -1005,6 +1005,62 @@ def score_contains_regex(output: str, pattern: Any, ignore_case: bool = False) -
     return ok, detail, 1.0 if ok else 0.0
 
 
+def score_regex_count(
+    output: str,
+    pattern: str,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+    ignore_case: bool = False,
+) -> tuple:
+    """Pass when a regex matches a bounded number of times.
+
+    The regex counterpart of ``score_count``: an answer that must
+    cite a date at least twice, a list that must have at least three
+    numbered items, a reply that must not repeat a boilerplate
+    phrase more than once. Matches are counted non-overlapping
+    (``re.finditer`` advances past each match, so ``"aa"`` matches
+    once in ``"aaa"``, not twice), and a pattern with capturing
+    groups still counts matches, not groups. At least one bound is
+    required, and a missing bound is unbounded on that side, so
+    ``{\"min\": 2}`` only sets a floor and ``{\"max\": 1}`` only sets
+    a ceiling. Partial credit mirrors ``count``: below the minimum
+    the score is ``n / min`` (0 when the pattern never matches),
+    above the maximum it falls linearly to 0 at twice the maximum,
+    so an output just outside the range still earns most of its
+    weight and one wildly outside earns nothing. A maximum of 0
+    gives no partial credit above it: any match scores 0.0. The
+    ``pattern`` must be a string and a valid regex — a non-string
+    pattern or an invalid regex is a scorer error, like
+    ``contains_regex``. With ``ignore_case``, the match is
+    case-insensitive (``re.IGNORECASE``); the detail still names
+    the pattern as written in the spec.
+    """
+    flags = re.IGNORECASE if ignore_case else 0
+    try:
+        compiled = re.compile(pattern, flags)
+    except re.error as exc:
+        raise ValueError(f"invalid regex {pattern!r}: {exc}") from exc
+    n = sum(1 for _ in compiled.finditer(output))
+    if minimum is not None and n < minimum:
+        score = n / minimum if minimum else 0.0
+        return (
+            False,
+            f"pattern {pattern!r} matched {n} time(s), below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and n > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - n) / maximum)
+        return (
+            False,
+            f"pattern {pattern!r} matched {n} time(s), above maximum {maximum}",
+            score,
+        )
+    return True, f"pattern {pattern!r} matched {n} time(s)", 1.0
+
+
 def _check_shape(value: Any, schema: Any, path: str = "$") -> Optional[str]:
     """Return the first shape mismatch as a string, or None if it matches.
 
@@ -1527,16 +1583,17 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     """Score one case's output. Returns (passed, detail, score) where
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
     when the scorer gives partial credit (see ``score_contains_all``,
-    ``score_not_contains``, ``score_count``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
+    ``score_not_contains``, ``score_count``, ``score_regex_count``,
+    ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``count``, ``starts_with``,
     ``ends_with``, ``one_of``) and the ``exact``, ``fuzzy``,
-    ``levenshtein``, ``regex``, and
-    ``contains_regex`` scorers accept an optional
+    ``levenshtein``, ``regex``,
+    ``contains_regex``, and ``regex_count`` scorers accept an optional
     ``"ignore_case": true`` in the spec:
     both the expected strings and the output are case-folded before
-    comparing (``regex`` and ``contains_regex`` match with
+    comparing (``regex``, ``contains_regex``, and ``regex_count`` match with
     ``re.IGNORECASE``), so
     ``"Hello"`` matches ``"hello"``; scores and partial credit are
     unchanged, and a non-boolean value is a scorer error."""
@@ -1610,6 +1667,33 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
         return score_contains_regex(
             output,
             spec["pattern"],
+            _as_bool_option(spec, "ignore_case", kind),
+        )
+    if kind == "regex_count":
+        if "pattern" not in spec:
+            raise ValueError("regex_count scorer requires a 'pattern' value")
+        pattern = spec["pattern"]
+        if not isinstance(pattern, str):
+            raise ValueError(
+                "regex_count scorer requires a string 'pattern', "
+                f"got {type(pattern).__name__}"
+            )
+        minimum = _as_length_bound(spec, "min", kind)
+        maximum = _as_length_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "regex_count scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "regex_count scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_regex_count(
+            output,
+            pattern,
+            minimum,
+            maximum,
             _as_bool_option(spec, "ignore_case", kind),
         )
     if kind == "json_schema":
