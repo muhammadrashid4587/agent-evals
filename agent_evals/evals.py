@@ -1213,6 +1213,124 @@ def score_sentence_count(
     return True, f"sentence count {n}", 1.0
 
 
+def _as_density_bound(spec: dict, key: str, kind: str) -> Optional[float]:
+    """Read an optional keyword-density bound from a scorer spec.
+
+    A bound must be a real number in [0, 1]: ``True``/``False`` are
+    rejected (``bool`` is a subclass of ``int``), and a string, NaN,
+    infinity, or a value below 0 or above 1 is a scorer error — a
+    density is a fraction of the output's words, so it can never
+    fall outside [0, 1]. Absent means no bound on that side.
+    """
+    if key not in spec or spec[key] is None:
+        return None
+    value = spec[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"{kind} scorer requires {key!r} to be a number in [0, 1]"
+        )
+    value = float(value)
+    if not math.isfinite(value) or value < 0.0 or value > 1.0:
+        raise ValueError(
+            f"{kind} scorer requires {key!r} to be a number in [0, 1], "
+            f"got {value!r}"
+        )
+    return value
+
+
+def _as_keyword_list(spec: dict, kind: str) -> list:
+    """Read a scorer spec's ``keywords`` value as a list of strings.
+
+    The list must be present, non-empty, and hold only single
+    whitespace-free words: an empty list would make every density
+    0, and a keyword with a space in it could never match a
+    whitespace-split word, so both are scorer errors instead of
+    silently passing or failing.
+    """
+    keywords = spec.get("keywords")
+    if not isinstance(keywords, list) or not keywords:
+        raise ValueError(
+            f"{kind} scorer requires a non-empty 'keywords' list"
+        )
+    for keyword in keywords:
+        if not isinstance(keyword, str) or keyword.split() != [keyword]:
+            raise ValueError(
+                f"{kind} scorer requires 'keywords' to be non-empty "
+                f"single words, got {keyword!r}"
+            )
+    return keywords
+
+
+def score_keyword_density(
+    output: str,
+    keywords: list,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+    ignore_case: bool = False,
+) -> tuple:
+    """Pass when the output's keyword density falls in ``[min, max]``.
+
+    The density counterpart of ``score_word_count``: an answer that
+    has to name a term in about one word in ten, a summary that must
+    not stuff a keyword, a reply that must stay on topic without
+    repeating the same word. Density is keyword occurrences divided
+    by total words, where words are the whitespace-separated tokens
+    of the stripped output (the same word count ``length`` uses with
+    ``"unit": "words"``) and an occurrence is a token that equals one
+    of the keywords exactly, so ``"step,"`` is not ``"step"`` and
+    ``"stepping"`` is not ``"step"``. At least one bound is required,
+    and a missing bound is unbounded on that side, so ``{"min":
+    0.02}`` only sets a floor and ``{"max": 0.10}`` only sets a
+    ceiling. Partial credit mirrors ``count``: below the minimum the
+    score is ``density / min`` (0 when no keyword appears), above
+    the maximum it falls linearly to 0 at twice the maximum, so an
+    output just outside the range still earns most of its weight and
+    one wildly outside earns nothing. A maximum of 0 gives no
+    partial credit above it: any keyword occurrence scores 0.0. An
+    output with no words has no density to measure: it scores 0.0
+    unless the minimum is 0 (or there is no minimum), in which case
+    a density of 0 is in range and it passes. With ``ignore_case``,
+    keywords and words are case-folded before comparing, so
+    ``"Step"`` matches ``"step"``; the detail still names the
+    density, not the folded words.
+    """
+    words = output.strip().split()
+    total = len(words)
+    if total == 0:
+        if minimum is not None and minimum > 0:
+            return False, "no words in output", 0.0
+        return True, "keyword density 0.000 (0 of 0 words)", 1.0
+    folded_keywords = {_fold(keyword, ignore_case) for keyword in keywords}
+    hits = sum(
+        1 for word in words if _fold(word, ignore_case) in folded_keywords
+    )
+    density = hits / total
+    if minimum is not None and density < minimum:
+        score = density / minimum
+        return (
+            False,
+            f"keyword density {density:.3f} ({hits} of {total} words), "
+            f"below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and density > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - density) / maximum)
+        return (
+            False,
+            f"keyword density {density:.3f} ({hits} of {total} words), "
+            f"above maximum {maximum}",
+            score,
+        )
+    return (
+        True,
+        f"keyword density {density:.3f} ({hits} of {total} words)",
+        1.0,
+    )
+
+
 def _check_shape(value: Any, schema: Any, path: str = "$") -> Optional[str]:
     """Return the first shape mismatch as a string, or None if it matches.
 
@@ -1737,14 +1855,15 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     when the scorer gives partial credit (see ``score_contains_all``,
     ``score_not_contains``, ``score_count``, ``score_regex_count``,
     ``score_word_count``, ``score_unique_words``,
-    ``score_sentence_count``,
+    ``score_sentence_count``, ``score_keyword_density``,
     ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``count``, ``starts_with``,
     ``ends_with``, ``one_of``) and the ``exact``, ``fuzzy``,
     ``levenshtein``, ``regex``,
-    ``contains_regex``, ``regex_count``, and ``unique_words`` scorers accept an optional
+    ``contains_regex``, ``regex_count``, ``unique_words``, and
+    ``keyword_density`` scorers accept an optional
     ``"ignore_case": true`` in the spec:
     both the expected strings and the output are case-folded before
     comparing (``regex``, ``contains_regex``, and ``regex_count`` match with
@@ -1894,6 +2013,26 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
                 f"got {minimum} > {maximum}"
             )
         return score_sentence_count(output, minimum, maximum)
+    if kind == "keyword_density":
+        keywords = _as_keyword_list(spec, kind)
+        minimum = _as_density_bound(spec, "min", kind)
+        maximum = _as_density_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "keyword_density scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "keyword_density scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_keyword_density(
+            output,
+            keywords,
+            minimum,
+            maximum,
+            _as_bool_option(spec, "ignore_case", kind),
+        )
     if kind == "json_schema":
         return score_json_schema(output, spec["schema"])
     if kind == "json_path":

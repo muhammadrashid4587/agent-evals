@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Twenty-five scorers: exact match, substring, contains-all,
-  contains-any, not-contains, count, word count, unique words, sentence count, regex, regex-count,
+- Twenty-six scorers: exact match, substring, contains-all,
+  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
@@ -106,6 +106,7 @@ detail; the run continues with the remaining cases.
 | `word_count` | `{"min": 10, "max": 50}` | the output has a bounded number of words (at least one of `min`/`max` required) |
 | `unique_words` | `{"min": 5, "max": 20}` | the output has a bounded number of distinct words (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `sentence_count` | `{"min": 2, "max": 5}` | the output has a bounded number of sentences (at least one of `min`/`max` required) |
+| `keyword_density` | `{"keywords": ["step", "verify"], "min": 0.02, "max": 0.10}` | the output's keyword density (keyword occurrences / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `contains_regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match; a non-string `pattern` is a scorer error) |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
@@ -341,6 +342,36 @@ so there is no `"ignore_case"` option. A non-integer or negative
 bound, `min` above `max`, or neither bound given is a scorer
 error.
 
+The `keyword_density` scorer is the density counterpart of
+`word_count`: it passes when the output's keyword density falls in
+`[min, max]` — an answer that has to name a term in about one word
+in ten, a summary that must not stuff a keyword, a reply that must
+stay on topic without repeating the same word. Density is keyword
+occurrences divided by total words, where words are the
+whitespace-separated tokens of the stripped output, the same word
+count `length` uses with `"unit": "words"`, and an occurrence is a
+token that equals one of the keywords exactly, so `"step,"` is not
+`"step"` and `"stepping"` is not `"step"`. It passes when the
+density falls in `[min, max]`; at least one bound is required, and
+a missing bound is unbounded on that side, so `{"min": 0.02}` only
+sets a floor and `{"max": 0.10}` only sets a ceiling, and bounds
+must lie in [0, 1] because a density is a fraction of the output's
+words. It gives partial credit like `count`: below the minimum the
+score is `density / min` (0 when no keyword appears), above the
+maximum it falls linearly to 0 at twice the maximum, so an output
+just outside the range still earns most of its weight and one
+wildly outside earns nothing; a maximum of 0 gives no partial
+credit above it, so any keyword occurrence scores 0.0. An output
+with no words has no density to measure: it scores 0.0 unless the
+minimum is 0 (or there is no minimum), in which case a density of
+0 is in range and it passes. It accepts an optional
+`"ignore_case": true`, which case-folds words and keywords before
+comparing, so `"Step"` matches `"step"`. An empty or missing
+`keywords` list, a non-string or multi-word keyword, a
+non-numeric bound, a bound outside [0, 1], `min` above `max`, or
+neither bound given is a scorer error, and a non-boolean
+`ignore_case` is one too.
+
 The `length` scorer is for output that must be a certain size — a
 summary that has to fit in a tweet, an answer that has to be at least
 a paragraph, a code snippet that must not ramble. It passes when the
@@ -396,7 +427,7 @@ error too. It is all-or-nothing: 1.0 on a match, 0.0 otherwise.
 
 The `exact` scorer and the eight string scorers — `contains`, `contains_all`,
 `contains_any`, `not_contains`, `count`, `starts_with`, `ends_with`, `one_of` — and the
-`fuzzy`, `levenshtein`, `regex`, `regex_count`, `unique_words`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
+`fuzzy`, `levenshtein`, `regex`, `regex_count`, `unique_words`, `keyword_density`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
 in the spec, e.g.
 `{"type": "exact", "expected": "Hello", "ignore_case": true}`.
 When set, the expected strings and the output are case-folded
@@ -1800,3 +1831,29 @@ make demo    # run both example suites through the CLI
   counting sentences, so there is no `ignore_case` option, and
   the split is deliberately naive about abbreviations.~~ (done in
   v0.57.0)
+- ~~`keyword_density` scorer: `keyword_density` passes when the
+  output's keyword density falls in `[min, max]` — `{"type":
+  "keyword_density", "keywords": ["step", "verify"], "min": 0.02,
+  "max": 0.10}` — with density as keyword occurrences divided by
+  total words, words counted as the whitespace-separated tokens of
+  the stripped output (the same word count `length` uses with
+  `"unit": "words"`) and an occurrence a token that equals one of
+  the keywords exactly (so `"step,"` and `"stepping"` are not
+  `"step"`), at least one of `min`/`max` required, bounds in [0,
+  1], partial credit like `count` (below the minimum the score is
+  `density / min`, above the maximum it falls linearly to 0 at
+  twice the maximum), a maximum of 0 forbidding any keyword
+  occurrence, an output with no words scoring 0.0 unless the
+  minimum is 0, an optional `"ignore_case": true` that case-folds
+  words and keywords before comparing, and an empty or missing
+  `keywords` list, a non-string or multi-word keyword, a
+  non-numeric bound, a bound outside [0, 1], `min` above `max`, or
+  neither bound given rejected as a scorer error.~~ (done in
+  v0.58.0)
+- `avg_sentence_length` scorer: `avg_sentence_length` passes when
+  the output's average words per sentence falls in `[min, max]` —
+  `{"type": "avg_sentence_length", "min": 8, "max": 25}` — with
+  sentences split like `sentence_count` and words counted like
+  `word_count`, partial credit like `count`, and a non-integer or
+  negative bound, `min` above `max`, or neither bound given
+  rejected as a scorer error.

@@ -1034,6 +1034,377 @@ class TestSentenceCountScorer(unittest.TestCase):
             )
 
 
+class TestKeywordDensityScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        # 4 keyword hits in 8 words: density 0.5.
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step", "verify"],
+                    "min": 0.4,
+                    "max": 0.6,
+                }
+            ),
+            "step one step two verify three step four",
+        )
+        self.assertTrue(ok)
+        self.assertIn("keyword density 0.500 (4 of 8 words)", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        # 1 hit in 10 words: density exactly 0.1.
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "min": 0.1,
+                    "max": 0.1,
+                }
+            ),
+            "step one two three four five six seven eight nine",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_min_only_passes(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "min": 0.2,
+                }
+            ),
+            "step one step two",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "max": 0.1,
+                }
+            ),
+            "step one two three four five six seven eight nine ten "
+            "eleven twelve thirteen fourteen fifteen sixteen "
+            "seventeen eighteen nineteen",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # Density 0.05 of a 0.10 minimum: halfway to the floor.
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "min": 0.1,
+                }
+            ),
+            "step one two three four five six seven eight nine ten "
+            "eleven twelve thirteen fourteen fifteen sixteen "
+            "seventeen eighteen nineteen",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 0.1", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_zero_hits_scores_zero(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "min": 0.05,
+                }
+            ),
+            "one two three four",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_above_maximum_partial_credit(self):
+        # Density 0.30 of a 0.20 maximum: halfway to 2x the max.
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "max": 0.2,
+                }
+            ),
+            "step step step one two three four five six seven",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 0.2", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_twice_maximum_scores_zero(self):
+        # Density 0.40 of a 0.20 maximum: at 2x the max.
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "max": 0.2,
+                }
+            ),
+            "step step step step one two three four five six",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_keyword(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "max": 0,
+                }
+            ),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "max": 0,
+                }
+            ),
+            "step one",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_scores_zero_unless_min_is_zero(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "min": 0.05,
+                }
+            ),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "min": 0,
+                }
+            ),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_ignore_case_matches(self):
+        # "Step" and "STEP" are 2 of 4 words with ignore_case.
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "min": 0.5,
+                    "max": 0.5,
+                    "ignore_case": True,
+                }
+            ),
+            "Step one STEP two",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        # Without it, neither capitalised token matches.
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "min": 0.5,
+                }
+            ),
+            "Step one STEP two",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_punctuation_and_substrings_do_not_count(self):
+        # "step," and "stepping" are not the keyword "step".
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_density",
+                    "keywords": ["step"],
+                    "min": 0.1,
+                }
+            ),
+            "step, stepping along",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_missing_keywords_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "keyword_density", "min": 0.1}),
+                "step one",
+            )
+
+    def test_empty_keywords_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "keyword_density",
+                        "keywords": [],
+                        "min": 0.1,
+                    }
+                ),
+                "step one",
+            )
+
+    def test_non_string_keyword_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "keyword_density",
+                        "keywords": ["step", 7],
+                        "min": 0.1,
+                    }
+                ),
+                "step one",
+            )
+
+    def test_empty_string_keyword_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "keyword_density",
+                        "keywords": [""],
+                        "min": 0.1,
+                    }
+                ),
+                "step one",
+            )
+
+    def test_multiword_keyword_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "keyword_density",
+                        "keywords": ["step by step"],
+                        "min": 0.1,
+                    }
+                ),
+                "step by step",
+            )
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "keyword_density", "keywords": ["step"]}),
+                "step one",
+            )
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "keyword_density",
+                        "keywords": ["step"],
+                        "min": 0.5,
+                        "max": 0.1,
+                    }
+                ),
+                "step one",
+            )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "keyword_density",
+                        "keywords": ["step"],
+                        "min": -0.1,
+                    }
+                ),
+                "step one",
+            )
+
+    def test_bound_above_one_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "keyword_density",
+                        "keywords": ["step"],
+                        "max": 1.5,
+                    }
+                ),
+                "step one",
+            )
+
+    def test_non_numeric_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "keyword_density",
+                        "keywords": ["step"],
+                        "min": "0.1",
+                    }
+                ),
+                "step one",
+            )
+
+    def test_nan_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "keyword_density",
+                        "keywords": ["step"],
+                        "min": float("nan"),
+                    }
+                ),
+                "step one",
+            )
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "keyword_density",
+                        "keywords": ["step"],
+                        "min": 0.1,
+                        "ignore_case": "yes",
+                    }
+                ),
+                "step one",
+            )
+
+
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
         ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")
