@@ -36,7 +36,9 @@ below its threshold — and the report carries the threshold per
 case, so the reason is visible instead of a bare fail. The report
 also captures each case's actual output — a bounded excerpt of the
 last run, plus the distinct outputs seen across repetitions — so a
-flaky or changed case can be inspected without re-running it.
+``--fail-on-output-change`` (with ``--repeat``) turns that into a
+gate: the run fails when a case produced more than one distinct
+output across the repetitions, even when it passed every time.
 """
 
 from __future__ import annotations
@@ -143,7 +145,12 @@ class CaseStability:
     is how many distinct outputs there were in total, so a cap
     that dropped some is visible. A flaky case's distinct outputs
     are the answers that flipped it, so the case can be inspected
-    without re-running the suite. Excerpts are redacted for
+    without re-running the suite. ``output_changed`` is true when
+    more than one distinct output was seen
+    (``distinct_output_count > 1``), whatever the verdict: a case
+    that passed every run can still have changed its output, and
+    that is what the ``--fail-on-output-change`` gate checks.
+    Excerpts are redacted for
     secret-shaped text and truncated to
     ``OUTPUT_EXCERPT_MAX_CHARS`` characters (see
     ``_output_excerpt``).
@@ -184,6 +191,22 @@ class CaseStability:
             self.threshold is not None and self.mean_score < self.threshold
         )
 
+    @property
+    def output_changed(self) -> bool:
+        """True when the case answered differently across the
+        repetitions: more than one distinct output excerpt was
+        seen (``distinct_output_count > 1``). The verdict can be
+        stable while the output drifts — a lenient scorer passes
+        different answers — so this is a separate signal from
+        ``flaky``: a case that passed every run can still have
+        changed its output, and a case that failed every run with
+        the same answer has not. Distinctness is on the redacted,
+        truncated excerpts the report keeps, not the raw outputs,
+        so two raw outputs that redact to the same excerpt count
+        as one answer. With a single repetition there is only one
+        output, so this is never true."""
+        return self.distinct_output_count > 1
+
     def to_dict(self) -> dict:
         return {
             "case_id": self.case_id,
@@ -201,6 +224,7 @@ class CaseStability:
             "output": self.output,
             "distinct_outputs": list(self.distinct_outputs),
             "distinct_output_count": self.distinct_output_count,
+            "output_changed": self.output_changed,
         }
 
 
@@ -224,6 +248,10 @@ class StabilityReport:
     @property
     def flaky_cases(self) -> list:
         return [c for c in self.cases if c.flaky]
+
+    @property
+    def output_changed_cases(self) -> list:
+        return [c for c in self.cases if c.output_changed]
 
     @property
     def always_passing(self) -> list:
@@ -293,6 +321,9 @@ class StabilityReport:
             "ended_at": self.ended_at,
             "tag_filter": self.tag_filter,
             "flaky": [c.case_id for c in self.flaky_cases],
+            "output_changed": [
+                c.case_id for c in self.output_changed_cases
+            ],
             "always_passing": [c.case_id for c in self.always_passing],
             "always_failing": [c.case_id for c in self.always_failing],
             "tag_breakdown": {
@@ -514,10 +545,35 @@ def format_stability(report: StabilityReport) -> str:
             "the scorer: their mean score does not reach the bar "
             "the case has to clear.",
         ]
+    changed = report.output_changed_cases
+    if changed:
+        # A case that passes on a lenient scorer can still answer
+        # differently every run: the verdict is stable, the output
+        # is not. Name those cases, with how many distinct answers
+        # each gave, so output drift is visible even when nothing
+        # was flaky. The distinct answers themselves are listed
+        # in the "Case outputs" section below.
+        lines += [
+            "",
+            f"Output changed across repetitions ({len(changed)}):",
+        ]
+        for c in changed:
+            lines.append(
+                f"  {c.case_id}  {c.distinct_output_count} distinct "
+                f"outputs across {c.runs} runs"
+            )
+        lines += [
+            "",
+            "These cases answered differently across repetitions, "
+            "even when they passed every time: the verdict is "
+            "reproducible, the output is not. Check the agent for "
+            "nondeterminism, or the case for a scorer too lenient "
+            "to notice the drift.",
+        ]
     # Every case's last-run output, so a flaky or changed case can
-    # be inspected without re-running the suite. A flaky case with
-    # more than one distinct answer lists the other answers too —
-    # those are the outputs that flipped it. Excerpts are bounded
+    # be inspected without re-running the suite. A case whose
+    # output changed lists the other answers it gave too — those
+    # are the outputs that drifted. Excerpts are bounded
     # (see _output_excerpt); the JSON report carries the same
     # excerpts plus the full distinct-output list.
     lines += ["", "Case outputs (last run):"]
@@ -526,7 +582,7 @@ def format_stability(report: StabilityReport) -> str:
             lines.append(f"  {c.case_id}: (no output)")
         else:
             lines.append(f"  {c.case_id}: {c.output!r}")
-        if c.flaky and len(c.distinct_outputs) > 1:
+        if c.output_changed and len(c.distinct_outputs) > 1:
             for other in c.distinct_outputs:
                 if other != c.output:
                     lines.append(f"    also saw: {other!r}")

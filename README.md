@@ -32,7 +32,9 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
   the run when a case passes its checks but scores below 0.9, so a
   partial-credit pass can gate CI too). With `--repeat N` it
   runs the suite N times and flags flaky cases that pass sometimes
-  and fail other times. With `--junit results.xml` it also writes the
+  and fail other times, and `--repeat N --fail-on-output-change`
+  fails the run when a case's answer changed across the repetitions,
+  even one that passed every time. With `--junit results.xml` it also writes the
   run as JUnit XML, so CI systems can ingest the results.
 
 ## What it is not
@@ -1074,6 +1076,36 @@ replaced with `[REDACTED]`. That is a shape check, not a
 guarantee — a secret in an unusual shape still lands in the
 report — so do not put real secrets in prompts you eval, and
 treat stability reports as potentially containing agent output.
+
+Pass `--repeat N --fail-on-output-change` to fail the run when a
+case's output changed across the repetitions, even when it passed
+every time:
+
+```bash
+python -m agent_evals.cli --suite examples/calculator.json \
+    --agent examples.calculator_agent:agent --repeat 5 \
+    --fail-on-output-change
+```
+
+A case trips the gate when it produced more than one distinct
+output across the repetitions (`"distinct_output_count" > 1` in
+the JSON report — `"output_changed"` per case, and an
+`"output_changed"` list of case ids on the report), whatever its
+verdict: a case that failed every run with a different wrong answer
+each time changed its output too. The gate only changes the exit
+code when the run would otherwise pass — a flaky or always-failing
+case already fails it — so in practice it bites when a case passed
+every time but answered differently, which a lenient scorer
+(`contains`, `fuzzy`, a judge) would otherwise let through: the
+verdict is reproducible, the output is not. Distinctness is on the
+redacted, truncated excerpts the report keeps, not the raw outputs,
+so two raw outputs that redact to the same excerpt count as one
+answer. With one repetition a case has only one output, so the flag
+requires `--repeat N` with N > 1 and is a CLI error without it.
+The text summary lists the changed cases with their distinct-output
+counts in an `Output changed across repetitions:` section, and the
+`Case outputs` section lists the other answers a changed case gave
+under `also saw:`.
 
 ### Flaky-case history across stability reports
 

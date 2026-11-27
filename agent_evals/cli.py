@@ -20,7 +20,11 @@ scores below 0.9, so a partial-credit pass can still fail the run.
 ``--workers N`` runs cases concurrently on a thread pool (default 1); the agent must be
 thread-safe for more than 1. ``--repeat N`` runs the whole suite N
 times and reports per-case pass rates, flagging flaky cases; the run
-only passes when every case passed every time. Cases with a ``judge``
+only passes when every case passed every time.
+``--fail-on-output-change`` (with ``--repeat``) exits 1 when a
+case's output changed across the repetitions — more than one
+distinct output seen — even when the case passed every time, so
+output drift a lenient scorer would otherwise hide fails the run. Cases with a ``judge``
 scorer use the built-in deterministic ``stub`` judge unless a judge is
 registered: ``--judge module:attribute`` registers a judge callable
 under the name ``"custom"``, and ``--judge-url URL`` registers an HTTP
@@ -120,6 +124,15 @@ def main(argv=None) -> int:
         "passed cases scoring below the bar",
     )
     parser.add_argument(
+        "--fail-on-output-change",
+        action="store_true",
+        help="exit 1 when a case's output changed across repetitions "
+        "(more than one distinct output seen; requires --repeat N "
+        "with N > 1) — a case that passes every time on a lenient "
+        "scorer can still answer differently each run, and this "
+        "gate catches that drift",
+    )
+    parser.add_argument(
         "--repeat",
         type=int,
         default=1,
@@ -186,6 +199,13 @@ def main(argv=None) -> int:
         # The chained comparison also rejects NaN and infinity: no
         # comparison with them is true.
         parser.error("--fail-on-score must be in [0, 1]")
+    if args.fail_on_output_change and args.repeat <= 1:
+        # A single repetition gives each case one output, so
+        # nothing can change; silently ignoring the flag would let
+        # a CI step believe it is gated when it is not.
+        parser.error(
+            "--fail-on-output-change requires --repeat N with N > 1"
+        )
 
     loaded = load_suite(args.suite)
     suite = loaded
@@ -256,7 +276,33 @@ def main(argv=None) -> int:
             stability.save(args.report)
             print(f"\nStability report written to {args.report}")
         # A repeated run only passes when every case passed every time.
-        return 0 if not stability.flaky_cases and not stability.always_failing else 1
+        exit_code = (
+            0
+            if not stability.flaky_cases and not stability.always_failing
+            else 1
+        )
+        if args.fail_on_output_change and stability.output_changed_cases:
+            # The gate trips on output drift whatever the verdict:
+            # a case that failed every run with a different wrong
+            # answer each time changed its output too. In practice
+            # it only changes the exit code when the run would
+            # otherwise pass — a flaky or always-failing case
+            # already fails it — so this bites when a case passed
+            # every time but answered differently, the drift a
+            # lenient scorer would otherwise hide.
+            print(
+                f"\nOutput-change gate FAILED: "
+                f"{len(stability.output_changed_cases)} case(s) "
+                f"answered differently across repetitions: "
+                + ", ".join(
+                    f"{c.case_id} "
+                    f"({c.distinct_output_count} distinct outputs)"
+                    for c in stability.output_changed_cases
+                ),
+                file=sys.stderr,
+            )
+            exit_code = 1
+        return exit_code
     report = run_suite(suite, agent, workers=args.workers, judges=judges)
     print(format_summary(report))
     if args.report:

@@ -553,5 +553,220 @@ class TestOutputCapture(unittest.TestCase):
         self.assertIn("stable-pass: (no output)", text)
 
 
+def output_change_demo_agent(prompt):
+    """Demo agent for the output-change gate tests, loadable by the
+    CLI as ``tests.test_stability:output_change_demo_agent``:
+    alternates between '19' and 'answer: 19' on the 'drift' prompt
+    (both pass a contains-'19' scorer, so the case passes every run
+    while its output changes), and answers '19' otherwise. The
+    drift counter only counts 'drift' calls, so the two answers
+    alternate however the calls interleave with other cases."""
+    if prompt == "drift":
+        output_change_demo_agent.drift_calls["n"] += 1
+        return (
+            "19"
+            if output_change_demo_agent.drift_calls["n"] % 2
+            else "answer: 19"
+        )
+    return "19"
+
+
+output_change_demo_agent.drift_calls = {"n": 0}
+
+
+class TestOutputChangeGate(unittest.TestCase):
+    """--fail-on-output-change gate (v0.52.0).
+
+    A case trips the gate when it produced more than one distinct
+    output across the repetitions (``distinct_output_count > 1``),
+    whatever its verdict: a case that passes every run on a lenient
+    scorer can still answer differently each time, and that drift
+    is what the gate catches. Distinctness is on the redacted,
+    truncated excerpts the report keeps, not the raw outputs.
+    """
+
+    def _drifting_suite(self):
+        return Suite(
+            name="drift",
+            cases=[
+                # contains '19': both '19' and 'answer: 19' pass,
+                # so this case passes every run while its output
+                # changes.
+                Case(id="drifting-pass", prompt="drift",
+                     scorer={"type": "contains", "substring": "19"}),
+                Case(id="stable-pass", prompt="p",
+                     scorer={"type": "exact", "expected": "19"}),
+            ],
+        )
+
+    def _drifting_agent(self):
+        calls = {"n": 0}
+
+        def agent(prompt):
+            if prompt == "drift":
+                calls["n"] += 1
+                return "19" if calls["n"] % 2 else "answer: 19"
+            return "19"
+
+        return agent
+
+    def test_passing_case_with_changing_output(self):
+        report = repeat_suite(
+            self._drifting_suite(), self._drifting_agent(), repetitions=4
+        )
+        by_id = {c.case_id: c for c in report.cases}
+        drifting = by_id["drifting-pass"]
+        # Passes every run, so it is not flaky — but its output
+        # changed, which is exactly the drift the gate catches.
+        self.assertEqual(drifting.passes, 4)
+        self.assertFalse(drifting.flaky)
+        self.assertTrue(drifting.output_changed)
+        self.assertEqual(drifting.distinct_output_count, 2)
+        self.assertEqual(
+            drifting.distinct_outputs, ["19", "answer: 19"]
+        )
+        self.assertEqual(
+            [c.case_id for c in report.output_changed_cases],
+            ["drifting-pass"],
+        )
+        # The stable case answered the same way every run.
+        self.assertFalse(by_id["stable-pass"].output_changed)
+        self.assertEqual(by_id["stable-pass"].distinct_output_count, 1)
+
+    def test_stable_failure_has_not_changed(self):
+        # A case that fails every run with the same wrong answer is
+        # a stable failure, not output drift.
+        report = repeat_suite(
+            _suite(), lambda prompt: "20", repetitions=3
+        )
+        by_id = {c.case_id: c for c in report.cases}
+        self.assertFalse(by_id["stable-fail"].output_changed)
+        self.assertEqual(by_id["stable-fail"].distinct_output_count, 1)
+        self.assertEqual(report.output_changed_cases, [])
+
+    def test_failing_case_with_changing_output(self):
+        # A case that fails every run with a different wrong answer
+        # each time changed its output too — the property is about
+        # the output, not the verdict — even though it is not
+        # flaky (it never passed).
+        calls = {"n": 0}
+
+        def flipping(prompt):
+            calls["n"] += 1
+            return "20" if calls["n"] % 2 else "21"
+
+        report = repeat_suite(_suite(), flipping, repetitions=4)
+        by_id = {c.case_id: c for c in report.cases}
+        self.assertEqual(by_id["flaky"].passes, 0)
+        self.assertFalse(by_id["flaky"].flaky)
+        self.assertTrue(by_id["flaky"].output_changed)
+        self.assertEqual(by_id["flaky"].distinct_output_count, 2)
+
+    def test_single_repetition_never_changed(self):
+        report = repeat_suite(
+            self._drifting_suite(), self._drifting_agent(), repetitions=1
+        )
+        self.assertEqual(report.output_changed_cases, [])
+
+    def test_to_dict_carries_output_changed(self):
+        report = repeat_suite(
+            self._drifting_suite(), self._drifting_agent(), repetitions=2
+        )
+        data = report.to_dict()
+        self.assertEqual(data["output_changed"], ["drifting-pass"])
+        by_id = {c["case_id"]: c for c in data["cases"]}
+        self.assertTrue(by_id["drifting-pass"]["output_changed"])
+        self.assertFalse(by_id["stable-pass"]["output_changed"])
+
+    def test_format_stability_shows_output_changed_section(self):
+        report = repeat_suite(
+            self._drifting_suite(), self._drifting_agent(), repetitions=4
+        )
+        text = format_stability(report)
+        self.assertIn("Output changed across repetitions (1):", text)
+        self.assertIn(
+            "drifting-pass  2 distinct outputs across 4 runs", text
+        )
+        # The drifting case's last answer plus the other answer it
+        # gave: with 4 repetitions the last drift call is even, so
+        # the last output is 'answer: 19' and '19' is the also-saw.
+        self.assertIn("drifting-pass: 'answer: 19'", text)
+        self.assertIn("also saw: '19'", text)
+        # And the verdict is still a clean pass: nothing was flaky.
+        self.assertIn("Flaky: 0", text)
+
+    def test_format_stability_omits_section_without_change(self):
+        report = repeat_suite(_suite(), lambda prompt: "19", repetitions=2)
+        self.assertNotIn("Output changed", format_stability(report))
+
+    def test_cli_gate_fails_on_drifting_pass(self):
+        from agent_evals.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            report_path = os.path.join(tmp, "stability.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._drifting_suite().to_dict(), f)
+            code = main([
+                "--suite", path,
+                "--agent",
+                "tests.test_stability:output_change_demo_agent",
+                "--repeat", "2",
+                "--fail-on-output-change",
+                "--report", report_path,
+            ])
+            # The run would pass without the gate: every case
+            # passed every time, nothing was flaky.
+            self.assertEqual(code, 1)
+            with open(report_path, encoding="utf-8") as f:
+                stability = json.load(f)
+            self.assertEqual(stability["flaky"], [])
+            self.assertEqual(
+                stability["output_changed"], ["drifting-pass"]
+            )
+
+    def test_cli_gate_is_opt_in(self):
+        # The same drifting run passes without the flag: the gate
+        # is opt-in, and the base rule only fails flaky or
+        # always-failing cases.
+        from agent_evals.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._drifting_suite().to_dict(), f)
+            code = main([
+                "--suite", path,
+                "--agent",
+                "tests.test_stability:output_change_demo_agent",
+                "--repeat", "2",
+            ])
+            self.assertEqual(code, 0)
+
+    def test_cli_gate_passes_deterministic_agent(self):
+        from agent_evals.cli import main
+
+        code = main([
+            "--suite", "examples/calculator.json",
+            "--agent", "examples.calculator_agent:agent",
+            "--repeat", "2",
+            "--fail-on-output-change",
+        ])
+        self.assertEqual(code, 0)
+
+    def test_cli_gate_requires_repeat(self):
+        from agent_evals.cli import main
+
+        # With one repetition a case has only one output, so the
+        # flag is a clean CLI error instead of a silent no-op.
+        with self.assertRaises(SystemExit) as cm:
+            main([
+                "--suite", "examples/calculator.json",
+                "--agent", "examples.calculator_agent:agent",
+                "--fail-on-output-change",
+            ])
+        self.assertEqual(cm.exception.code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
