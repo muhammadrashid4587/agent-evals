@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Twenty scorers: exact match, substring, contains-all,
-  contains-any, not-contains, regex, contains-regex, JSON-schema shape, JSON-path value, JSON
+- Twenty-one scorers: exact match, substring, contains-all,
+  contains-any, not-contains, count, regex, contains-regex, JSON-schema shape, JSON-path value, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
   numeric range, numeric tolerance, and a judge scorer that scores
@@ -99,6 +99,7 @@ detail; the run continues with the remaining cases.
 | `contains_all` | `{"substrings": ["hello", "world"]}` | output contains every listed substring (empty list passes; optional `"ignore_case": true`) |
 | `contains_any` | `{"substrings": ["hello", "hi"]}` | output contains at least one listed substring (empty list fails; optional `"ignore_case": true`) |
 | `not_contains` | `{"substrings": ["as an AI", "sorry"]}` | output contains none of the listed substrings (empty list passes; optional `"ignore_case": true`) |
+| `count` | `{"substring": "step", "min": 2, "max": 3}` | output contains the substring a bounded number of times (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match) |
 | `contains_regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match; a non-string `pattern` is a scorer error) |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
@@ -236,6 +237,25 @@ are absent, so an output that slips in one of four forbidden phrases
 still earns most of its weight. An empty `substrings` list passes
 vacuously: there is nothing forbidden to find.
 
+The `count` scorer is for output that must mention something a
+bounded number of times — an answer that has to name a term at
+least twice, a list that has to have at least three items, a reply
+that must not repeat a phrase more than once. It passes when the
+output contains the `substring` at least `min` times and at most
+`max` times; at least one bound is required, and a missing bound is
+unbounded on that side, so `{"min": 2}` only sets a floor and
+`{"max": 1}` only sets a ceiling. Occurrences are counted
+non-overlapping (`str.count`), so `"aaa"` contains `"aa"` once, not
+twice. It gives partial credit like `length`: below the minimum the
+score is `n / min` (0 when the substring never appears), above the
+maximum it falls linearly to 0 at twice the maximum, so an output
+just outside the range still earns most of its weight and one wildly
+outside earns nothing; a maximum of 0 gives no partial credit above
+it, so any occurrence scores 0.0. A missing `substring`, an empty
+one, a non-string one, a non-integer or negative bound, `min`
+above `max`, or neither bound given is a scorer error. It accepts
+an optional `"ignore_case": true` like the other string scorers.
+
 The `length` scorer is for output that must be a certain size — a
 summary that has to fit in a tweet, an answer that has to be at least
 a paragraph, a code snippet that must not ramble. It passes when the
@@ -289,8 +309,8 @@ that passes a number where a pattern belongs fails loudly instead
 of matching the digits of that number. An invalid regex is a scorer
 error too. It is all-or-nothing: 1.0 on a match, 0.0 otherwise.
 
-The `exact` scorer and the seven string scorers — `contains`, `contains_all`,
-`contains_any`, `not_contains`, `starts_with`, `ends_with`, `one_of` — and the
+The `exact` scorer and the eight string scorers — `contains`, `contains_all`,
+`contains_any`, `not_contains`, `count`, `starts_with`, `ends_with`, `one_of` — and the
 `fuzzy`, `levenshtein`, `regex`, and `contains_regex` scorers all accept an optional `"ignore_case": true`
 in the spec, e.g.
 `{"type": "exact", "expected": "Hello", "ignore_case": true}`.
@@ -1634,3 +1654,14 @@ make demo    # run both example suites through the CLI
   per diff; a stable case, or one with no output, has no diffs,
   and the diffs are on the same redacted, truncated excerpts as
   the distinct outputs.~~ (done in v0.53.0)
+- ~~`count` scorer: `count` passes when the output contains a
+  substring a bounded number of times — `{"type": "count",
+  "substring": "step", "min": 2, "max": 3}` — with at least one
+  of `min`/`max` required, non-overlapping occurrences, partial
+  credit like `length` (below the minimum the score is `n / min`,
+  above the maximum it falls linearly to 0 at twice the maximum),
+  a maximum of 0 forbidding any occurrence, an optional
+  `"ignore_case": true`, and a missing, empty, or non-string
+  `substring`, a non-integer or negative bound, `min` above `max`,
+  or neither bound given rejected as a scorer error.~~ (done in
+  v0.54.0)

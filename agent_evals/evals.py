@@ -608,6 +608,55 @@ def score_not_contains(
     )
 
 
+def score_count(
+    output: str,
+    substring: str,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+    ignore_case: bool = False,
+) -> tuple:
+    """Pass when the output contains the substring a bounded number
+    of times.
+
+    The scorer for repetition: an answer that must name a term at
+    least twice, a list that must have at least three items, a reply
+    that must not repeat a phrase more than once. Occurrences are
+    counted non-overlapping (``str.count``), so ``"aaa".count("aa")``
+    is 1, not 2. At least one bound is required, and a missing bound
+    is unbounded on that side, so ``{"min": 2}`` only sets a floor
+    and ``{"max": 1}`` only sets a ceiling. Partial credit mirrors
+    ``length``: below the minimum the score is ``n / min`` (0 when
+    the substring never appears), above the maximum it falls
+    linearly to 0 at twice the maximum, so an output just outside
+    the range still earns most of its weight and one wildly outside
+    earns nothing. A maximum of 0 gives no partial credit above it:
+    any occurrence scores 0.0. With ``ignore_case``, the comparison
+    is case-insensitive; the detail still names the substring as
+    written in the spec.
+    """
+    folded = _fold(output, ignore_case)
+    needle = _fold(substring, ignore_case)
+    n = folded.count(needle)
+    if minimum is not None and n < minimum:
+        score = n / minimum if minimum else 0.0
+        return (
+            False,
+            f"found {substring!r} {n} time(s), below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and n > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - n) / maximum)
+        return (
+            False,
+            f"found {substring!r} {n} time(s), above maximum {maximum}",
+            score,
+        )
+    return True, f"found {substring!r} {n} time(s)", 1.0
+
+
 def score_starts_with(
     output: str, prefix: str, ignore_case: bool = False
 ) -> tuple:
@@ -1478,10 +1527,10 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     """Score one case's output. Returns (passed, detail, score) where
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
     when the scorer gives partial credit (see ``score_contains_all``,
-    ``score_not_contains``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
+    ``score_not_contains``, ``score_count``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
-    ``contains_any``, ``not_contains``, ``starts_with``,
+    ``contains_any``, ``not_contains``, ``count``, ``starts_with``,
     ``ends_with``, ``one_of``) and the ``exact``, ``fuzzy``,
     ``levenshtein``, ``regex``, and
     ``contains_regex`` scorers accept an optional
@@ -1521,6 +1570,32 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
         return score_not_contains(
             output,
             _as_substring_list(spec, kind),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
+    if kind == "count":
+        if "substring" not in spec:
+            raise ValueError("count scorer requires a 'substring' value")
+        substring = spec["substring"]
+        if not isinstance(substring, str) or not substring:
+            raise ValueError(
+                "count scorer requires a non-empty 'substring' string"
+            )
+        minimum = _as_length_bound(spec, "min", kind)
+        maximum = _as_length_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "count scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "count scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_count(
+            output,
+            substring,
+            minimum,
+            maximum,
             _as_bool_option(spec, "ignore_case", kind),
         )
     if kind == "regex":

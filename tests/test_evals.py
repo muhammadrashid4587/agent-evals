@@ -242,6 +242,168 @@ class TestNotContainsScorer(unittest.TestCase):
             score_case(_case({"type": "not_contains", "substrings": "hello"}), "hello")
 
 
+class TestCountScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        ok, detail, score = score_case(
+            _case({"type": "count", "substring": "step", "min": 2, "max": 3}),
+            "step one, step two",
+        )
+        self.assertTrue(ok)
+        self.assertIn("found 'step' 2 time(s)", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        ok, _, score = score_case(
+            _case({"type": "count", "substring": "x", "min": 2, "max": 2}),
+            "x x",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_min_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "count", "substring": "item", "min": 3}),
+            "item item item item item",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        ok, _, score = score_case(
+            _case({"type": "count", "substring": "sorry", "max": 1}),
+            "sorry about that",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # 1 of a 2 minimum: score falls linearly to 0 at 0 occurrences.
+        ok, detail, score = score_case(
+            _case({"type": "count", "substring": "step", "min": 2}),
+            "one step only",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 2", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_zero_occurrences_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "count", "substring": "step", "min": 2}),
+            "nothing here",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_above_maximum_partial_credit(self):
+        # 3 of a 2 maximum: halfway to 2x the max, so score 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "count", "substring": "x", "max": 2}),
+            "x x x",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 2", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_twice_maximum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "count", "substring": "x", "max": 2}),
+            "x x x x",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_occurrence(self):
+        ok, _, score = score_case(
+            _case({"type": "count", "substring": "x", "max": 0}),
+            "clean output",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "count", "substring": "x", "max": 0}),
+            "one x here",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_non_overlapping_count(self):
+        # "aaa" contains "aa" once non-overlapping, not twice.
+        ok, _, score = score_case(
+            _case({"type": "count", "substring": "aa", "min": 2}),
+            "aaa",
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_ignore_case(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "count",
+                    "substring": "Step",
+                    "min": 2,
+                    "ignore_case": True,
+                }
+            ),
+            "STEP one, step two",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_missing_substring_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "count", "min": 1}), "hello")
+
+    def test_empty_substring_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "count", "substring": "", "min": 1}), "hello"
+            )
+
+    def test_non_string_substring_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "count", "substring": 42, "min": 1}), "hello"
+            )
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "count", "substring": "x"}), "x x")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "count", "substring": "x", "min": 3, "max": 1}),
+                "x x",
+            )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "count", "substring": "x", "min": -1}), "x"
+            )
+
+    def test_non_integer_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "count", "substring": "x", "min": 1.5}), "x"
+            )
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "count",
+                        "substring": "x",
+                        "min": 1,
+                        "ignore_case": "yes",
+                    }
+                ),
+                "x",
+            )
+
+
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
         ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")
