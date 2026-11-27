@@ -1367,6 +1367,73 @@ def score_sentence_length_variance(
     return True, detail, 1.0
 
 
+def score_avg_word_length(
+    output: str,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> tuple:
+    """Pass when the output's average word length falls in ``[min, max]``.
+
+    The average-length counterpart of ``score_avg_sentence_length``,
+    measured in characters per word instead of words per sentence:
+    an answer whose words have to stay short and plain, a summary
+    that must not lean on long jargon, a reply that must not read
+    like a thesaurus. Words are the whitespace-separated tokens of
+    the stripped output, counted the same way ``word_count`` counts
+    words, and a word's length is its character count with
+    punctuation attached, so ``"hello,"`` is 6 characters, not 5 —
+    the tokenization is deliberately naive, it knows nothing about
+    punctuation, the same limit ``unique_words`` has. The average
+    is the total character count divided by the word count, so
+    ``"hello world"`` averages 5.0. At least one bound is required,
+    and a missing bound is unbounded on that side, so ``{"min": 4}``
+    only sets a floor and ``{"max": 8}`` only sets a ceiling.
+    Bounds are non-negative numbers — an average word length is a
+    mean of character counts, so it can be fractional and is never
+    negative. Partial credit mirrors ``count``: below the minimum
+    the score is ``avg / min``, above the maximum it falls
+    linearly to 0 at twice the maximum, so an output just outside
+    the range still earns most of its weight and one wildly outside
+    earns nothing. A maximum of 0 gives no partial credit above
+    it: any word scores 0.0. An output with no words has no average
+    to measure: it scores 0.0 unless the minimum is 0 (or there is
+    no minimum), in which case an average of 0 is in range and it
+    passes. Case is irrelevant to counting word lengths, so there
+    is no ``ignore_case`` option — the average is the same whatever
+    the casing.
+    """
+    words = output.strip().split()
+    n = len(words)
+    if n == 0:
+        if minimum is not None and minimum > 0:
+            return False, "no words in output", 0.0
+        return True, "average word length 0.00 characters (0 words)", 1.0
+    total_chars = sum(len(word) for word in words)
+    avg = total_chars / n
+    detail = (
+        f"average word length {avg:.2f} characters "
+        f"({total_chars} characters in {n} word(s))"
+    )
+    if minimum is not None and avg < minimum:
+        score = avg / minimum
+        return (
+            False,
+            f"{detail}, below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and avg > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - avg) / maximum)
+        return (
+            False,
+            f"{detail}, above maximum {maximum}",
+            score,
+        )
+    return True, detail, 1.0
+
+
 def _count_syllables(word: str) -> int:
     """Count the syllables in one word, heuristically.
 
@@ -1945,13 +2012,17 @@ def _as_density_bound(spec: dict, key: str, kind: str) -> Optional[float]:
 
 
 def _as_variance_bound(spec: dict, key: str, kind: str) -> Optional[float]:
-    """Read an optional sentence-length-variance bound from a scorer spec.
+    """Read an optional non-negative-number bound from a scorer spec.
 
-    A bound must be a finite non-negative number: ``True``/``False``
-    are rejected (``bool`` is a subclass of ``int``), and a string,
-    NaN, infinity, or a negative value is a scorer error — a
-    variance is a squared word count, so it can be fractional but
-    never negative. Absent means no bound on that side.
+    Shared by the ``sentence_length_variance`` and
+    ``avg_word_length`` scorers, whose values are fractional but
+    never negative. A bound must be a finite non-negative number:
+    ``True``/``False`` are rejected (``bool`` is a subclass of
+    ``int``), and a string, NaN, infinity, or a negative value is
+    a scorer error — a variance is a squared word count and an
+    average word length is a mean of character counts, so either
+    can be fractional but never negative. Absent means no bound on
+    that side.
     """
     if key not in spec or spec[key] is None:
         return None
@@ -2683,7 +2754,8 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``score_not_contains``, ``score_count``, ``score_regex_count``,
     ``score_word_count``, ``score_unique_words``,
     ``score_sentence_count``, ``score_avg_sentence_length``,
-    ``score_sentence_length_variance``, ``score_readability``,
+    ``score_sentence_length_variance``, ``score_avg_word_length``,
+    ``score_readability``,
     ``score_keyword_density``, ``score_type_token_ratio``,
     ``score_hapax_ratio``, ``score_stopword_ratio``,
     ``score_content_word_ratio``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, ``score_json_path_numeric``, and ``score_judge``). ``judges`` is the registry of judge callables
@@ -2871,6 +2943,19 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
                 f"got {minimum} > {maximum}"
             )
         return score_sentence_length_variance(output, minimum, maximum)
+    if kind == "avg_word_length":
+        minimum = _as_variance_bound(spec, "min", kind)
+        maximum = _as_variance_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "avg_word_length scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "avg_word_length scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_avg_word_length(output, minimum, maximum)
     if kind == "readability":
         minimum = _as_range_bound(spec, "min", kind)
         maximum = _as_range_bound(spec, "max", kind)

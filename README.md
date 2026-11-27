@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Thirty-four scorers: exact match, substring, contains-all,
-  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, sentence length variance, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
+- Thirty-five scorers: exact match, substring, contains-all,
+  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, sentence length variance, average word length, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON-path
   numeric range, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
@@ -110,6 +110,7 @@ detail; the run continues with the remaining cases.
 | `keyword_density` | `{"keywords": ["step", "verify"], "min": 0.02, "max": 0.10}` | the output's keyword density (keyword occurrences / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `avg_sentence_length` | `{"min": 8, "max": 25}` | the output's average words per sentence falls in a bounded range (at least one of `min`/`max` required) |
 | `sentence_length_variance` | `{"min": 1, "max": 4}` | the output's sentence-length variance (population variance of words per sentence) falls in a bounded range (at least one of `min`/`max` required) |
+| `avg_word_length` | `{"min": 4, "max": 8}` | the output's average word length in characters falls in a bounded range (at least one of `min`/`max` required) |
 | `readability` | `{"min": 60, "max": 90}` | the output's Flesch reading ease falls in a bounded range (at least one of `min`/`max` required) |
 | `type_token_ratio` | `{"min": 0.5, "max": 0.9}` | the output's type-token ratio (distinct words / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `hapax_ratio` | `{"min": 0.5, "max": 0.9}` | the output's hapax ratio (words used exactly once / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
@@ -482,6 +483,36 @@ output whose sentences average 3.5 but vary by 6.25 passes the
 average band and fails a tight variance band, so a case that pins
 the variance catches uneven pacing where an average case would
 pass it — both consistency checks are pinned in the tests.
+
+The `avg_word_length` scorer is the average-length counterpart of
+`avg_sentence_length`, measured in characters per word instead of
+words per sentence: it passes when the output's average word length
+falls in `[min, max]` — an answer whose words have to stay short and
+plain, a summary that must not lean on long jargon, a reply that must
+not read like a thesaurus. Words are the whitespace-separated tokens
+of the stripped output, counted the same way `word_count` counts
+words, and a word's length is its character count with punctuation
+attached, so `"hello,"` is 6 characters, not 5 — the tokenization is
+deliberately naive, it knows nothing about punctuation, the same
+limit `unique_words` has. The average is the total character count
+divided by the word count, so `"hello world"` averages 5.0. It
+passes when the average falls in `[min, max]`; at least one bound is
+required, and a missing bound is unbounded on that side, so
+`{"min": 4}` only sets a floor and `{"max": 8}` only sets a ceiling.
+Bounds are non-negative numbers — an average word length is a mean
+of character counts, so it can be fractional and is never negative.
+It gives partial credit like `count`: below the minimum the score is
+`avg / min`, above the maximum it falls linearly to 0 at twice the
+maximum, so an output just outside the range still earns most of its
+weight and one wildly outside earns nothing; a maximum of 0 gives no
+partial credit above it, so any word scores 0.0. An output with no
+words has no average to measure: it scores 0.0 unless the minimum is
+0 (or there is no minimum), in which case an average of 0 is in range
+and it passes. Case is irrelevant to counting word lengths, so there
+is no `"ignore_case"` option. The same output scored the same way
+agrees with `word_count` on the word count — `"hello world"` is 2
+words averaging 5.0 characters, 10 characters in total — and the
+consistency check is pinned in the tests.
 
 The `readability` scorer is the reading-ease counterpart of
 `avg_sentence_length`: it passes when the output's Flesch reading
@@ -2254,3 +2285,17 @@ make demo    # run both example suites through the CLI
   error. The same output agrees with `avg_sentence_length` on
   the mean, and the two scorers can disagree — both consistency
   checks pinned in tests.~~ (done in v0.67.0)
+- ~~`avg_word_length` scorer: the average-length counterpart of
+  `avg_sentence_length`, measured in characters per word — it checks
+  that the output's average word length falls in `[min, max]`, e.g.
+  `"hello world"` averages 5.0 characters, with words counted like
+  `word_count` and a word's length its character count with
+  punctuation attached, so `"hello,"` is 6 characters, with at
+  least one of `min`/`max` required, non-negative fractional bounds
+  allowed, partial credit like `count`, a maximum of 0 forbidding
+  any word, an output with no words scoring 0.0 unless the minimum
+  is 0, and a non-numeric, non-finite, or boolean bound, a negative
+  bound, `min` above `max`, or neither bound given rejected as a
+  scorer error. The same output agrees with `word_count` on the
+  word count — the consistency check pinned in tests.~~ (done in
+  v0.68.0)

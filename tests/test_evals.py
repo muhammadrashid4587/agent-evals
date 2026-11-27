@@ -1856,6 +1856,213 @@ class TestSentenceLengthVarianceScorer(unittest.TestCase):
             )
 
 
+class TestAvgWordLengthScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        # "hello world": 10 characters in 2 words, average 5.0.
+        ok, detail, score = score_case(
+            _case({"type": "avg_word_length", "min": 5, "max": 5}),
+            "hello world",
+        )
+        self.assertTrue(ok)
+        self.assertIn(
+            "average word length 5.00 characters (10 characters in 2 word(s))",
+            detail,
+        )
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        # Three two-letter words: average 2.0 exactly.
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "min": 2, "max": 2}),
+            "aa bb cc",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_single_word(self):
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "min": 5, "max": 5}),
+            "hello",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_fractional_bounds_accepted(self):
+        # "a bb": 3 characters in 2 words, average 1.5 — an average
+        # word length is a mean of character counts, so bounds need
+        # not be integers.
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "min": 1.5, "max": 1.5}),
+            "a bb",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_punctuation_counts_toward_word_length(self):
+        # Punctuation stays attached to its word: "hello," is 6
+        # characters, so "hello, world!" averages 6.0, not 5.0 —
+        # the same naive tokenization unique_words has.
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "min": 6, "max": 6}),
+            "hello, world!",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "min": 5, "max": 5}),
+            "hello, world!",
+        )
+        self.assertFalse(ok)
+
+    def test_min_only_passes(self):
+        # Average 5.0, above a 4 minimum.
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "min": 4}),
+            "hello world",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        # Average 5.0, below a 6 maximum.
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "max": 6}),
+            "hello world",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # Average 2.0 of a 4 minimum: score 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "avg_word_length", "min": 4}),
+            "aa bb",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 4", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_above_maximum_partial_credit(self):
+        # Average 6.0 of a 5 maximum: (2*5 - 6) / 5 = 0.8.
+        ok, detail, score = score_case(
+            _case({"type": "avg_word_length", "max": 5}),
+            "aaaaaa bbbbbb",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 5", detail)
+        self.assertAlmostEqual(score, 0.8)
+
+    def test_twice_maximum_scores_zero(self):
+        # Average 10.0, twice a 5 maximum, so nothing.
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "max": 5}),
+            "aaaaaaaaaa bbbbbbbbbb",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_word(self):
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "max": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "max": 0}),
+            "One",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_scores_zero(self):
+        ok, detail, score = score_case(
+            _case({"type": "avg_word_length", "min": 0.5}),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertIn("no words in output", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_passes_when_min_zero(self):
+        # No words: an average of 0 is in range when the minimum
+        # is 0, and when there is no minimum at all.
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "min": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "avg_word_length", "max": 5}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_agrees_with_word_count(self):
+        # The same output's word count and average word length are
+        # measured by two scorers: "hello world" is 2 words
+        # averaging 5.0 characters, so both bands pin exactly, and
+        # the average times the count is the total character count.
+        output = "hello world"
+        ok, _, _ = score_case(
+            _case({"type": "word_count", "min": 2, "max": 2}),
+            output,
+        )
+        self.assertTrue(ok)
+        ok, detail, _ = score_case(
+            _case({"type": "avg_word_length", "min": 5, "max": 5}),
+            output,
+        )
+        self.assertTrue(ok)
+        self.assertIn("10 characters in 2 word(s)", detail)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "avg_word_length"}), "hello world")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "avg_word_length", "min": 6, "max": 5}),
+                "hello world",
+            )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "avg_word_length", "min": -1}),
+                "hello",
+            )
+
+    def test_string_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "avg_word_length", "min": "5"}),
+                "hello",
+            )
+
+    def test_bool_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "avg_word_length", "min": True}),
+                "hello",
+            )
+
+    def test_non_finite_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "avg_word_length", "min": float("nan")}),
+                "hello",
+            )
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "avg_word_length", "max": float("inf")}),
+                "hello",
+            )
+
+
 class TestReadabilityScorer(unittest.TestCase):
     def test_within_bounds_passes(self):
         # "The cat sat. The dog ran." — 6 words, 2 sentences, 6
