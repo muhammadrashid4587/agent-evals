@@ -1627,7 +1627,11 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
 
 
 def make_output_diff(
-    expected: str, actual: str, max_lines: Optional[int] = None
+    expected: str,
+    actual: str,
+    max_lines: Optional[int] = None,
+    fromfile: str = "expected",
+    tofile: str = "actual",
 ) -> Optional[str]:
     """A unified diff of ``expected`` vs ``actual``, or None when they
     are identical.
@@ -1638,14 +1642,18 @@ def make_output_diff(
     ``contains`` case has no expected output to diff against, and a
     ``numeric``/``json_path`` case compares values, not text.
     ``max_lines`` caps the diff (the text summary uses it); the JSON
-    report keeps the full diff.
+    report keeps the full diff. ``fromfile``/``tofile`` label the two
+    sides in the diff header: the defaults name them ``expected`` and
+    ``actual``, and a stability report passes ``first output`` and
+    ``output N`` instead, so a diff of two answers reads as what it
+    is.
     """
     lines = list(
         difflib.unified_diff(
             expected.splitlines(),
             actual.splitlines(),
-            fromfile="expected",
-            tofile="actual",
+            fromfile=fromfile,
+            tofile=tofile,
             lineterm="",
         )
     )

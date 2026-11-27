@@ -34,7 +34,9 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
   runs the suite N times and flags flaky cases that pass sometimes
   and fail other times, and `--repeat N --fail-on-output-change`
   fails the run when a case's answer changed across the repetitions,
-  even one that passed every time. With `--junit results.xml` it also writes the
+  even one that passed every time — and the stability report carries
+  a unified diff of each changed answer against the first one, so
+  what drifted is visible at a glance. With `--junit results.xml` it also writes the
   run as JUnit XML, so CI systems can ingest the results.
 
 ## What it is not
@@ -1107,6 +1109,29 @@ counts in an `Output changed across repetitions:` section, and the
 `Case outputs` section lists the other answers a changed case gave
 under `also saw:`.
 
+When a case answered differently, the report also carries a unified
+diff of each later distinct answer against the first one seen, so
+what changed is visible at a glance instead of two blobs to compare
+by eye — a one-word change in a multi-line answer shows just the
+changed lines:
+
+```json
+"output_diffs": [
+  {"from_index": 0, "to_index": 1, "diff":
+   "--- first output\n+++ output 2\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+delta\n gamma"}
+]
+```
+
+`output_diffs` is per case in the JSON report (one entry per later
+distinct output, empty for a stable case or one with no output),
+and the text summary has an `Output diffs (vs first answer):`
+section under the changed cases, capped at 30 lines per diff with a
+marker naming how many lines were cut — the JSON keeps the whole
+diff. The diffs are on the same redacted, truncated excerpts as the
+distinct outputs, so a change past the 500-character excerpt cap
+stays hidden, and a case whose answers were capped at 5 distinct
+outputs gets diffs only for the answers the report kept.
+
 ### Flaky-case history across stability reports
 
 One stability report says which cases flipped in a single burst of
@@ -1586,3 +1611,26 @@ make demo    # run both example suites through the CLI
   `api_key=`/`password=`/`token=` values) is redacted to
   `[REDACTED]` before capture, with the handling documented in the
   README.~~ (done in v0.51.0)
+- ~~`--fail-on-output-change` CI gate for the run CLI:
+  `python -m agent_evals.cli --suite ... --agent ... --repeat 5
+  --fail-on-output-change` exits 1 when a case produced more than
+  one distinct output across the repetitions, even when it passed
+  every time — a case that failed or flipped already fails the run,
+  so the gate only bites on a case that passed on a lenient scorer
+  while answering differently — with `"output_changed"` per case
+  and an `"output_changed"` list on the stability report, and a
+  CLI error when the flag is given without `--repeat N` with N >
+  1; distinctness is on the redacted, truncated excerpts the
+  report keeps.~~ (done in v0.52.0)
+- ~~Per-case output diffs across repetitions: when a case answered
+  differently across the repetitions, the stability report carries
+  a unified diff of each later distinct answer against the first
+  one seen (`"output_diffs"` per case in the JSON, one entry per
+  later output with `from_index`/`to_index`/`diff`), so what
+  changed between the answers is visible at a glance instead of
+  two blobs to compare by eye — a one-word change in a multi-line
+  answer shows just the changed lines — with an `Output diffs (vs
+  first answer):` section in the text summary capped at 30 lines
+  per diff; a stable case, or one with no output, has no diffs,
+  and the diffs are on the same redacted, truncated excerpts as
+  the distinct outputs.~~ (done in v0.53.0)

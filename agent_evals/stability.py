@@ -38,7 +38,11 @@ also captures each case's actual output — a bounded excerpt of the
 last run, plus the distinct outputs seen across repetitions — so a
 ``--fail-on-output-change`` (with ``--repeat``) turns that into a
 gate: the run fails when a case produced more than one distinct
-output across the repetitions, even when it passed every time.
+output across the repetitions, even when it passed every time. And
+when a case did answer differently, the report carries a unified
+diff of each later answer against the first one seen, so what
+changed is visible at a glance instead of two blobs to compare by
+eye.
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from .evals import Suite, run_suite
+from .evals import Suite, make_output_diff, run_suite
 
 __all__ = [
     "CaseStability",
@@ -89,6 +93,42 @@ _SECRET_PATTERNS = [
         r"\1[REDACTED]",
     ),
 ]
+
+
+# How many lines of a per-case output diff the text summary
+# shows: the JSON report keeps the whole diff, the summary caps it
+# the same way the exact-case diff is capped (see
+# ``make_output_diff``).
+OUTPUT_DIFF_MAX_LINES = 30
+
+
+def _make_output_diffs(distinct: list) -> list:
+    """Unified diffs of each later distinct output against the first
+    one seen, so a case that answered differently across repetitions
+    shows what actually changed instead of two blobs to compare by
+    eye. One entry per later output: ``{"from_index": 0, "to_index":
+    i, "diff": ...}``, where the indices are positions in
+    ``distinct`` (first-seen order). A case with a single distinct
+    output has no diffs — there is nothing to compare — and neither
+    does a case with no output at all. The diffs are on the redacted,
+    truncated excerpts the report keeps, not the raw outputs, so a
+    change past the excerpt cap stays hidden."""
+    if len(distinct) < 2:
+        return []
+    first = distinct[0]
+    diffs = []
+    for index, other in enumerate(distinct[1:], start=1):
+        diff = make_output_diff(
+            first,
+            other,
+            fromfile="first output",
+            tofile=f"output {index + 1}",
+        )
+        if diff is not None:
+            diffs.append(
+                {"from_index": 0, "to_index": index, "diff": diff}
+            )
+    return diffs
 
 
 def _redact_output(text: str) -> str:
@@ -150,6 +190,13 @@ class CaseStability:
     (``distinct_output_count > 1``), whatever the verdict: a case
     that passed every run can still have changed its output, and
     that is what the ``--fail-on-output-change`` gate checks.
+    ``output_diffs`` is a unified diff of each later distinct
+    output against the first one seen (``{"from_index": 0,
+    "to_index": i, "diff": ...}``), so what changed between the
+    answers is visible without comparing the blobs by eye; a case
+    with one distinct output, or none, has no diffs. The diffs are
+    on the same redacted, truncated excerpts as
+    ``distinct_outputs``.
     Excerpts are redacted for
     secret-shaped text and truncated to
     ``OUTPUT_EXCERPT_MAX_CHARS`` characters (see
@@ -167,6 +214,7 @@ class CaseStability:
     output: Optional[str] = None
     distinct_outputs: list = field(default_factory=list)
     distinct_output_count: int = 0
+    output_diffs: list = field(default_factory=list)
 
     @property
     def pass_rate(self) -> float:
@@ -225,6 +273,7 @@ class CaseStability:
             "distinct_outputs": list(self.distinct_outputs),
             "distinct_output_count": self.distinct_output_count,
             "output_changed": self.output_changed,
+            "output_diffs": list(self.output_diffs),
         }
 
 
@@ -444,6 +493,12 @@ def repeat_suite(
                 else None,
                 distinct_outputs=distinct[:MAX_DISTINCT_OUTPUTS],
                 distinct_output_count=len(distinct),
+                # Diffs cover the same capped list the report keeps:
+                # an answer past the cap is not stored, so it gets
+                # no diff either.
+                output_diffs=_make_output_diffs(
+                    distinct[:MAX_DISTINCT_OUTPUTS]
+                ),
             )
         )
     return StabilityReport(
@@ -570,6 +625,27 @@ def format_stability(report: StabilityReport) -> str:
             "nondeterminism, or the case for a scorer too lenient "
             "to notice the drift.",
         ]
+    if changed:
+        # What actually changed between the answers: a unified diff
+        # of each later distinct output against the first one seen,
+        # so a one-word change in a multi-line answer shows just the
+        # changed lines. The JSON report keeps the whole diff; the
+        # summary caps it at OUTPUT_DIFF_MAX_LINES.
+        lines += ["", "Output diffs (vs first answer):"]
+        for c in changed:
+            for entry in c.output_diffs:
+                lines.append(
+                    f"  {c.case_id}  output {entry['to_index'] + 1} "
+                    f"vs output 1:"
+                )
+                diff_lines = entry["diff"].splitlines()
+                total = len(diff_lines)
+                if total > OUTPUT_DIFF_MAX_LINES:
+                    diff_lines = diff_lines[:OUTPUT_DIFF_MAX_LINES] + [
+                        f"... ({total - OUTPUT_DIFF_MAX_LINES} "
+                        f"more diff lines)"
+                    ]
+                lines.extend(f"    {line}" for line in diff_lines)
     # Every case's last-run output, so a flaky or changed case can
     # be inspected without re-running the suite. A case whose
     # output changed lists the other answers it gave too — those

@@ -768,5 +768,155 @@ class TestOutputChangeGate(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
 
 
+class TestOutputDiffs(unittest.TestCase):
+    """Per-case output diffs across repetitions (v0.53.0).
+
+    When a case answered differently across the repetitions, the
+    report carries a unified diff of each later distinct output
+    against the first one seen, so what changed is visible at a
+    glance instead of two blobs to compare by eye. The diffs are on
+    the redacted, truncated excerpts the report keeps.
+    """
+
+    def _multi_line_suite(self):
+        return Suite(
+            name="drift",
+            cases=[
+                # contains 'alpha': all three answers pass, so the
+                # case passes every run while its output changes.
+                Case(id="drifting-pass", prompt="drift",
+                     scorer={"type": "contains", "substring": "alpha"}),
+                Case(id="stable-pass", prompt="p",
+                     scorer={"type": "exact", "expected": "alpha"}),
+            ],
+        )
+
+    def _three_way_agent(self):
+        answers = [
+            "alpha\nbeta\ngamma",
+            "alpha\nbeta\ndelta",
+            "alpha\nepsilon\ngamma",
+        ]
+        calls = {"n": 0}
+
+        def agent(prompt):
+            if prompt == "drift":
+                calls["n"] += 1
+                return answers[(calls["n"] - 1) % len(answers)]
+            return "alpha"
+
+        return agent
+
+    def test_diffs_compare_each_answer_to_first(self):
+        report = repeat_suite(
+            self._multi_line_suite(), self._three_way_agent(),
+            repetitions=3,
+        )
+        by_id = {c.case_id: c for c in report.cases}
+        drifting = by_id["drifting-pass"]
+        self.assertEqual(
+            drifting.distinct_outputs,
+            ["alpha\nbeta\ngamma", "alpha\nbeta\ndelta",
+             "alpha\nepsilon\ngamma"],
+        )
+        # One diff per later answer, each against the first.
+        self.assertEqual(len(drifting.output_diffs), 2)
+        first, second = drifting.output_diffs
+        self.assertEqual(
+            (first["from_index"], first["to_index"]), (0, 1)
+        )
+        self.assertEqual(
+            (second["from_index"], second["to_index"]), (0, 2)
+        )
+        # The first diff shows only the changed last line.
+        self.assertIn("--- first output", first["diff"])
+        self.assertIn("+++ output 2", first["diff"])
+        self.assertIn("-gamma", first["diff"])
+        self.assertIn("+delta", first["diff"])
+        self.assertNotIn("-beta", first["diff"])
+        # The second diff shows the changed middle line.
+        self.assertIn("+++ output 3", second["diff"])
+        self.assertIn("-beta", second["diff"])
+        self.assertIn("+epsilon", second["diff"])
+
+    def test_stable_case_has_no_diffs(self):
+        report = repeat_suite(
+            self._multi_line_suite(), self._three_way_agent(),
+            repetitions=3,
+        )
+        by_id = {c.case_id: c for c in report.cases}
+        self.assertEqual(by_id["stable-pass"].output_diffs, [])
+
+    def test_no_output_case_has_no_diffs(self):
+        def agent(prompt):
+            raise RuntimeError("boom")
+
+        report = repeat_suite(_suite(), agent, repetitions=2)
+        for case in report.cases:
+            self.assertEqual(case.output_diffs, [])
+
+    def test_to_dict_carries_output_diffs(self):
+        report = repeat_suite(
+            self._multi_line_suite(), self._three_way_agent(),
+            repetitions=3,
+        )
+        by_json = {c["case_id"]: c for c in report.to_dict()["cases"]}
+        diffs = by_json["drifting-pass"]["output_diffs"]
+        self.assertEqual(len(diffs), 2)
+        self.assertIn("-gamma", diffs[0]["diff"])
+        self.assertIn("+delta", diffs[0]["diff"])
+        self.assertEqual(by_json["stable-pass"]["output_diffs"], [])
+
+    def test_format_stability_shows_output_diffs(self):
+        report = repeat_suite(
+            self._multi_line_suite(), self._three_way_agent(),
+            repetitions=3,
+        )
+        text = format_stability(report)
+        self.assertIn("Output diffs (vs first answer):", text)
+        self.assertIn("drifting-pass  output 2 vs output 1:", text)
+        self.assertIn("drifting-pass  output 3 vs output 1:", text)
+        self.assertIn("-gamma", text)
+        self.assertIn("+delta", text)
+
+    def test_format_stability_omits_diffs_section_without_change(self):
+        report = repeat_suite(
+            _suite(), lambda prompt: "19", repetitions=2
+        )
+        text = format_stability(report)
+        self.assertNotIn("Output diffs", text)
+
+    def test_format_stability_caps_long_diffs(self):
+        # A 40-line answer that changes on every line: the JSON
+        # keeps the whole diff, the summary caps it with a marker.
+        def agent(prompt):
+            calls = agent.calls
+            calls["n"] += 1
+            tag = "A" if calls["n"] % 2 else "B"
+            return "\n".join(f"line {i} {tag}" for i in range(40))
+
+        agent.calls = {"n": 0}
+        suite = Suite(
+            name="long",
+            cases=[
+                Case(id="long-drift", prompt="drift",
+                     scorer={"type": "contains", "substring": "line"}),
+            ],
+        )
+        report = repeat_suite(suite, agent, repetitions=2)
+        case = report.cases[0]
+        self.assertEqual(len(case.output_diffs), 1)
+        self.assertIn("line 39 B", case.output_diffs[0]["diff"])
+        text = format_stability(report)
+        self.assertIn("more diff lines)", text)
+        # The diff section itself is capped: the last changed line
+        # is past the cap there (it still shows in full in the
+        # "Case outputs" section below, which prints the whole
+        # last-run excerpt).
+        diff_section = text.split("Output diffs (vs first answer):")[1]
+        diff_section = diff_section.split("Case outputs (last run):")[0]
+        self.assertNotIn("line 39 B", diff_section)
+
+
 if __name__ == "__main__":
     unittest.main()
