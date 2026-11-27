@@ -1605,6 +1605,184 @@ class TestAvgSentenceLengthScorer(unittest.TestCase):
             )
 
 
+class TestReadabilityScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        # "The cat sat. The dog ran." — 6 words, 2 sentences, 6
+        # syllables: 206.835 - 1.015*3 - 84.6*1 = 119.19.
+        ok, detail, score = score_case(
+            _case({"type": "readability", "min": 60, "max": 120}),
+            "The cat sat. The dog ran.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("readability 119.19", detail)
+        self.assertIn("6 word(s), 2 sentence(s), 6 syllable(s)", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_multi_syllable_words(self):
+        # "Reading is beautiful and easy." — 5 words, 1 sentence, 9
+        # syllables (reading 2, is 1, beautiful 3, and 1, easy 2):
+        # 206.835 - 1.015*5 - 84.6*1.8 = 49.48.
+        ok, detail, score = score_case(
+            _case({"type": "readability", "min": 40, "max": 60}),
+            "Reading is beautiful and easy.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("readability 49.48", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_silent_e_and_le(self):
+        # "The table is stable." — 4 words, 1 sentence, 6 syllables:
+        # table and stable are 2 each (consonant + "le"), the and is
+        # 1 each: 206.835 - 1.015*4 - 84.6*1.5 = 75.88.
+        ok, detail, score = score_case(
+            _case({"type": "readability", "min": 70, "max": 80}),
+            "The table is stable.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("readability 75.88", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_silent_e_words_count_one_syllable(self):
+        # "The large white horse ate cake." — 6 words, 1 sentence, 6
+        # syllables: every word's trailing e is silent, so each word
+        # counts once: 206.835 - 1.015*6 - 84.6*1 = 116.15.
+        ok, detail, score = score_case(
+            _case({"type": "readability", "min": 110, "max": 120}),
+            "The large white horse ate cake.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("readability 116.15", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # 119.19 of a 150 minimum: 119.19 / 150 = 0.7946.
+        ok, detail, score = score_case(
+            _case({"type": "readability", "min": 150}),
+            "The cat sat. The dog ran.",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 150", detail)
+        self.assertAlmostEqual(score, 119.19 / 150)
+
+    def test_above_maximum_partial_credit(self):
+        # 119.19 of a 100 maximum: (2*100 - 119.19) / 100 = 0.8081.
+        ok, detail, score = score_case(
+            _case({"type": "readability", "max": 100}),
+            "The cat sat. The dog ran.",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 100", detail)
+        self.assertAlmostEqual(score, 0.8081)
+
+    def test_twice_maximum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "readability", "max": 50}),
+            "The cat sat. The dog ran.",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_text(self):
+        ok, _, score = score_case(
+            _case({"type": "readability", "max": 0}),
+            "The cat sat.",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+        ok, _, score = score_case(
+            _case({"type": "readability", "max": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_empty_output_scores_zero(self):
+        ok, detail, score = score_case(
+            _case({"type": "readability", "min": 60}),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertIn("readability 0.00", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_passes_when_min_zero(self):
+        # No words: a readability of 0 is in range when the minimum
+        # is 0, and when there is no minimum at all.
+        ok, _, score = score_case(
+            _case({"type": "readability", "min": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "readability", "max": 60}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_negative_minimum_gives_no_partial_credit_below_it(self):
+        # A very hard passage scores below a negative minimum, and
+        # there is no linear scale down to a non-positive floor.
+        text = " ".join(["antidisestablishmentarianism"] * 20) + "."
+        ok, _, score = score_case(
+            _case({"type": "readability", "min": -10}),
+            text,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_abbreviation_is_naive(self):
+        # "Mr. Smith went home." is two sentences ("Mr", "Smith went
+        # home"): 4 words in 2 sentences, 4 syllables — the same
+        # naive split sentence_count uses, abbreviations and all:
+        # 206.835 - 1.015*2 - 84.6*1 = 120.21.
+        ok, detail, score = score_case(
+            _case({"type": "readability", "min": 120, "max": 121}),
+            "Mr. Smith went home.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("readability 120.21", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "readability"}), "One. Two.")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "readability", "min": 90, "max": 60}),
+                "One. Two.",
+            )
+
+    def test_non_numeric_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "readability", "min": "high"}),
+                "One.",
+            )
+
+    def test_bool_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "readability", "min": True}),
+                "One.",
+            )
+
+    def test_non_finite_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "readability", "min": float("nan")}),
+                "One.",
+            )
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "readability", "max": float("inf")}),
+                "One.",
+            )
+
+
 class TestRegexScorer(unittest.TestCase):
     def test_match(self):
         ok, _, _ = score_case(_case({"type": "regex", "pattern": r"^\d+$"}), "42")

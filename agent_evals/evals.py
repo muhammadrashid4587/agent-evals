@@ -1293,6 +1293,127 @@ def score_avg_sentence_length(
     return True, detail, 1.0
 
 
+def _count_syllables(word: str) -> int:
+    """Count the syllables in one word, heuristically.
+
+    A syllable is a run of vowel letters (``a``, ``e``, ``i``, ``o``,
+    ``u``, ``y``) in the word's letters — non-letters are stripped,
+    so ``"don't"`` counts as ``"dont"`` and ``"42"`` has no letters
+    and no syllables. A silent trailing ``e`` does not count
+    (``"cake"`` is one syllable), unless it is the word's only vowel
+    (``"the"`` is still one), and a trailing ``le`` after a
+    consonant is its own syllable (``"table"`` is two). The count
+    is deliberately naive: it knows nothing about diphthongs beyond
+    the vowel-run rule, so ``"beautiful"`` counts as three
+    (``eau``-``i``-``u``) and ``"poetry"`` as two, and a word with
+    no vowel letters at all still counts as one syllable — every
+    word is at least one syllable, so the syllable count is never
+    below the word count for ordinary text.
+    """
+    letters = "".join(ch for ch in word.lower() if ch.isalpha())
+    if not letters:
+        return 0
+    vowels = "aeiouy"
+    count = 0
+    prev_vowel = False
+    for ch in letters:
+        is_vowel = ch in vowels
+        if is_vowel and not prev_vowel:
+            count += 1
+        prev_vowel = is_vowel
+    if letters.endswith("e") and count > 1:
+        count -= 1
+    if (
+        letters.endswith("le")
+        and len(letters) > 2
+        and letters[-3] not in vowels
+    ):
+        count += 1
+    return max(1, count)
+
+
+def score_readability(
+    output: str,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> tuple:
+    """Pass when the output's Flesch reading ease falls in
+    ``[min, max]``.
+
+    The readability counterpart of ``score_avg_sentence_length``:
+    an answer that has to read at a school level, a summary that
+    must stay plain and readable, a reply that must not read like
+    a legal contract. Reading ease is the Flesch formula
+    ``206.835 - 1.015 * (words / sentences) - 84.6 * (syllables /
+    words)`` — higher is easier to read (90-100 is very easy,
+    60-70 is plain English, 0-30 is very difficult), and it can
+    fall below 0 for dense text or above 100 for very simple text,
+    so the bounds are plain numbers, not confined to [0, 100].
+    Sentences are split exactly like ``sentence_count`` (see
+    :func:`_split_sentences`), words are the whitespace-separated
+    tokens of each sentence, counted the same way ``word_count``
+    counts words, and syllables are counted by the naive heuristic
+    in :func:`_count_syllables` — the same naive abbreviation
+    behaviour is inherited, so ``"Mr. Smith went home."`` counts
+    as two sentences. At least one bound is required, and a
+    missing bound is unbounded on that side, so ``{"min": 60}``
+    only sets a floor and ``{"max": 90}`` only sets a ceiling.
+    Partial credit mirrors ``count``: below the minimum the score
+    is ``value / min`` (clamped at 0, since a reading ease can be
+    negative), above the maximum it falls linearly to 0 at twice
+    the maximum, so an output just outside the range still earns
+    most of its weight and one wildly outside earns nothing. A
+    maximum of 0 gives no partial credit above it, so any readable
+    text scores 0.0, and a minimum at or below 0 gives no partial
+    credit below it either — there is no linear scale from 0 down
+    to a non-positive floor. An output with no words has no
+    readability to measure: it scores as 0.0, so it passes exactly
+    when 0 is in range (the minimum is 0 or absent) and fails
+    with 0.0 otherwise. Case is irrelevant to counting words,
+    sentences, and syllables, so there is no ``ignore_case``
+    option — the score is the same whatever the casing.
+    """
+    sentences = _split_sentences(output)
+    words = [word for sentence in sentences for word in sentence.split()]
+    n_words = len(words)
+    n_sentences = len(sentences)
+    if n_words == 0:
+        syllables = 0
+        value = 0.0
+    else:
+        syllables = sum(_count_syllables(word) for word in words)
+        value = (
+            206.835
+            - 1.015 * (n_words / n_sentences)
+            - 84.6 * (syllables / n_words)
+        )
+    detail = (
+        f"readability {value:.2f} (Flesch reading ease; {n_words} word(s), "
+        f"{n_sentences} sentence(s), {syllables} syllable(s))"
+    )
+    if minimum is not None and value < minimum:
+        if minimum > 0:
+            score = max(0.0, value / minimum)
+        else:
+            score = 0.0
+        return (
+            False,
+            f"{detail}, below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and value > maximum:
+        if maximum > 0:
+            score = max(0.0, (2 * maximum - value) / maximum)
+        else:
+            score = 0.0
+        return (
+            False,
+            f"{detail}, above maximum {maximum}",
+            score,
+        )
+    return True, detail, 1.0
+
+
 def _as_density_bound(spec: dict, key: str, kind: str) -> Optional[float]:
     """Read an optional keyword-density bound from a scorer spec.
 
@@ -1936,6 +2057,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``score_not_contains``, ``score_count``, ``score_regex_count``,
     ``score_word_count``, ``score_unique_words``,
     ``score_sentence_count``, ``score_avg_sentence_length``,
+    ``score_readability``,
     ``score_keyword_density``,
     ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
@@ -2107,6 +2229,24 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
                 f"got {minimum} > {maximum}"
             )
         return score_avg_sentence_length(output, minimum, maximum)
+    if kind == "readability":
+        minimum = _as_range_bound(spec, "min", kind)
+        maximum = _as_range_bound(spec, "max", kind)
+        for bound, key in ((minimum, "min"), (maximum, "max")):
+            if bound is not None and not math.isfinite(bound):
+                raise ValueError(
+                    f"readability scorer requires {key!r} to be a finite number"
+                )
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "readability scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "readability scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_readability(output, minimum, maximum)
     if kind == "keyword_density":
         keywords = _as_keyword_list(spec, kind)
         minimum = _as_density_bound(spec, "min", kind)

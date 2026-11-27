@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Twenty-seven scorers: exact match, substring, contains-all,
-  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, regex, regex-count,
+- Twenty-eight scorers: exact match, substring, contains-all,
+  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, readability, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
@@ -108,6 +108,7 @@ detail; the run continues with the remaining cases.
 | `sentence_count` | `{"min": 2, "max": 5}` | the output has a bounded number of sentences (at least one of `min`/`max` required) |
 | `keyword_density` | `{"keywords": ["step", "verify"], "min": 0.02, "max": 0.10}` | the output's keyword density (keyword occurrences / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `avg_sentence_length` | `{"min": 8, "max": 25}` | the output's average words per sentence falls in a bounded range (at least one of `min`/`max` required) |
+| `readability` | `{"min": 60, "max": 90}` | the output's Flesch reading ease falls in a bounded range (at least one of `min`/`max` required) |
 | `contains_regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match; a non-string `pattern` is a scorer error) |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
@@ -403,6 +404,46 @@ of 0 is in range and it passes. Case is irrelevant to counting
 words and sentences, so there is no `"ignore_case"` option. A
 non-integer or negative bound, `min` above `max`, or neither
 bound given is a scorer error.
+
+The `readability` scorer is the reading-ease counterpart of
+`avg_sentence_length`: it passes when the output's Flesch reading
+ease falls in `[min, max]` — an answer that has to read at a
+school level, a summary that must stay plain and readable, a reply
+that must not read like a legal contract. Reading ease is the
+Flesch formula `206.835 - 1.015 * (words / sentences) - 84.6 *
+(syllables / words)` — higher is easier to read (90-100 is very
+easy, 60-70 is plain English, 0-30 is very difficult), and it can
+fall below 0 for dense text or above 100 for very simple text, so
+the bounds are plain numbers, not confined to [0, 100]. Sentences
+are split exactly like `sentence_count` (non-empty segments split
+on runs of terminal punctuation, so an unterminated trailing
+sentence still counts and repeated punctuation is one terminator),
+words are the whitespace-separated tokens of each sentence, and
+syllables are counted by a naive heuristic: a syllable is a run of
+vowel letters (`a`, `e`, `i`, `o`, `u`, `y`), a silent trailing
+`e` does not count unless it is the word's only vowel, and a
+trailing `le` after a consonant is its own syllable — so `"cake"`
+is one syllable, `"table"` is two, and `"beautiful"` is three.
+The split is deliberately naive about abbreviations, so `"Mr.
+Smith went home."` counts as two sentences — the same limit
+`sentence_count` has, inherited unchanged. It passes when the
+reading ease falls in `[min, max]`; at least one bound is
+required, and a missing bound is unbounded on that side, so
+`{"min": 60}` only sets a floor and `{"max": 90}` only sets a
+ceiling. It gives partial credit like `count`: below the minimum
+the score is `value / min` (clamped at 0, since a reading ease can
+be negative), above the maximum it falls linearly to 0 at twice
+the maximum, so an output just outside the range still earns most
+of its weight and one wildly outside earns nothing; a maximum of 0
+gives no partial credit above it, so any readable text scores 0.0,
+and a minimum at or below 0 gives no partial credit below it
+either. An output with no words has no readability to measure: it
+scores as 0.0, so it passes exactly when 0 is in range (the
+minimum is 0 or there is no minimum) and fails with 0.0
+otherwise. Case is irrelevant to counting words, sentences, and
+syllables, so there is no `"ignore_case"` option. A non-numeric,
+non-finite, or boolean bound, `min` above `max`, or neither bound
+given is a scorer error.
 
 The `length` scorer is for output that must be a certain size — a
 summary that has to fit in a tweet, an answer that has to be at least
@@ -1908,3 +1949,14 @@ make demo    # run both example suites through the CLI
   case whose mean looks steady but whose slowest run was far above
   its fastest — or whose score wobbled while still passing — is
   visible instead of averaged away.~~ (done in v0.60.0)
+- ~~`readability` scorer: `readability` passes when the output's
+  Flesch reading ease falls in `[min, max]` — `{"type":
+  "readability", "min": 60, "max": 90}` — with sentences split
+  like `sentence_count`, words counted like `word_count`, and
+  syllables counted by a naive vowel-run heuristic (a silent
+  trailing `e` does not count, a trailing `le` after a consonant
+  is its own syllable), partial credit like `count`, a maximum of
+  0 forbidding any readable text, an output with no words scoring
+  as 0.0, and a non-numeric, non-finite, or boolean bound, `min`
+  above `max`, or neither bound given rejected as a scorer
+  error.~~ (done in v0.61.0)
