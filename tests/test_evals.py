@@ -2063,6 +2063,217 @@ class TestAvgWordLengthScorer(unittest.TestCase):
             )
 
 
+class TestWordLengthVarianceScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        # "a bbb": word lengths 1 and 3, mean 2.0, variance 1.0.
+        ok, detail, score = score_case(
+            _case({"type": "word_length_variance", "min": 1, "max": 1}),
+            "a bbb",
+        )
+        self.assertTrue(ok)
+        self.assertIn(
+            "word length variance 1.00 (word lengths 1, 3)",
+            detail,
+        )
+        self.assertEqual(score, 1.0)
+
+    def test_boundaries_pass(self):
+        # A single word always has a variance of 0.
+        ok, _, score = score_case(
+            _case({"type": "word_length_variance", "min": 0, "max": 0}),
+            "hello",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_fractional_bounds_accepted(self):
+        # "a bb": word lengths 1 and 2, mean 1.5, variance 0.25 —
+        # a variance is a squared character count, so bounds need
+        # not be integers.
+        ok, _, score = score_case(
+            _case({"type": "word_length_variance", "min": 0.25, "max": 0.25}),
+            "a bb",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_punctuation_counts_toward_word_length(self):
+        # Punctuation stays attached to its word: "hello," is 6
+        # characters, so "hello, world" has lengths 6 and 5 and a
+        # variance of 0.25, while "hello world" has lengths 5 and 5
+        # and a variance of 0 — the same naive tokenization
+        # unique_words has.
+        ok, _, score = score_case(
+            _case({"type": "word_length_variance", "min": 0.25, "max": 0.25}),
+            "hello, world",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "word_length_variance", "min": 0.25, "max": 0.25}),
+            "hello world",
+        )
+        self.assertFalse(ok)
+
+    def test_min_only_passes(self):
+        # Variance 1.0, above a 0.5 minimum.
+        ok, _, score = score_case(
+            _case({"type": "word_length_variance", "min": 0.5}),
+            "a bbb",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_max_only_passes(self):
+        # Variance 1.0, below a 2 maximum.
+        ok, _, score = score_case(
+            _case({"type": "word_length_variance", "max": 2}),
+            "a bbb",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # Variance 1.0 of a 4 minimum: score 0.25.
+        ok, detail, score = score_case(
+            _case({"type": "word_length_variance", "min": 4}),
+            "a bbb",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 4", detail)
+        self.assertAlmostEqual(score, 0.25)
+
+    def test_above_maximum_partial_credit(self):
+        # "a bbbbbbb": lengths 1 and 7, mean 4.0, variance 9.0;
+        # (2*5 - 9) / 5 = 0.2 of a 5 maximum.
+        ok, detail, score = score_case(
+            _case({"type": "word_length_variance", "max": 5}),
+            "a bbbbbbb",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 5", detail)
+        self.assertAlmostEqual(score, 0.2)
+
+    def test_twice_maximum_scores_zero(self):
+        # "a bbbbbbbbbbb": lengths 1 and 11, mean 6.0, variance 25.0,
+        # well past twice a 5 maximum, so nothing.
+        ok, _, score = score_case(
+            _case({"type": "word_length_variance", "max": 5}),
+            "a bbbbbbbbbbb",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_variation(self):
+        ok, _, score = score_case(
+            _case({"type": "word_length_variance", "max": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "word_length_variance", "max": 0}),
+            "a bb",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_scores_zero(self):
+        ok, detail, score = score_case(
+            _case({"type": "word_length_variance", "min": 0.5}),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertIn("no words in output", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_passes_when_min_zero(self):
+        # No words: a variance of 0 is in range when the minimum
+        # is 0, and when there is no minimum at all.
+        ok, _, score = score_case(
+            _case({"type": "word_length_variance", "min": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "word_length_variance", "max": 5}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_agrees_with_avg_word_length_on_mean(self):
+        # The same output's mean and variance are measured by two
+        # scorers: "a bbbbbb" has lengths 1 and 6, averaging 3.5
+        # with a variance of 6.25, so an average band of [3, 4]
+        # passes while a variance band capped at 1 fails — the two
+        # scorers can disagree, and both consistency checks are
+        # pinned here.
+        output = "a bbbbbb"
+        ok, detail, _ = score_case(
+            _case({"type": "avg_word_length", "min": 3, "max": 4}),
+            output,
+        )
+        self.assertTrue(ok)
+        self.assertIn("average word length 3.50 characters", detail)
+        ok, detail, _ = score_case(
+            _case({"type": "word_length_variance", "min": 6.25, "max": 6.25}),
+            output,
+        )
+        self.assertTrue(ok)
+        self.assertIn("word length variance 6.25", detail)
+        ok, _, _ = score_case(
+            _case({"type": "word_length_variance", "max": 1}),
+            output,
+        )
+        self.assertFalse(ok)
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "word_length_variance"}), "hello world")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "word_length_variance", "min": 6, "max": 5}),
+                "hello world",
+            )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "word_length_variance", "min": -1}),
+                "hello",
+            )
+
+    def test_string_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "word_length_variance", "min": "5"}),
+                "hello",
+            )
+
+    def test_bool_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "word_length_variance", "min": True}),
+                "hello",
+            )
+
+    def test_non_finite_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "word_length_variance", "min": float("nan")}),
+                "hello",
+            )
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "word_length_variance", "max": float("inf")}),
+                "hello",
+            )
+
+
 class TestReadabilityScorer(unittest.TestCase):
     def test_within_bounds_passes(self):
         # "The cat sat. The dog ran." — 6 words, 2 sentences, 6

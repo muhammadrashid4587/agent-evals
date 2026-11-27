@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Thirty-five scorers: exact match, substring, contains-all,
-  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, sentence length variance, average word length, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
+- Thirty-six scorers: exact match, substring, contains-all,
+  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, sentence length variance, average word length, word length variance, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON-path
   numeric range, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
@@ -111,6 +111,7 @@ detail; the run continues with the remaining cases.
 | `avg_sentence_length` | `{"min": 8, "max": 25}` | the output's average words per sentence falls in a bounded range (at least one of `min`/`max` required) |
 | `sentence_length_variance` | `{"min": 1, "max": 4}` | the output's sentence-length variance (population variance of words per sentence) falls in a bounded range (at least one of `min`/`max` required) |
 | `avg_word_length` | `{"min": 4, "max": 8}` | the output's average word length in characters falls in a bounded range (at least one of `min`/`max` required) |
+| `word_length_variance` | `{"min": 1, "max": 9}` | the output's word-length variance (population variance of characters per word) falls in a bounded range (at least one of `min`/`max` required) |
 | `readability` | `{"min": 60, "max": 90}` | the output's Flesch reading ease falls in a bounded range (at least one of `min`/`max` required) |
 | `type_token_ratio` | `{"min": 0.5, "max": 0.9}` | the output's type-token ratio (distinct words / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `hapax_ratio` | `{"min": 0.5, "max": 0.9}` | the output's hapax ratio (words used exactly once / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
@@ -133,14 +134,15 @@ detail; the run continues with the remaining cases.
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
 To see every scorer without opening this file, `--list-scorers`
-prints all thirty-five with an example spec and a one-line
+prints all thirty-six with an example spec and a one-line
 description, and exits without a suite or an agent:
 
 ```bash
 python -m agent_evals.cli --list-scorers
-# Scorers (35):
+# Scorers (36):
 #   exact                     {"type": "exact", "expected": "19"}  output equals the expected string
 #   avg_word_length           {"type": "avg_word_length", "min": 4, "max": 8}  average word length in characters falls in a bounded range
+#   word_length_variance      {"type": "word_length_variance", "min": 1, "max": 9}  word-length variance falls in a bounded range
 #   judge                     {"type": "judge", "judge": "stub", "rubric": {"criteria": [{"name": "mentions hello", "must_mention": ["hello"]}]}}  a judge scores the output against a rubric
 ```
 
@@ -532,6 +534,41 @@ is no `"ignore_case"` option. The same output scored the same way
 agrees with `word_count` on the word count — `"hello world"` is 2
 words averaging 5.0 characters, 10 characters in total — and the
 consistency check is pinned in the tests.
+
+The `word_length_variance` scorer is the variance counterpart of
+`avg_word_length`: where the average says how long the output's words
+are, the variance says how much their lengths vary — an answer whose
+words have to stay a steady length, a summary that must mix short
+words with longer ones, a reply that must not drone on in words of
+one fixed length. The variance is the population variance of the
+per-word character counts (the mean of the squared deviations from
+the mean length), so a single word always has a variance of 0 and
+words of 1 and 3 characters have a variance of 1.0. Words are the
+whitespace-separated tokens of the stripped output, counted the same
+way `word_count` counts words, and a word's length is its character
+count with punctuation attached, so `"hello,"` is 6 characters, not
+5 — the tokenization is deliberately naive, it knows nothing about
+punctuation, the same limit `unique_words` has. It passes when the
+variance falls in `[min, max]`; at least one bound is required, and
+a missing bound is unbounded on that side, so `{"min": 1}` only sets
+a floor and `{"max": 9}` only sets a ceiling. Bounds are non-negative
+numbers — a variance is a squared character count, so it can be
+fractional and is never negative. It gives partial credit like
+`count`: below the minimum the score is `variance / min`, above the
+maximum it falls linearly to 0 at twice the maximum, so an output
+just outside the range still earns most of its weight and one wildly
+outside earns nothing; a maximum of 0 gives no partial credit above
+it, so any variation in word length scores 0.0. An output with no
+words has no variance to measure: it scores 0.0 unless the minimum is
+0 (or there is no minimum), in which case a variance of 0 is in range
+and it passes. Case is irrelevant to counting word lengths, so there
+is no `"ignore_case"` option. The same output scored the same way
+agrees with `avg_word_length` on the mean — words of 1 and 6
+characters average 3.5 and vary by 6.25 — and the two scorers can
+disagree: an output whose words average 3.5 but vary by 6.25 passes
+the average band and fails a tight variance band, so a case that pins
+the variance catches uneven word lengths where an average case would
+pass it — both consistency checks are pinned in the tests.
 
 The `readability` scorer is the reading-ease counterpart of
 `avg_sentence_length`: it passes when the output's Flesch reading
@@ -2330,3 +2367,17 @@ make demo    # run both example suites through the CLI
   Python. `--suite` is no longer required by argparse when the
   flag is given, and `--agent` is not needed for it either, the
   same as `--list-tags`.~~ (done in v0.69.0)
+- ~~`word_length_variance` scorer: the variance counterpart of
+  `avg_word_length` — it checks that the population variance of
+  the output's per-word character counts falls in `[min, max]`, e.g.
+  words of 1 and 3 characters have a variance of 1.0, with words
+  counted like `word_count` and a word's length its character count
+  with punctuation attached, so `"hello,"` is 6 characters, with at
+  least one of `min`/`max` required, non-negative fractional bounds
+  allowed, partial credit like `count`, a maximum of 0 forbidding
+  any variation in word length, an output with no words scoring 0.0
+  unless the minimum is 0, and a non-numeric, non-finite, or boolean
+  bound, a negative bound, `min` above `max`, or neither bound given
+  rejected as a scorer error. The same output agrees with
+  `avg_word_length` on the mean, and the two scorers can disagree —
+  both consistency checks pinned in tests.~~ (done in v0.70.0)

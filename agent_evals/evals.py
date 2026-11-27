@@ -1434,6 +1434,77 @@ def score_avg_word_length(
     return True, detail, 1.0
 
 
+def score_word_length_variance(
+    output: str,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> tuple:
+    """Pass when the output's word-length variance falls in ``[min, max]``.
+
+    The variance counterpart of ``score_avg_word_length``: where the
+    average says how long the output's words are, the variance says
+    how much their lengths vary — an answer whose words have to stay
+    a steady length, a summary that must mix short words with longer
+    ones, a reply that must not drone on in words of one fixed
+    length. The variance is the population variance of the per-word
+    character counts (the mean of the squared deviations from the
+    mean length), so a single word always has a variance of 0 and
+    words of 1 and 3 characters have a variance of 1.0. Words are
+    the whitespace-separated tokens of the stripped output, counted
+    the same way ``word_count`` counts words, and a word's length
+    is its character count with punctuation attached, so
+    ``"hello,"`` is 6 characters, not 5 — the tokenization is
+    deliberately naive, it knows nothing about punctuation, the
+    same limit ``unique_words`` has. At least one bound is
+    required, and a missing bound is unbounded on that side, so
+    ``{"min": 1}`` only sets a floor and ``{"max": 9}`` only sets a
+    ceiling. Bounds are non-negative numbers — a variance is a
+    squared character count, so it can be fractional and is never
+    negative. Partial credit mirrors ``count``: below the minimum
+    the score is ``variance / min``, above the maximum it falls
+    linearly to 0 at twice the maximum, so an output just outside
+    the range still earns most of its weight and one wildly outside
+    earns nothing. A maximum of 0 gives no partial credit above
+    it: any variation in word length scores 0.0. An output with no
+    words has no variance to measure: it scores 0.0 unless the
+    minimum is 0 (or there is no minimum), in which case a variance
+    of 0 is in range and it passes. Case is irrelevant to counting
+    word lengths, so there is no ``ignore_case`` option — the
+    variance is the same whatever the casing.
+    """
+    words = output.strip().split()
+    lengths = [len(word) for word in words]
+    n = len(lengths)
+    if n == 0:
+        if minimum is not None and minimum > 0:
+            return False, "no words in output", 0.0
+        return True, "word length variance 0.00 (0 words)", 1.0
+    mean = sum(lengths) / n
+    variance = sum((length - mean) ** 2 for length in lengths) / n
+    detail = (
+        f"word length variance {variance:.2f} "
+        f"(word lengths {', '.join(str(length) for length in lengths)})"
+    )
+    if minimum is not None and variance < minimum:
+        score = variance / minimum
+        return (
+            False,
+            f"{detail}, below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and variance > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - variance) / maximum)
+        return (
+            False,
+            f"{detail}, above maximum {maximum}",
+            score,
+        )
+    return True, detail, 1.0
+
+
 def _count_syllables(word: str) -> int:
     """Count the syllables in one word, heuristically.
 
@@ -2014,12 +2085,12 @@ def _as_density_bound(spec: dict, key: str, kind: str) -> Optional[float]:
 def _as_variance_bound(spec: dict, key: str, kind: str) -> Optional[float]:
     """Read an optional non-negative-number bound from a scorer spec.
 
-    Shared by the ``sentence_length_variance`` and
-    ``avg_word_length`` scorers, whose values are fractional but
-    never negative. A bound must be a finite non-negative number:
-    ``True``/``False`` are rejected (``bool`` is a subclass of
-    ``int``), and a string, NaN, infinity, or a negative value is
-    a scorer error — a variance is a squared word count and an
+    Shared by the ``sentence_length_variance``,
+    ``avg_word_length``, and ``word_length_variance`` scorers, whose
+    values are fractional but never negative. A bound must be a finite
+    non-negative number: ``True``/``False`` are rejected (``bool`` is a
+    subclass of ``int``), and a string, NaN, infinity, or a negative
+    value is a scorer error — a variance is a squared word count and an
     average word length is a mean of character counts, so either
     can be fractional but never negative. Absent means no bound on
     that side.
@@ -2787,6 +2858,8 @@ SCORER_TYPES = (
      "sentence-length variance falls in a bounded range"),
     ("avg_word_length", {"min": 4, "max": 8},
      "average word length in characters falls in a bounded range"),
+    ("word_length_variance", {"min": 1, "max": 9},
+     "word-length variance falls in a bounded range"),
     ("readability", {"min": 60, "max": 90},
      "Flesch reading ease falls in a bounded range"),
     ("type_token_ratio", {"min": 0.5, "max": 0.9},
@@ -2855,7 +2928,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``score_word_count``, ``score_unique_words``,
     ``score_sentence_count``, ``score_avg_sentence_length``,
     ``score_sentence_length_variance``, ``score_avg_word_length``,
-    ``score_readability``,
+    ``score_word_length_variance``, ``score_readability``,
     ``score_keyword_density``, ``score_type_token_ratio``,
     ``score_hapax_ratio``, ``score_stopword_ratio``,
     ``score_content_word_ratio``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, ``score_json_path_numeric``, and ``score_judge``). ``judges`` is the registry of judge callables
@@ -3056,6 +3129,19 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
                 f"got {minimum} > {maximum}"
             )
         return score_avg_word_length(output, minimum, maximum)
+    if kind == "word_length_variance":
+        minimum = _as_variance_bound(spec, "min", kind)
+        maximum = _as_variance_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "word_length_variance scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "word_length_variance scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_word_length_variance(output, minimum, maximum)
     if kind == "readability":
         minimum = _as_range_bound(spec, "min", kind)
         maximum = _as_range_bound(spec, "max", kind)
