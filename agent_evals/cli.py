@@ -36,7 +36,10 @@ cases carrying that tag, and combines with ``--tag`` (select first,
 then exclude). ``--list-tags`` lists the tags used in the suite with
 their per-tag case counts and exits without running the agent, and a
 run report carries a per-tag pass-rate breakdown (see
-``RunReport.tag_breakdown``).
+``RunReport.tag_breakdown``). ``--list-scorers`` lists every scorer
+the harness knows, with an example spec and a one-line description,
+and exits without a suite or an agent — for writing suite files
+without opening the README.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ import argparse
 import importlib
 import sys
 
-from .evals import format_summary, load_suite, run_suite
+from .evals import format_scorer_list, format_summary, load_suite, run_suite
 from .judge import DEFAULT_JUDGES, make_http_judge
 from .stability import format_stability, repeat_suite
 
@@ -74,11 +77,15 @@ def main(argv=None) -> int:
         prog="agent-evals",
         description="Run an eval suite against a Python agent callable.",
     )
-    parser.add_argument("--suite", required=True, help="path to a suite JSON file")
+    parser.add_argument(
+        "--suite",
+        help="path to a suite JSON file (required unless "
+        "--list-scorers is given, which needs no suite)",
+    )
     parser.add_argument(
         "--agent",
         help="agent to test, as module:attribute (e.g. examples.calculator_agent:agent); "
-        "required unless --list-tags is given, which never runs the agent",
+        "required unless --list-tags or --list-scorers is given, which never run the agent",
     )
     parser.add_argument(
         "--report", help="optional path to write the JSON report to"
@@ -179,6 +186,12 @@ def main(argv=None) -> int:
         "with --tag (select first, then exclude)",
     )
     parser.add_argument(
+        "--list-scorers",
+        action="store_true",
+        help="list every scorer with an example spec and a one-line "
+        "description, and exit, without a suite or an agent",
+    )
+    parser.add_argument(
         "--list-tags",
         action="store_true",
         help="list the tags used in the suite with their per-tag case "
@@ -187,8 +200,17 @@ def main(argv=None) -> int:
         "selected set)",
     )
     args = parser.parse_args(argv)
+    if args.list_scorers:
+        # Listing scorers needs neither a suite nor an agent, so it
+        # runs before either is loaded or imported.
+        print(format_scorer_list())
+        return 0
+    if not args.suite:
+        parser.error("--suite is required unless --list-scorers is given")
     if not args.list_tags and not args.agent:
-        parser.error("--agent is required unless --list-tags is given")
+        parser.error(
+            "--agent is required unless --list-tags or --list-scorers is given"
+        )
     if args.workers < 1:
         parser.error("--workers must be a positive integer")
     if args.repeat < 1:

@@ -132,6 +132,25 @@ detail; the run continues with the remaining cases.
 | `numeric` | `{"expected": 3.333, "tolerance": 0.001}` | the first number in the output is within tolerance of expected |
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
+To see every scorer without opening this file, `--list-scorers`
+prints all thirty-five with an example spec and a one-line
+description, and exits without a suite or an agent:
+
+```bash
+python -m agent_evals.cli --list-scorers
+# Scorers (35):
+#   exact                     {"type": "exact", "expected": "19"}  output equals the expected string
+#   avg_word_length           {"type": "avg_word_length", "min": 4, "max": 8}  average word length in characters falls in a bounded range
+#   judge                     {"type": "judge", "judge": "stub", "rubric": {"criteria": [{"name": "mentions hello", "must_mention": ["hello"]}]}}  a judge scores the output against a rubric
+```
+
+The list comes from the `SCORER_TYPES` registry in
+`agent_evals/evals.py`, whose example specs are real specs — every
+one is accepted by `score_case` — so the listing and the dispatcher
+cannot drift apart: a scorer added to one without the other fails
+the tests. Or from Python: `agent_evals.format_scorer_list()`
+returns the same text.
+
 The JSON-schema shape language: a type name (`str`, `int`, `float`,
 `bool`, `list`, `dict`, `number`), a dict of `field -> subschema` for
 objects (a field name ending in `?` is optional), or a one-element list
@@ -2299,3 +2318,15 @@ make demo    # run both example suites through the CLI
   scorer error. The same output agrees with `word_count` on the
   word count — the consistency check pinned in tests.~~ (done in
   v0.68.0)
+- ~~`--list-scorers`: the roadmap is exhausted, so the next real
+  thing is a listing flag — `--list-scorers` prints every scorer
+  with an example spec and a one-line description and exits
+  without a suite or an agent, so a suite file can be written
+  without opening the README. The list comes from a `SCORER_TYPES`
+  registry in `agent_evals/evals.py` in the same order as the
+  README table, whose example specs are real specs accepted by
+  `score_case`, so the listing and the dispatcher cannot drift
+  apart, and `format_scorer_list()` returns the same text from
+  Python. `--suite` is no longer required by argparse when the
+  flag is given, and `--agent` is not needed for it either, the
+  same as `--list-tags`.~~ (done in v0.69.0)

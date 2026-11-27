@@ -2747,6 +2747,106 @@ def score_judge(output: str, case: Case, judges: Optional[dict] = None) -> tuple
     return verdict.passed, detail, verdict.score
 
 
+# Every scorer ``score_case`` knows, in the same order as the README
+# table: (type, a minimal valid example spec, one-line description).
+# The example specs are real specs — ``score_case`` accepts each one —
+# so the registry doubles as the source of truth for ``--list-scorers``
+# and as the consistency check that the listing never drifts from the
+# dispatcher: a scorer added to ``score_case`` without a registry entry
+# (or vice versa) fails the tests in ``tests/test_list_scorers.py``.
+# The descriptions mirror the README table's "passes when" column; keep
+# the two in sync when either changes.
+SCORER_TYPES = (
+    ("exact", {"expected": "19"},
+     "output equals the expected string"),
+    ("contains", {"substring": "hello"},
+     "output contains the substring"),
+    ("contains_all", {"substrings": ["hello", "world"]},
+     "output contains every listed substring"),
+    ("contains_any", {"substrings": ["hello", "hi"]},
+     "output contains at least one listed substring"),
+    ("not_contains", {"substrings": ["as an AI", "sorry"]},
+     "output contains none of the listed substrings"),
+    ("count", {"substring": "step", "min": 2, "max": 3},
+     "output contains the substring a bounded number of times"),
+    ("regex", {"pattern": r"^\d+$"},
+     "the regex matches anywhere in the output"),
+    ("regex_count", {"pattern": r"\d+", "min": 2, "max": 3},
+     "the regex matches a bounded number of times"),
+    ("word_count", {"min": 10, "max": 50},
+     "the output has a bounded number of words"),
+    ("unique_words", {"min": 5, "max": 20},
+     "the output has a bounded number of distinct words"),
+    ("sentence_count", {"min": 2, "max": 5},
+     "the output has a bounded number of sentences"),
+    ("keyword_density", {"keywords": ["step", "verify"], "min": 0.02, "max": 0.10},
+     "keyword density falls in a bounded range"),
+    ("avg_sentence_length", {"min": 8, "max": 25},
+     "average words per sentence falls in a bounded range"),
+    ("sentence_length_variance", {"min": 1, "max": 4},
+     "sentence-length variance falls in a bounded range"),
+    ("avg_word_length", {"min": 4, "max": 8},
+     "average word length in characters falls in a bounded range"),
+    ("readability", {"min": 60, "max": 90},
+     "Flesch reading ease falls in a bounded range"),
+    ("type_token_ratio", {"min": 0.5, "max": 0.9},
+     "type-token ratio falls in a bounded range"),
+    ("hapax_ratio", {"min": 0.5, "max": 0.9},
+     "hapax ratio falls in a bounded range"),
+    ("stopword_ratio", {"min": 0.1, "max": 0.4},
+     "stopword ratio falls in a bounded range"),
+    ("content_word_ratio", {"min": 0.6, "max": 0.9},
+     "content word ratio falls in a bounded range"),
+    ("contains_regex", {"pattern": r"^\d+$"},
+     "the regex matches anywhere in the output"),
+    ("json_schema", {"schema": {"name": "str", "age": "int"}},
+     "output is valid JSON with the given shape"),
+    ("json_path", {"path": "$.result.total", "expected": 42},
+     "the value at the JSON path equals the expected value"),
+    ("json_path_numeric", {"path": "$.result.score", "min": 80, "max": 100},
+     "the number at the JSON path falls in a bounded range"),
+    ("json_subset", {"expected": {"status": "ok", "total": 42}},
+     "the output JSON contains every expected field with a matching value"),
+    ("json_equals", {"expected": {"status": "ok", "total": 42}},
+     "the output JSON is deeply equal to the expected value"),
+    ("fuzzy", {"expected": "hello world", "threshold": 0.8},
+     "the output is similar enough to the expected string"),
+    ("levenshtein", {"expected": "hello world", "threshold": 0.8},
+     "the output is close enough to the expected string by edit distance"),
+    ("starts_with", {"prefix": "The answer is"},
+     "the output starts with the prefix"),
+    ("ends_with", {"suffix": "is 42"},
+     "the output ends with the suffix"),
+    ("one_of", {"values": ["yes", "no", "maybe"]},
+     "the output equals one of the listed values"),
+    ("length", {"min_length": 10, "max_length": 100},
+     "the output's length falls in the range"),
+    ("range", {"min": 0, "max": 100},
+     "the first number in the output falls in the range"),
+    ("numeric", {"expected": 3.333, "tolerance": 0.001},
+     "the first number in the output is within tolerance of expected"),
+    ("judge", {"judge": "stub", "rubric": {"criteria": [
+        {"name": "mentions hello", "must_mention": ["hello"]}]}},
+     "a judge scores the output against a rubric"),
+)
+
+
+def format_scorer_list() -> str:
+    """Render the scorer registry as plain text for ``--list-scorers``.
+
+    One line per scorer — type, example spec, what it passes on — so
+    someone writing a suite file can see every scorer and its shape
+    without opening the README. The spec is rendered as compact JSON
+    in the same key order as the registry entry.
+    """
+    lines = [f"Scorers ({len(SCORER_TYPES)}):"]
+    width = max(len(kind) for kind, _, _ in SCORER_TYPES)
+    for kind, spec, description in SCORER_TYPES:
+        example = json.dumps({"type": kind, **spec})
+        lines.append(f"  {kind:<{width}}  {example}  {description}")
+    return "\n".join(lines)
+
+
 def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     """Score one case's output. Returns (passed, detail, score) where
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction

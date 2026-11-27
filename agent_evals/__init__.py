@@ -5,13 +5,15 @@ unless you register a judge that calls one (see ``agent_evals.judge``).
 The agent under test is a plain Python callable.
 """
 
-__version__ = "0.68.0"
+__version__ = "0.69.0"
 
 from .evals import (
+    SCORER_TYPES,
     Case,
     Result,
     RunReport,
     Suite,
+    format_scorer_list,
     format_summary,
     load_report,
     load_suite,
@@ -48,6 +50,7 @@ __all__ = [
     "Result",
     "RunReport",
     "RunSummary",
+    "SCORER_TYPES",
     "StabilityReport",
     "StabilityRunSummary",
     "Suite",
@@ -60,6 +63,7 @@ __all__ = [
     "format_comparison",
     "format_flaky_history",
     "format_model_comparison",
+    "format_scorer_list",
     "format_stability",
     "format_summary",
     "format_trend",
