@@ -15,10 +15,10 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Thirty-six scorers: exact match, substring, contains-all,
+- Thirty-seven scorers: exact match, substring, contains-all,
   contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, sentence length variance, average word length, word length variance, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON-path
-  numeric range, JSON
+  numeric range, JSON-path count, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
   numeric range, numeric tolerance, and a judge scorer that scores
@@ -121,6 +121,7 @@ detail; the run continues with the remaining cases.
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
 | `json_path_numeric` | `{"path": "$.result.score", "min": 80, "max": 100}` | the number at the JSON path falls in a bounded range (at least one of `min`/`max` required; optional `tolerance` widens the band) |
+| `json_path_count` | `{"path": "$.items", "min": 2, "max": 5}` | the number of items at the JSON path falls in a bounded range (at least one of `min`/`max` required) |
 | `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
 | `json_equals` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON is deeply equal to the expected value (optional `ignore_order` to compare arrays as multisets, optional `tolerance` for numbers) |
 | `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8; optional `"ignore_case": true` for a case-insensitive comparison) |
@@ -134,15 +135,16 @@ detail; the run continues with the remaining cases.
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
 To see every scorer without opening this file, `--list-scorers`
-prints all thirty-six with an example spec and a one-line
+prints all thirty-seven with an example spec and a one-line
 description, and exits without a suite or an agent:
 
 ```bash
 python -m agent_evals.cli --list-scorers
-# Scorers (36):
+# Scorers (37):
 #   exact                     {"type": "exact", "expected": "19"}  output equals the expected string
 #   avg_word_length           {"type": "avg_word_length", "min": 4, "max": 8}  average word length in characters falls in a bounded range
 #   word_length_variance      {"type": "word_length_variance", "min": 1, "max": 9}  word-length variance falls in a bounded range
+#   json_path_count           {"type": "json_path_count", "path": "$.items", "min": 2, "max": 5}  the number of items at the JSON path falls in a bounded range
 #   judge                     {"type": "judge", "judge": "stub", "rubric": {"criteria": [{"name": "mentions hello", "must_mention": ["hello"]}]}}  a judge scores the output against a rubric
 ```
 
@@ -192,6 +194,36 @@ with a tolerance is the same check as `json_path` with that expected
 value and tolerance, and the same number scored the same way agrees
 with `range` on the bare number — the two consistency checks are
 pinned in the tests.
+
+The `json_path_count` scorer is the count counterpart of
+`json_path_numeric`: where that scorer checks that a number at a
+path falls in a band, `json_path_count` checks that the number of
+items at a path falls in `[min, max]` — an agent that returns
+`{"items": [...]}` scored against a band of 2 to 5 results, a
+config object that has to carry at least three keys, a list that
+must stay under a ceiling. The count is the array length for a
+list, or the key count for an object, so a list of three and a
+dict of three keys are both a count of 3. It uses the same path
+language, so `$.items` and `result.tags` both work, and the same
+failure modes: an output that is not valid JSON fails with a score
+of 0.0, a missing key or index fails the same way, and a value at
+the path that is not a list or an object — a string, a number, a
+bool, null — fails too, because a scalar has no items to count.
+It passes when the count falls in `[min, max]`; at least one bound
+is required, and a missing bound is unbounded on that side, so
+`{"min": 2}` only sets a floor and `{"max": 5}` only sets a
+ceiling, and bounds are non-negative integers because a count is
+a whole number. It gives partial credit like `count`: below the
+minimum the score is `n / min` (0 when the container is empty),
+above the maximum it falls linearly to 0 at twice the maximum, so
+a value just outside the band still earns most of its weight and
+one wildly outside earns nothing; a maximum of 0 gives no partial
+credit above it, so any item scores 0.0. A non-integer or negative
+bound, `min` above `max`, or neither bound given is a scorer
+error. The same count scored the same way agrees with `count` on
+the bare output — 2 occurrences against a floor of 4 is 0.5 either
+way — and a list and a dict with the same size agree with each
+other — both consistency checks are pinned in the tests.
 
 The JSON-subset scorer checks several fields at once where
 `json_path` checks one: `expected` is an object, and every field it
@@ -2381,3 +2413,19 @@ make demo    # run both example suites through the CLI
   rejected as a scorer error. The same output agrees with
   `avg_word_length` on the mean, and the two scorers can disagree —
   both consistency checks pinned in tests.~~ (done in v0.70.0)
+- ~~`json_path_count` scorer: the count counterpart of
+  `json_path_numeric` — it checks that the number of items at a
+  JSON path falls in `[min, max]`, e.g. an `{"items": [...]}` scored
+  against a band of 2 to 5 results, with the count the array length
+  for a list or the key count for an object, using the same path
+  language (`$.items`, `result.tags`), with at least one of
+  `min`/`max` required, non-negative integer bounds, partial credit
+  like `count` (below the minimum the score is `n / min`, above the
+  maximum it falls linearly to 0 at twice the maximum), a maximum of
+  0 forbidding any item, invalid JSON or a missing key failing with
+  0.0, a scalar at the path failing too, and a malformed path, a
+  non-integer or negative bound, `min` above `max`, or neither bound
+  given rejected as a scorer error. The same count agrees with
+  `count`, and a list and a dict with the same size agree with each
+  other — both consistency checks pinned in tests.~~ (done in
+  v0.71.0)

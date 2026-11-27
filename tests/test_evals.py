@@ -3973,6 +3973,328 @@ class TestJsonPathNumericScorer(unittest.TestCase):
             self.assertAlmostEqual(numeric[2], ranged[2])
 
 
+class TestJsonPathCountScorer(unittest.TestCase):
+    def test_array_in_range_passes(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "json_path_count",
+                    "path": "$.items",
+                    "min": 2,
+                    "max": 5,
+                }
+            ),
+            '{"items": [1, 2, 3]}',
+        )
+        self.assertTrue(ok)
+        self.assertIn("$.items", detail)
+        self.assertIn("3", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_object_key_count_passes(self):
+        # A dict counts its keys, the same way a list counts its
+        # elements: three keys is a count of 3.
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_path_count",
+                    "path": "$.config",
+                    "min": 3,
+                    "max": 3,
+                }
+            ),
+            '{"config": {"a": 1, "b": 2, "c": 3}}',
+        )
+        self.assertTrue(ok)
+
+    def test_bare_path_and_array_index(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_path_count",
+                    "path": "results[0].tags",
+                    "min": 1,
+                    "max": 3,
+                }
+            ),
+            '{"results": [{"tags": ["x", "y"]}]}',
+        )
+        self.assertTrue(ok)
+
+    def test_empty_array_counts_zero(self):
+        ok, _, score = score_case(
+            _case(
+                {"type": "json_path_count", "path": "$.items", "min": 0}
+            ),
+            '{"items": []}',
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_below_min_partial_credit(self):
+        # Below the minimum the score is n / min, the count
+        # convention: 2 items against a floor of 4 scores 0.5.
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "json_path_count",
+                    "path": "$.items",
+                    "min": 4,
+                    "max": 6,
+                }
+            ),
+            '{"items": [1, 2]}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_above_max_partial_credit(self):
+        # Above the maximum the score falls linearly to 0 at twice
+        # the maximum: 6 items against a ceiling of 5 scores 0.8.
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "json_path_count",
+                    "path": "$.items",
+                    "min": 1,
+                    "max": 5,
+                }
+            ),
+            '{"items": [1, 2, 3, 4, 5, 6]}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum", detail)
+        self.assertAlmostEqual(score, 0.8)
+
+    def test_far_above_max_scores_zero(self):
+        _, _, score = score_case(
+            _case(
+                {
+                    "type": "json_path_count",
+                    "path": "$.items",
+                    "min": 1,
+                    "max": 5,
+                }
+            ),
+            '{"items": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}',
+        )
+        self.assertEqual(score, 0.0)
+
+    def test_single_bound_floor(self):
+        ok, _, score = score_case(
+            _case({"type": "json_path_count", "path": "$.items", "min": 2}),
+            '{"items": [1, 2, 3]}',
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        _, _, score = score_case(
+            _case({"type": "json_path_count", "path": "$.items", "min": 4}),
+            '{"items": [1, 2]}',
+        )
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_single_bound_ceiling(self):
+        ok, _, _ = score_case(
+            _case({"type": "json_path_count", "path": "$.items", "max": 3}),
+            '{"items": [1]}',
+        )
+        self.assertTrue(ok)
+        _, _, score = score_case(
+            _case({"type": "json_path_count", "path": "$.items", "max": 3}),
+            '{"items": [1, 2, 3, 4]}',
+        )
+        self.assertAlmostEqual(score, 2 / 3)
+
+    def test_max_zero_forbids(self):
+        ok, _, score = score_case(
+            _case({"type": "json_path_count", "path": "$.items", "max": 0}),
+            '{"items": [1]}',
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_min_equals_max_is_exact_count(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_path_count",
+                    "path": "$.items",
+                    "min": 3,
+                    "max": 3,
+                }
+            ),
+            '{"items": [1, 2, 3]}',
+        )
+        self.assertTrue(ok)
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_path_count",
+                    "path": "$.items",
+                    "min": 3,
+                    "max": 3,
+                }
+            ),
+            '{"items": [1, 2]}',
+        )
+        self.assertFalse(ok)
+
+    def test_invalid_json_fails(self):
+        ok, detail, score = score_case(
+            _case({"type": "json_path_count", "path": "$.items", "min": 0}),
+            "{not json",
+        )
+        self.assertFalse(ok)
+        self.assertIn("not valid JSON", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_missing_key_fails(self):
+        ok, detail, score = score_case(
+            _case({"type": "json_path_count", "path": "$.missing", "min": 0}),
+            '{"items": [1]}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("missing", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_scalar_value_fails(self):
+        # A string, a number, a bool, and null have no items to
+        # count, so they fail the same way a missing key does.
+        for output in (
+            '{"items": "abc"}',
+            '{"items": 42}',
+            '{"items": true}',
+            '{"items": null}',
+        ):
+            ok, detail, score = score_case(
+                _case(
+                    {"type": "json_path_count", "path": "$.items", "min": 0}
+                ),
+                output,
+            )
+            self.assertFalse(ok, output)
+            self.assertIn("list or object", detail)
+            self.assertEqual(score, 0.0)
+
+    def test_malformed_path_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "json_path_count", "path": "$.a..b", "min": 0}
+                ),
+                '{"a": {}}',
+            )
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "json_path_count", "path": "$.items"}),
+                '{"items": [1]}',
+            )
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "json_path_count",
+                        "path": "$.items",
+                        "min": 5,
+                        "max": 2,
+                    }
+                ),
+                '{"items": [1]}',
+            )
+
+    def test_non_integer_bound_raises(self):
+        for bad in ("low", 2.5, True):
+            with self.assertRaises(ValueError):
+                score_case(
+                    _case(
+                        {
+                            "type": "json_path_count",
+                            "path": "$.items",
+                            "min": bad,
+                        }
+                    ),
+                    '{"items": [1]}',
+                )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "json_path_count",
+                        "path": "$.items",
+                        "min": -1,
+                    }
+                ),
+                '{"items": [1]}',
+            )
+
+    def test_integral_float_bound_accepted(self):
+        # _as_length_bound accepts an integral float, like the
+        # other count-style scorers.
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_path_count",
+                    "path": "$.items",
+                    "min": 2.0,
+                    "max": 5.0,
+                }
+            ),
+            '{"items": [1, 2, 3]}',
+        )
+        self.assertTrue(ok)
+
+    def test_agrees_with_count_on_the_same_count(self):
+        # The same count scored the same way: json_path_count on
+        # the JSON array and count on the bare output must give the
+        # same verdict and partial credit — 2 occurrences against a
+        # floor of 4 is 0.5 either way.
+        counted = score_case(
+            _case(
+                {
+                    "type": "json_path_count",
+                    "path": "$.items",
+                    "min": 4,
+                    "max": 6,
+                }
+            ),
+            '{"items": [1, 2]}',
+        )
+        plain = score_case(
+            _case({"type": "count", "substring": "x", "min": 4, "max": 6}),
+            "x x",
+        )
+        self.assertEqual(counted[0], plain[0])
+        self.assertAlmostEqual(counted[2], plain[2])
+
+    def test_list_and_dict_with_same_size_agree(self):
+        # A list of 3 and a dict of 3 keys are both a count of 3:
+        # the two container shapes must score identically.
+        for output in (
+            '{"v": [1, 2, 3]}',
+            '{"v": {"a": 1, "b": 2, "c": 3}}',
+        ):
+            ok, _, score = score_case(
+                _case(
+                    {
+                        "type": "json_path_count",
+                        "path": "$.v",
+                        "min": 3,
+                        "max": 3,
+                    }
+                ),
+                output,
+            )
+            self.assertTrue(ok, output)
+            self.assertEqual(score, 1.0)
+
+
 class TestJsonSubsetScorer(unittest.TestCase):
     def test_extra_keys_ignored(self):
         ok, _, _ = score_case(

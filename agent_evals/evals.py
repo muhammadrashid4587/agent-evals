@@ -2443,6 +2443,86 @@ def score_json_path_numeric(
     )
 
 
+def score_json_path_count(
+    output: str,
+    path: str,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> tuple:
+    """Pass when the number of items at ``path`` in the output JSON falls in ``[min, max]``.
+
+    The count counterpart of ``score_json_path_numeric``: where that
+    scorer checks that a number at a path falls in a range,
+    ``json_path_count`` checks that the number of items at a path
+    falls in a range — an agent that returns ``{"items": [...]}``
+    scored against a band of 2 to 5 results, a config object that
+    has to carry at least three keys, a list that must stay under a
+    ceiling. The count is the array length for a list, or the key
+    count for an object. The path is the same dotted language
+    ``json_path`` uses (optional ``$`` prefix, ``[n]`` array
+    indices), so ``$.items`` and ``result.tags`` both work. At least
+    one bound is required, and a missing bound is unbounded on that
+    side, so ``{"min": 2}`` only sets a floor and ``{"max": 5}``
+    only sets a ceiling; bounds are non-negative integers, since a
+    count is a whole number. An output that is not valid JSON fails
+    with a score of 0.0, a missing key or index fails the same way,
+    and a value at the path that is not a list or an object — a
+    string, a number, a bool, null — fails too, because a scalar
+    has no items to count. A malformed path is a scorer error.
+    Partial credit mirrors ``count`` (the ``length`` convention for
+    counts): below the minimum the score is ``n / min`` (0 when the
+    container is empty), above the maximum it falls linearly to 0
+    at twice the maximum, so a value just outside the band still
+    earns most of its weight and one wildly outside earns nothing.
+    A maximum of 0 gives no partial credit above it: any item
+    scores 0.0. A non-integer or negative bound, ``min`` above
+    ``max``, or neither bound given is a scorer error.
+    """
+    if minimum is None and maximum is None:
+        raise ValueError(
+            "json_path_count scorer requires at least one of 'min' or 'max'"
+        )
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise ValueError(
+            "json_path_count scorer requires 'min' <= 'max', "
+            f"got {minimum} > {maximum}"
+        )
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError as exc:
+        return False, f"output is not valid JSON: {exc}", 0.0
+    steps = _parse_json_path(path)
+    found, extracted = _extract_json_path(value, steps, path)
+    if not found:
+        return False, extracted, 0.0
+    if not isinstance(extracted, (list, dict)):
+        return (
+            False,
+            f"expected {path} to be a list or object, "
+            f"got {type(extracted).__name__}",
+            0.0,
+        )
+    n = len(extracted)
+    if minimum is not None and n < minimum:
+        score = n / minimum if minimum else 0.0
+        return (
+            False,
+            f"{path} has {n} item(s), below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and n > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - n) / maximum)
+        return (
+            False,
+            f"{path} has {n} item(s), above maximum {maximum}",
+            score,
+        )
+    return True, f"{path} has {n} item(s)", 1.0
+
+
 def _count_leaves(value: Any) -> int:
     """Count the scalar leaves in an expected JSON value: one per
     scalar, the sum of the elements for a list, the sum of the values
@@ -2878,6 +2958,8 @@ SCORER_TYPES = (
      "the value at the JSON path equals the expected value"),
     ("json_path_numeric", {"path": "$.result.score", "min": 80, "max": 100},
      "the number at the JSON path falls in a bounded range"),
+    ("json_path_count", {"path": "$.items", "min": 2, "max": 5},
+     "the number of items at the JSON path falls in a bounded range"),
     ("json_subset", {"expected": {"status": "ok", "total": 42}},
      "the output JSON contains every expected field with a matching value"),
     ("json_equals", {"expected": {"status": "ok", "total": 42}},
@@ -2931,7 +3013,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``score_word_length_variance``, ``score_readability``,
     ``score_keyword_density``, ``score_type_token_ratio``,
     ``score_hapax_ratio``, ``score_stopword_ratio``,
-    ``score_content_word_ratio``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, ``score_json_path_numeric``, and ``score_judge``). ``judges`` is the registry of judge callables
+    ``score_content_word_ratio``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, ``score_json_path_numeric``, ``score_json_path_count``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``count``, ``starts_with``,
@@ -3281,6 +3363,24 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
             minimum,
             maximum,
             spec.get("tolerance", 0.0),
+        )
+    if kind == "json_path_count":
+        minimum = _as_length_bound(spec, "min", kind)
+        maximum = _as_length_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "json_path_count scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "json_path_count scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_json_path_count(
+            output,
+            str(spec["path"]),
+            minimum,
+            maximum,
         )
     if kind == "json_subset":
         if "expected" not in spec:
