@@ -2975,6 +2975,335 @@ class TestJsonPathScorer(unittest.TestCase):
             score_case(_case({"type": "json_path", "path": "$.a"}), '{"a": 1}')
 
 
+class TestJsonPathNumericScorer(unittest.TestCase):
+    def test_in_range_passes(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "json_path_numeric",
+                    "path": "$.result.score",
+                    "min": 80,
+                    "max": 100,
+                }
+            ),
+            '{"result": {"score": 87}}',
+        )
+        self.assertTrue(ok)
+        self.assertIn("$.result.score", detail)
+        self.assertIn("87", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_bare_path_and_array_index(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_path_numeric",
+                    "path": "items[0].price",
+                    "min": 0,
+                    "max": 10,
+                }
+            ),
+            '{"items": [{"price": 9.5}]}',
+        )
+        self.assertTrue(ok)
+
+    def test_float_value(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_path_numeric",
+                    "path": "$.pi",
+                    "min": 3,
+                    "max": 4,
+                }
+            ),
+            '{"pi": 3.14159}',
+        )
+        self.assertTrue(ok)
+
+    def test_below_min_partial_credit(self):
+        # One scale away is the full range width (20), so 70 is
+        # halfway below the floor of 80: score 0.5.
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "json_path_numeric",
+                    "path": "$.score",
+                    "min": 80,
+                    "max": 100,
+                }
+            ),
+            '{"score": 70}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_above_max_partial_credit(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "json_path_numeric",
+                    "path": "$.score",
+                    "min": 0,
+                    "max": 100,
+                }
+            ),
+            '{"score": 110}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum", detail)
+        self.assertAlmostEqual(score, 0.9)
+
+    def test_far_outside_scores_zero(self):
+        _, _, score = score_case(
+            _case(
+                {
+                    "type": "json_path_numeric",
+                    "path": "$.score",
+                    "min": 0,
+                    "max": 100,
+                }
+            ),
+            '{"score": 300}',
+        )
+        self.assertEqual(score, 0.0)
+
+    def test_single_bound_floor(self):
+        ok, _, score = score_case(
+            _case({"type": "json_path_numeric", "path": "$.n", "min": 10}),
+            '{"n": 12}',
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        # Below a lone floor the scale is the floor's magnitude.
+        _, _, score = score_case(
+            _case({"type": "json_path_numeric", "path": "$.n", "min": 10}),
+            '{"n": 5}',
+        )
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_single_bound_ceiling(self):
+        ok, _, _ = score_case(
+            _case({"type": "json_path_numeric", "path": "$.n", "max": 10}),
+            '{"n": 5}',
+        )
+        self.assertTrue(ok)
+        _, _, score = score_case(
+            _case({"type": "json_path_numeric", "path": "$.n", "max": 10}),
+            '{"n": 15}',
+        )
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_max_zero_forbids(self):
+        ok, _, score = score_case(
+            _case({"type": "json_path_numeric", "path": "$.n", "max": 0}),
+            '{"n": 5}',
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_min_equals_max_gives_no_partial_credit(self):
+        _, _, score = score_case(
+            _case(
+                {
+                    "type": "json_path_numeric",
+                    "path": "$.n",
+                    "min": 42,
+                    "max": 42,
+                }
+            ),
+            '{"n": 43}',
+        )
+        self.assertEqual(score, 0.0)
+
+    def test_tolerance_widens_band(self):
+        ok, _, _ = score_case(
+            _case(
+                {
+                    "type": "json_path_numeric",
+                    "path": "$.n",
+                    "min": 0,
+                    "max": 100,
+                    "tolerance": 2,
+                }
+            ),
+            '{"n": 101}',
+        )
+        self.assertTrue(ok)
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "json_path_numeric",
+                    "path": "$.n",
+                    "min": 0,
+                    "max": 100,
+                    "tolerance": 2,
+                }
+            ),
+            '{"n": 103}',
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 1 - 1 / 104)
+
+    def test_invalid_json_fails(self):
+        ok, detail, score = score_case(
+            _case({"type": "json_path_numeric", "path": "$.n", "min": 0}),
+            "{not json",
+        )
+        self.assertFalse(ok)
+        self.assertIn("not valid JSON", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_missing_key_fails(self):
+        ok, detail, score = score_case(
+            _case({"type": "json_path_numeric", "path": "$.missing", "min": 0}),
+            '{"total": 1}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("missing", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_non_numeric_value_fails(self):
+        ok, detail, score = score_case(
+            _case({"type": "json_path_numeric", "path": "$.n", "min": 0}),
+            '{"n": "42"}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("number", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_bool_is_not_a_number(self):
+        ok, _, score = score_case(
+            _case({"type": "json_path_numeric", "path": "$.n", "min": 0}),
+            '{"n": true}',
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_malformed_path_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "json_path_numeric", "path": "$.a..b", "min": 0}
+                ),
+                '{"a": {}}',
+            )
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "json_path_numeric", "path": "$.n"}),
+                '{"n": 1}',
+            )
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "json_path_numeric",
+                        "path": "$.n",
+                        "min": 100,
+                        "max": 0,
+                    }
+                ),
+                '{"n": 50}',
+            )
+
+    def test_non_numeric_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "json_path_numeric",
+                        "path": "$.n",
+                        "min": "low",
+                    }
+                ),
+                '{"n": 1}',
+            )
+
+    def test_bool_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {"type": "json_path_numeric", "path": "$.n", "min": True}
+                ),
+                '{"n": 1}',
+            )
+
+    def test_bad_tolerance_raises(self):
+        for bad in (-1, "0.1", float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                score_case(
+                    _case(
+                        {
+                            "type": "json_path_numeric",
+                            "path": "$.n",
+                            "min": 0,
+                            "max": 100,
+                            "tolerance": bad,
+                        }
+                    ),
+                    '{"n": 50}',
+                )
+
+    def test_agrees_with_json_path_at_a_point(self):
+        # A band collapsed to one value with a tolerance is the
+        # same check as json_path with that expected value and
+        # tolerance: the two scorers must agree on every value.
+        for value in (41, 42, 43):
+            numeric = score_case(
+                _case(
+                    {
+                        "type": "json_path_numeric",
+                        "path": "$.total",
+                        "min": 42,
+                        "max": 42,
+                        "tolerance": 0.01,
+                    }
+                ),
+                f'{{"total": {value}}}',
+            )
+            exact = score_case(
+                _case(
+                    {
+                        "type": "json_path",
+                        "path": "$.total",
+                        "expected": 42,
+                        "tolerance": 0.01,
+                    }
+                ),
+                f'{{"total": {value}}}',
+            )
+            self.assertEqual(numeric[0], exact[0], f"value {value}")
+
+    def test_agrees_with_range_on_the_same_value(self):
+        # The same number scored the same way: json_path_numeric
+        # on the JSON field and range on the bare number must give
+        # the same verdict and partial credit.
+        for output, expected_score in (('{"total": 42}', 1.0), ('{"total": 150}', 0.5)):
+            numeric = score_case(
+                _case(
+                    {
+                        "type": "json_path_numeric",
+                        "path": "$.total",
+                        "min": 0,
+                        "max": 100,
+                    }
+                ),
+                output,
+            )
+            ranged = score_case(
+                _case({"type": "range", "min": 0, "max": 100}),
+                output,
+            )
+            self.assertEqual(numeric[0], ranged[0])
+            self.assertAlmostEqual(numeric[2], expected_score)
+            self.assertAlmostEqual(numeric[2], ranged[2])
+
+
 class TestJsonSubsetScorer(unittest.TestCase):
     def test_extra_keys_ignored(self):
         ok, _, _ = score_case(

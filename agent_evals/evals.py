@@ -2107,6 +2107,102 @@ def score_json_path(
     return False, f"expected {path} == {expected!r}, got {extracted!r}", 0.0
 
 
+def score_json_path_numeric(
+    output: str,
+    path: str,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+    tolerance: float = 0.0,
+) -> tuple:
+    """Pass when the number at ``path`` in the output JSON falls in ``[min, max]``.
+
+    The numeric counterpart of ``score_json_path``: where ``json_path``
+    checks that the value at a path equals an expected value,
+    ``json_path_numeric`` checks that a numeric value at a path falls
+    in a bounded range — an agent that returns ``{"result": {"score":
+    87}}`` scored against a band of 80 to 100, a confidence that has
+    to stay in [0, 1], a latency field that must stay under a ceiling.
+    The path is the same dotted language ``json_path`` uses (optional
+    ``$`` prefix, ``[n]`` array indices), so ``$.result.score`` and
+    ``items[0].price`` both work. At least one bound is required, and
+    a missing bound is unbounded on that side, so ``{"min": 80}`` only
+    sets a floor and ``{"max": 100}`` only sets a ceiling; bounds may
+    be negative, and may be integers or floats. An optional
+    ``tolerance`` widens the accepted band by that amount on each
+    bounded side, the same widening ``range`` applies. An output that
+    is not valid JSON fails with a score of 0.0, a missing key or
+    index fails the same way, and a value at the path that is not a
+    number (a string, a bool, null, an object) fails too — a bool is
+    never accepted as a number, the same rule ``json_path`` applies.
+    A malformed path is a scorer error. Partial credit mirrors
+    ``range`` (the ``count``/``length`` convention for numbers): the
+    score falls linearly from 1.0 at the widened bound to 0.0 one
+    scale away, where the scale is the widened range width when both
+    bounds are present or the magnitude of the single widened bound
+    otherwise, so a value just outside the band still earns most of
+    its weight and one a full scale outside earns nothing. A zero
+    scale (``min == max`` with no tolerance, or a lone bound of 0
+    with no tolerance) gives no partial credit: any value outside
+    the range scores 0.0. A non-numeric bound, ``min`` above ``max``,
+    or a non-numeric, negative, NaN, or infinite ``tolerance`` is a
+    scorer error, and a tolerance of 0 keeps the old behaviour
+    exactly.
+    """
+    tolerance = _validate_tolerance(tolerance, "json_path_numeric")
+    if minimum is None and maximum is None:
+        raise ValueError(
+            "json_path_numeric scorer requires at least one of 'min' or 'max'"
+        )
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise ValueError(
+            "json_path_numeric scorer requires 'min' <= 'max', "
+            f"got {minimum} > {maximum}"
+        )
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError as exc:
+        return False, f"output is not valid JSON: {exc}", 0.0
+    steps = _parse_json_path(path)
+    found, extracted = _extract_json_path(value, steps, path)
+    if not found:
+        return False, extracted, 0.0
+    if isinstance(extracted, bool) or not isinstance(extracted, (int, float)):
+        return (
+            False,
+            f"expected {path} to be a number, "
+            f"got {type(extracted).__name__}",
+            0.0,
+        )
+    got = float(extracted)
+    eff_min = None if minimum is None else minimum - tolerance
+    eff_max = None if maximum is None else maximum + tolerance
+    lo = f"min {eff_min}" if eff_min is not None else "no minimum"
+    hi = f"max {eff_max}" if eff_max is not None else "no maximum"
+    if (eff_min is None or got >= eff_min) and (
+        eff_max is None or got <= eff_max
+    ):
+        return True, f"{path} = {got} within [{lo}, {hi}]", 1.0
+    if eff_min is not None and eff_max is not None:
+        scale = eff_max - eff_min
+    elif eff_min is not None:
+        scale = abs(eff_min)
+    else:
+        scale = abs(eff_max)  # type: ignore[arg-type]
+    if scale == 0:
+        score = 0.0
+    elif eff_min is not None and got < eff_min:
+        score = max(0.0, 1.0 - (eff_min - got) / scale)
+    else:
+        score = max(0.0, 1.0 - (got - eff_max) / scale)  # type: ignore[operator]
+    side = "below minimum" if eff_min is not None and got < eff_min else "above maximum"
+    bound = eff_min if side == "below minimum" else eff_max
+    return (
+        False,
+        f"{path} = {got} {side} {bound} (score {score:.2f})",
+        score,
+    )
+
+
 def _count_leaves(value: Any) -> int:
     """Count the scalar leaves in an expected JSON value: one per
     scalar, the sum of the elements for a list, the sum of the values
@@ -2492,7 +2588,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``score_readability``,
     ``score_keyword_density``, ``score_type_token_ratio``,
     ``score_hapax_ratio``, ``score_stopword_ratio``,
-    ``score_content_word_ratio``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, and ``score_judge``). ``judges`` is the registry of judge callables
+    ``score_content_word_ratio``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, ``score_json_path_numeric``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
     ``contains_any``, ``not_contains``, ``count``, ``starts_with``,
@@ -2784,6 +2880,25 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
             str(spec["path"]),
             spec["expected"],
             float(spec.get("tolerance", 0.0)),
+        )
+    if kind == "json_path_numeric":
+        minimum = _as_range_bound(spec, "min", kind)
+        maximum = _as_range_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "json_path_numeric scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "json_path_numeric scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_json_path_numeric(
+            output,
+            str(spec["path"]),
+            minimum,
+            maximum,
+            spec.get("tolerance", 0.0),
         )
     if kind == "json_subset":
         if "expected" not in spec:

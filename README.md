@@ -15,9 +15,10 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Thirty-two scorers: exact match, substring, contains-all,
+- Thirty-three scorers: exact match, substring, contains-all,
   contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
-  contains-regex, JSON-schema shape, JSON-path value, JSON
+  contains-regex, JSON-schema shape, JSON-path value, JSON-path
+  numeric range, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
   numeric range, numeric tolerance, and a judge scorer that scores
@@ -116,6 +117,7 @@ detail; the run continues with the remaining cases.
 | `contains_regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match; a non-string `pattern` is a scorer error) |
 | `json_schema` | `{"schema": {"name": "str", "age": "int"}}` | output is valid JSON with the given shape |
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
+| `json_path_numeric` | `{"path": "$.result.score", "min": 80, "max": 100}` | the number at the JSON path falls in a bounded range (at least one of `min`/`max` required; optional `tolerance` widens the band) |
 | `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
 | `json_equals` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON is deeply equal to the expected value (optional `ignore_order` to compare arrays as multisets, optional `tolerance` for numbers) |
 | `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8; optional `"ignore_case": true` for a case-insensitive comparison) |
@@ -137,6 +139,36 @@ The JSON-path language: an optional leading `$`, dot-separated keys, and
 `[n]` array indices, e.g. `$.result.total` or `items[0].name`. A missing
 key or index fails the case; a malformed path is a scorer error. Numbers
 compare with an optional `tolerance`; `bool` is never accepted as `int`.
+
+The `json_path_numeric` scorer is the numeric counterpart of
+`json_path`: where `json_path` checks that the value at a path equals
+an expected value, `json_path_numeric` checks that a number at a path
+falls in `[min, max]` — an agent that returns `{"result": {"score":
+87}}` scored against a band of 80 to 100, a confidence that has to
+stay in [0, 1], a latency field that must stay under a ceiling. It
+uses the same path language, so `$.result.score` and
+`items[0].price` both work, and the same failure modes: an output
+that is not valid JSON fails with a score of 0.0, a missing key or
+index fails the same way, and a value at the path that is not a
+number — a string, a bool, null, an object — fails too, because a
+bool is never accepted as a number. It passes when the number falls
+in `[min, max]`; at least one bound is required, and a missing bound
+is unbounded on that side, so `{"min": 80}` only sets a floor and
+`{"max": 100}` only sets a ceiling, and bounds may be negative. An
+optional `tolerance` widens the accepted band by that amount on each
+bounded side, the same widening `range` applies. It gives partial
+credit like `range` (the `count`/`length` convention for numbers):
+the score falls linearly from 1.0 at the widened bound to 0.0 one
+scale away, where the scale is the widened range width when both
+bounds are present or the magnitude of the single widened bound
+otherwise, so a value just outside the band still earns most of its
+weight and one a full scale outside earns nothing; a zero scale
+(`min == max` with no tolerance, or a lone bound of 0 with no
+tolerance) gives no partial credit. A band collapsed to one value
+with a tolerance is the same check as `json_path` with that expected
+value and tolerance, and the same number scored the same way agrees
+with `range` on the bare number — the two consistency checks are
+pinned in the tests.
 
 The JSON-subset scorer checks several fields at once where
 `json_path` checks one: `expected` is an object, and every field it
@@ -2152,3 +2184,17 @@ make demo    # run both example suites through the CLI
   and a non-numeric, non-finite, or boolean bound, a bound
   outside [0, 1], `min` above `max`, or neither bound given
   rejected as a scorer error.~~ (done in v0.65.0)
+- ~~`json_path_numeric` scorer: the numeric counterpart of
+  `json_path` — it checks that a number at a JSON path falls in
+  `[min, max]`, e.g. a `{"result": {"score": 87}}` scored against a
+  band of 80 to 100, using the same path language (`$.result.score`,
+  `items[0].price`), with at least one of `min`/`max` required, an
+  optional `tolerance` that widens the band like `range`, partial
+  credit like `range` (the `count`/`length` convention for numbers),
+  a maximum of 0 forbidding any positive value, invalid JSON or a
+  missing key failing with 0.0, a non-numeric value at the path
+  failing too (a bool is never a number), and a malformed path, a
+  non-numeric bound, `min` above `max`, or a bad tolerance rejected
+  as a scorer error. A band collapsed to one value with a tolerance
+  agrees with `json_path`, and the same number agrees with `range`
+  — both consistency checks pinned in tests.~~ (done in v0.66.0)
