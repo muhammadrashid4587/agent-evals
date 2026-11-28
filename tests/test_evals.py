@@ -4464,6 +4464,158 @@ class TestJsonPathExistsScorer(unittest.TestCase):
             self.assertEqual(exists[2], equals[2], output)
 
 
+class TestKeywordOrderScorer(unittest.TestCase):
+    def test_in_order_passes(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "keyword_order",
+                    "keywords": ["gather", "verify", "submit"],
+                }
+            ),
+            "first gather the facts, then verify them, then submit",
+        )
+        self.assertTrue(ok)
+        self.assertIn("in order", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_out_of_order_fails_with_ordered_prefix_credit(self):
+        # "verify" comes before "gather" here, so the ordered prefix
+        # stops at one of three keywords.
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "keyword_order",
+                    "keywords": ["gather", "verify", "submit"],
+                }
+            ),
+            "first verify the facts, then gather them, then submit",
+        )
+        self.assertFalse(ok)
+        self.assertIn("out of order", detail)
+        self.assertIn("'verify'", detail)
+        self.assertAlmostEqual(score, 1 / 3)
+
+    def test_missing_keyword_fails(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "keyword_order",
+                    "keywords": ["gather", "verify", "submit"],
+                }
+            ),
+            "gather the facts, then verify them",
+        )
+        self.assertFalse(ok)
+        self.assertIn("missing", detail)
+        self.assertIn("'submit'", detail)
+        self.assertAlmostEqual(score, 2 / 3)
+
+    def test_none_found_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "keyword_order", "keywords": ["a", "b"]}),
+            "nothing here",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_list_scores_one(self):
+        ok, _, score = score_case(
+            _case({"type": "keyword_order", "keywords": []}), "anything"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_repeated_keyword_needs_a_second_occurrence(self):
+        ok, _, score = score_case(
+            _case({"type": "keyword_order", "keywords": ["step", "step"]}),
+            "one step only",
+        )
+        self.assertFalse(ok)
+        self.assertAlmostEqual(score, 0.5)
+        ok, _, score = score_case(
+            _case({"type": "keyword_order", "keywords": ["step", "step"]}),
+            "step one, then step two",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_ignore_case(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "keyword_order",
+                    "keywords": ["Gather", "VERIFY"],
+                    "ignore_case": True,
+                }
+            ),
+            "GATHER then verify",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_non_list_keywords_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "keyword_order", "keywords": "gather"}),
+                "gather",
+            )
+
+    def test_missing_keywords_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "keyword_order"}), "gather")
+
+    def test_non_boolean_ignore_case_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "keyword_order",
+                        "keywords": ["a"],
+                        "ignore_case": "yes",
+                    }
+                ),
+                "a",
+            )
+
+    def test_agrees_with_contains_all_when_in_order(self):
+        # When the keywords appear in order, keyword_order and
+        # contains_all agree exactly — pass and score — because
+        # presence in order implies presence.
+        for output, keywords in (
+            ("gather verify submit", ["gather", "verify", "submit"]),
+            ("a and b", ["a", "b"]),
+            ("nothing here", ["a", "b"]),
+        ):
+            ordered = score_case(
+                _case({"type": "keyword_order", "keywords": keywords}),
+                output,
+            )
+            unordered = score_case(
+                _case({"type": "contains_all", "substrings": keywords}),
+                output,
+            )
+            self.assertEqual(ordered[0], unordered[0], output)
+            self.assertEqual(ordered[2], unordered[2], output)
+
+    def test_out_of_order_passes_contains_all_but_not_keyword_order(self):
+        # Presence without order is exactly what keyword_order adds
+        # over contains_all: every keyword present, wrong sequence.
+        output = "verify then gather then submit"
+        keywords = ["gather", "verify", "submit"]
+        unordered = score_case(
+            _case({"type": "contains_all", "substrings": keywords}),
+            output,
+        )
+        ordered = score_case(
+            _case({"type": "keyword_order", "keywords": keywords}),
+            output,
+        )
+        self.assertTrue(unordered[0])
+        self.assertFalse(ordered[0])
+        self.assertLess(ordered[2], 1.0)
+
+
 class TestJsonSubsetScorer(unittest.TestCase):
     def test_extra_keys_ignored(self):
         ok, _, _ = score_case(

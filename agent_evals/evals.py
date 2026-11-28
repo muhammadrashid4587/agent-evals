@@ -521,12 +521,12 @@ def score_contains(output: str, substring: str, ignore_case: bool = False) -> tu
     return ok, detail, 1.0 if ok else 0.0
 
 
-def _as_substring_list(spec: dict, kind: str) -> list:
-    """Coerce a scorer spec's ``substrings`` value to a list of strings."""
-    substrings = spec.get("substrings")
-    if not isinstance(substrings, list):
-        raise ValueError(f"{kind} scorer requires a 'substrings' list")
-    return [str(s) for s in substrings]
+def _as_substring_list(spec: dict, kind: str, key: str = "substrings") -> list:
+    """Coerce a scorer spec's list value to a list of strings."""
+    values = spec.get(key)
+    if not isinstance(values, list):
+        raise ValueError(f"{kind} scorer requires a '{key}' list")
+    return [str(s) for s in values]
 
 
 def score_contains_all(
@@ -574,6 +574,57 @@ def score_contains_any(
         + ", ".join(repr(s) for s in substrings),
         0.0,
     )
+
+
+def score_keyword_order(
+    output: str, keywords: list, ignore_case: bool = False
+) -> tuple:
+    """Pass when the output contains every listed keyword, in order.
+
+    The ordered counterpart of ``score_contains_all``: where that
+    scorer only requires every keyword to be present, this one
+    requires them in the given order — a procedure that has to
+    name its steps in sequence ("gather", "verify", "submit"), a
+    summary that has to cover topics in order, a reply that must
+    not jump to the conclusion before the reasoning. Each keyword
+    must appear after the previous one ends, so a repeated keyword
+    needs a second occurrence to satisfy a second slot. An empty
+    list passes: there is nothing required to be present. Partial
+    credit: the score is the fraction of keywords found in order,
+    counting the longest ordered prefix, so an output that gets
+    the first two of three steps in sequence still earns most of
+    its weight. A case only counts as passed when every keyword
+    is found in order (score 1.0). With ``ignore_case``, the
+    comparison is case-insensitive; the detail still names the
+    keywords as written in the spec.
+    """
+    folded = _fold(output, ignore_case)
+    if not keywords:
+        return True, "all keywords found in order", 1.0
+    pos = 0
+    found = 0
+    blocker = None
+    previous = None
+    for keyword in keywords:
+        needle = _fold(keyword, ignore_case)
+        idx = folded.find(needle, pos)
+        if idx == -1:
+            blocker = keyword
+            break
+        found += 1
+        pos = idx + len(needle)
+        previous = keyword
+    score = found / len(keywords)
+    if blocker is None:
+        return True, "all keywords found in order", 1.0
+    if _fold(blocker, ignore_case) in folded:
+        if previous is None:
+            detail = f"keyword {blocker!r} out of order"
+        else:
+            detail = f"keyword {blocker!r} out of order after {previous!r}"
+    else:
+        detail = f"keyword {blocker!r} missing"
+    return False, detail, score
 
 
 def score_not_contains(
@@ -2955,6 +3006,8 @@ SCORER_TYPES = (
      "output contains every listed substring"),
     ("contains_any", {"substrings": ["hello", "hi"]},
      "output contains at least one listed substring"),
+    ("keyword_order", {"keywords": ["step", "verify", "done"]},
+     "the output contains the keywords in the given order"),
     ("not_contains", {"substrings": ["as an AI", "sorry"]},
      "output contains none of the listed substrings"),
     ("count", {"substring": "step", "min": 2, "max": 3},
@@ -3047,7 +3100,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     """Score one case's output. Returns (passed, detail, score) where
     ``score`` is in [0, 1]: 1.0 on a pass, 0.0 on a fail, or a fraction
     when the scorer gives partial credit (see ``score_contains_all``,
-    ``score_not_contains``, ``score_count``, ``score_regex_count``,
+    ``score_keyword_order``, ``score_not_contains``, ``score_count``, ``score_regex_count``,
     ``score_word_count``, ``score_unique_words``,
     ``score_sentence_count``, ``score_avg_sentence_length``,
     ``score_sentence_length_variance``, ``score_avg_word_length``,
@@ -3057,7 +3110,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``score_content_word_ratio``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, ``score_json_path_numeric``, ``score_json_path_count``, and ``score_judge``). ``judges`` is the registry of judge callables
     used by a ``judge`` scorer; None means the built-in registry.
     The string scorers (``contains``, ``contains_all``,
-    ``contains_any``, ``not_contains``, ``count``, ``starts_with``,
+    ``contains_any``, ``keyword_order``, ``not_contains``, ``count``, ``starts_with``,
     ``ends_with``, ``one_of``) and the ``exact``, ``fuzzy``,
     ``levenshtein``, ``regex``,
     ``contains_regex``, ``regex_count``, ``unique_words``, and
@@ -3094,6 +3147,12 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
         return score_contains_any(
             output,
             _as_substring_list(spec, kind),
+            _as_bool_option(spec, "ignore_case", kind),
+        )
+    if kind == "keyword_order":
+        return score_keyword_order(
+            output,
+            _as_substring_list(spec, kind, key="keywords"),
             _as_bool_option(spec, "ignore_case", kind),
         )
     if kind == "not_contains":

@@ -22,6 +22,7 @@ EXPECTED_TYPES = [
     "contains",
     "contains_all",
     "contains_any",
+    "keyword_order",
     "not_contains",
     "count",
     "regex",
@@ -111,7 +112,7 @@ class TestListScorersCli(unittest.TestCase):
     def test_lists_scorers_with_no_suite_and_no_agent(self):
         code, out = self._run(["--list-scorers"])
         self.assertEqual(code, 0)
-        self.assertIn("Scorers (38):", out)
+        self.assertIn("Scorers (39):", out)
         for kind in EXPECTED_TYPES:
             self.assertIn(kind, out)
         self.assertIn('"type": "exact"', out)
@@ -133,7 +134,7 @@ class TestListScorersCli(unittest.TestCase):
             ["--list-scorers", "--agent", "does.not.exist:agent"]
         )
         self.assertEqual(code, 0)
-        self.assertIn("Scorers (38):", out)
+        self.assertIn("Scorers (39):", out)
 
     def test_list_scorers_never_reads_a_suite(self):
         # A nonexistent suite path must not matter either: listing
@@ -142,7 +143,7 @@ class TestListScorersCli(unittest.TestCase):
             ["--list-scorers", "--suite", "does/not/exist.json"]
         )
         self.assertEqual(code, 0)
-        self.assertIn("Scorers (38):", out)
+        self.assertIn("Scorers (39):", out)
 
     def test_suite_still_required_without_list_scorers(self):
         with self.assertRaises(SystemExit) as caught:

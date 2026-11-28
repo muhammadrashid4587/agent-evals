@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Thirty-eight scorers: exact match, substring, contains-all,
-  contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, sentence length variance, average word length, word length variance, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
+- Thirty-nine scorers: exact match, substring, contains-all,
+  contains-any, keyword order, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, sentence length variance, average word length, word length variance, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON-path
   numeric range, JSON-path count, JSON-path existence, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
@@ -100,6 +100,7 @@ detail; the run continues with the remaining cases.
 | `contains` | `{"substring": "hello"}` | output contains the substring (optional `"ignore_case": true` for a case-insensitive match) |
 | `contains_all` | `{"substrings": ["hello", "world"]}` | output contains every listed substring (empty list passes; optional `"ignore_case": true`) |
 | `contains_any` | `{"substrings": ["hello", "hi"]}` | output contains at least one listed substring (empty list fails; optional `"ignore_case": true`) |
+| `keyword_order` | `{"keywords": ["step", "verify", "done"]}` | output contains the keywords in the given order (empty list passes; optional `"ignore_case": true`) |
 | `not_contains` | `{"substrings": ["as an AI", "sorry"]}` | output contains none of the listed substrings (empty list passes; optional `"ignore_case": true`) |
 | `count` | `{"substring": "step", "min": 2, "max": 3}` | output contains the substring a bounded number of times (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `regex` | `{"pattern": "^\\d+$"}` | the regex matches anywhere in the output (optional `"ignore_case": true` for a case-insensitive match) |
@@ -136,17 +137,18 @@ detail; the run continues with the remaining cases.
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
 To see every scorer without opening this file, `--list-scorers`
-prints all thirty-eight with an example spec and a one-line
+prints all thirty-nine with an example spec and a one-line
 description, and exits without a suite or an agent:
 
 ```bash
 python -m agent_evals.cli --list-scorers
-# Scorers (38):
+# Scorers (39):
 #   exact                     {"type": "exact", "expected": "19"}  output equals the expected string
 #   avg_word_length           {"type": "avg_word_length", "min": 4, "max": 8}  average word length in characters falls in a bounded range
 #   word_length_variance      {"type": "word_length_variance", "min": 1, "max": 9}  word-length variance falls in a bounded range
 #   json_path_count           {"type": "json_path_count", "path": "$.items", "min": 2, "max": 5}  the number of items at the JSON path falls in a bounded range
 #   json_path_exists          {"type": "json_path_exists", "path": "$.result.id"}  the value at the JSON path exists
+#   keyword_order             {"type": "keyword_order", "keywords": ["step", "verify", "done"]}  the output contains the keywords in the given order
 #   judge                     {"type": "judge", "judge": "stub", "rubric": {"criteria": [{"name": "mentions hello", "must_mention": ["hello"]}]}}  a judge scores the output against a rubric
 ```
 
@@ -358,6 +360,27 @@ substrings appears in the output. It gives partial credit like
 are absent, so an output that slips in one of four forbidden phrases
 still earns most of its weight. An empty `substrings` list passes
 vacuously: there is nothing forbidden to find.
+
+The `keyword_order` scorer is the ordered counterpart of
+`contains_all`, for output that must name things in sequence — a
+procedure that has to name its steps in order ("gather", "verify",
+"submit"), a summary that has to cover topics in order, a reply that
+must not jump to the conclusion before the reasoning. It passes when
+every listed keyword appears in the output in the given order, each
+after the previous one ends, so a repeated keyword needs a second
+occurrence to satisfy a second slot. It gives partial credit like
+`contains_all`: the score is the fraction of keywords found in
+order, counting the longest ordered prefix, so an output that gets
+the first two of three steps in sequence still earns most of its
+weight. An empty `keywords` list passes vacuously: there is nothing
+required to be present. It accepts an optional `"ignore_case":
+true`, which case-folds both the keywords and the output before
+comparing. A missing `keywords`, a non-list `keywords`, or a
+non-boolean `ignore_case` is a scorer error. When the keywords
+appear in order it agrees exactly with `contains_all`, and an
+output with every keyword present but out of sequence passes
+`contains_all` and fails `keyword_order` — both consistency checks
+are pinned in the tests.
 
 The `count` scorer is for output that must mention something a
 bounded number of times — an answer that has to name a term at
@@ -2466,3 +2489,17 @@ make demo    # run both example suites through the CLI
   given the value actually at the path as its expected value,
   passes — the consistency check pinned in tests.~~ (done in
   v0.72.0)
+- ~~`keyword_order` scorer: the ordered counterpart of
+  `contains_all` — it checks that every listed keyword appears in
+  the output in the given order, each after the previous one ends,
+  e.g. a procedure that has to name its steps in sequence, with
+  partial credit like `contains_all` (the fraction of keywords
+  found in order, counting the longest ordered prefix), an empty
+  list passing vacuously, a repeated keyword needing a second
+  occurrence, an optional `"ignore_case": true`, and a missing or
+  non-list `keywords` rejected as a scorer error. When the
+  keywords appear in order it agrees exactly with `contains_all`,
+  and an output with every keyword present but out of sequence
+  passes `contains_all` and fails `keyword_order` — both
+  consistency checks pinned in tests.~~ (done in
+  v0.73.0)
