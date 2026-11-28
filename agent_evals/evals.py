@@ -2523,6 +2523,45 @@ def score_json_path_count(
     return True, f"{path} has {n} item(s)", 1.0
 
 
+def score_json_path_exists(
+    output: str,
+    path: str,
+    non_null: bool = False,
+) -> tuple:
+    """Pass when the value at ``path`` in the output JSON exists.
+
+    The existence counterpart of ``score_json_path``: where that
+    scorer checks that the value at a path equals an expected value,
+    ``json_path_exists`` checks only that the path resolves — an
+    agent that has to return a ``result.id`` at all, a response that
+    must carry an ``error`` field whether or not it is set, a
+    payload that must include a ``metadata`` object. Any value
+    counts as existing, including a falsy one: ``0``, ``false``,
+    ``""``, an empty list, and ``null`` all pass, because presence
+    is not truthiness. The path is the same dotted language
+    ``json_path`` uses (optional ``$`` prefix, ``[n]`` array
+    indices), so ``$.result.id`` and ``items[0].name`` both work.
+    An optional ``non_null`` requires the value not be null, so a
+    field that is present but explicitly null fails when it is set.
+    An output that is not valid JSON fails with a score of 0.0, and
+    a missing key or index fails the same way. A malformed path, or
+    a non-boolean ``non_null``, is a scorer error. The score is
+    all-or-nothing, like ``exact``: 1.0 on a pass, 0.0 on a fail —
+    existence is binary, so there is no partial credit to give.
+    """
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError as exc:
+        return False, f"output is not valid JSON: {exc}", 0.0
+    steps = _parse_json_path(path)
+    found, extracted = _extract_json_path(value, steps, path)
+    if not found:
+        return False, extracted, 0.0
+    if non_null and extracted is None:
+        return False, f"{path} is null", 0.0
+    return True, f"{path} exists", 1.0
+
+
 def _count_leaves(value: Any) -> int:
     """Count the scalar leaves in an expected JSON value: one per
     scalar, the sum of the elements for a list, the sum of the values
@@ -2960,6 +2999,8 @@ SCORER_TYPES = (
      "the number at the JSON path falls in a bounded range"),
     ("json_path_count", {"path": "$.items", "min": 2, "max": 5},
      "the number of items at the JSON path falls in a bounded range"),
+    ("json_path_exists", {"path": "$.result.id"},
+     "the value at the JSON path exists"),
     ("json_subset", {"expected": {"status": "ok", "total": 42}},
      "the output JSON contains every expected field with a matching value"),
     ("json_equals", {"expected": {"status": "ok", "total": 42}},
@@ -3381,6 +3422,14 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
             str(spec["path"]),
             minimum,
             maximum,
+        )
+    if kind == "json_path_exists":
+        if "path" not in spec:
+            raise ValueError("json_path_exists scorer requires a 'path'")
+        return score_json_path_exists(
+            output,
+            str(spec["path"]),
+            _as_bool_option(spec, "non_null", kind),
         )
     if kind == "json_subset":
         if "expected" not in spec:

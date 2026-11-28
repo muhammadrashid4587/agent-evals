@@ -44,6 +44,7 @@ EXPECTED_TYPES = [
     "json_path",
     "json_path_numeric",
     "json_path_count",
+    "json_path_exists",
     "json_subset",
     "json_equals",
     "fuzzy",
@@ -110,7 +111,7 @@ class TestListScorersCli(unittest.TestCase):
     def test_lists_scorers_with_no_suite_and_no_agent(self):
         code, out = self._run(["--list-scorers"])
         self.assertEqual(code, 0)
-        self.assertIn("Scorers (37):", out)
+        self.assertIn("Scorers (38):", out)
         for kind in EXPECTED_TYPES:
             self.assertIn(kind, out)
         self.assertIn('"type": "exact"', out)
@@ -123,6 +124,8 @@ class TestListScorersCli(unittest.TestCase):
             "number of items at the JSON path falls in a bounded range",
             out,
         )
+        self.assertIn('"type": "json_path_exists"', out)
+        self.assertIn("the value at the JSON path exists", out)
 
     def test_list_scorers_never_imports_an_agent(self):
         # A bogus agent spec must not matter: listing never loads it.
@@ -130,7 +133,7 @@ class TestListScorersCli(unittest.TestCase):
             ["--list-scorers", "--agent", "does.not.exist:agent"]
         )
         self.assertEqual(code, 0)
-        self.assertIn("Scorers (37):", out)
+        self.assertIn("Scorers (38):", out)
 
     def test_list_scorers_never_reads_a_suite(self):
         # A nonexistent suite path must not matter either: listing
@@ -139,7 +142,7 @@ class TestListScorersCli(unittest.TestCase):
             ["--list-scorers", "--suite", "does/not/exist.json"]
         )
         self.assertEqual(code, 0)
-        self.assertIn("Scorers (37):", out)
+        self.assertIn("Scorers (38):", out)
 
     def test_suite_still_required_without_list_scorers(self):
         with self.assertRaises(SystemExit) as caught:

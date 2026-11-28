@@ -15,10 +15,10 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Thirty-seven scorers: exact match, substring, contains-all,
+- Thirty-eight scorers: exact match, substring, contains-all,
   contains-any, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, sentence length variance, average word length, word length variance, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON-path
-  numeric range, JSON-path count, JSON
+  numeric range, JSON-path count, JSON-path existence, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
   length range,
   numeric range, numeric tolerance, and a judge scorer that scores
@@ -122,6 +122,7 @@ detail; the run continues with the remaining cases.
 | `json_path` | `{"path": "$.result.total", "expected": 42}` | the value at the JSON path equals the expected value (optional `tolerance` for numbers) |
 | `json_path_numeric` | `{"path": "$.result.score", "min": 80, "max": 100}` | the number at the JSON path falls in a bounded range (at least one of `min`/`max` required; optional `tolerance` widens the band) |
 | `json_path_count` | `{"path": "$.items", "min": 2, "max": 5}` | the number of items at the JSON path falls in a bounded range (at least one of `min`/`max` required) |
+| `json_path_exists` | `{"path": "$.result.id"}` | the value at the JSON path exists (optional `"non_null": true` requires it not be null) |
 | `json_subset` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON contains every expected field with a matching value; extra fields are ignored (optional `tolerance` for numbers) |
 | `json_equals` | `{"expected": {"status": "ok", "total": 42}}` | the output JSON is deeply equal to the expected value (optional `ignore_order` to compare arrays as multisets, optional `tolerance` for numbers) |
 | `fuzzy` | `{"expected": "hello world", "threshold": 0.8}` | the output is similar enough to the expected string (SequenceMatcher ratio at or above `threshold`, default 0.8; optional `"ignore_case": true` for a case-insensitive comparison) |
@@ -135,16 +136,17 @@ detail; the run continues with the remaining cases.
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
 To see every scorer without opening this file, `--list-scorers`
-prints all thirty-seven with an example spec and a one-line
+prints all thirty-eight with an example spec and a one-line
 description, and exits without a suite or an agent:
 
 ```bash
 python -m agent_evals.cli --list-scorers
-# Scorers (37):
+# Scorers (38):
 #   exact                     {"type": "exact", "expected": "19"}  output equals the expected string
 #   avg_word_length           {"type": "avg_word_length", "min": 4, "max": 8}  average word length in characters falls in a bounded range
 #   word_length_variance      {"type": "word_length_variance", "min": 1, "max": 9}  word-length variance falls in a bounded range
 #   json_path_count           {"type": "json_path_count", "path": "$.items", "min": 2, "max": 5}  the number of items at the JSON path falls in a bounded range
+#   json_path_exists          {"type": "json_path_exists", "path": "$.result.id"}  the value at the JSON path exists
 #   judge                     {"type": "judge", "judge": "stub", "rubric": {"criteria": [{"name": "mentions hello", "must_mention": ["hello"]}]}}  a judge scores the output against a rubric
 ```
 
@@ -224,6 +226,27 @@ error. The same count scored the same way agrees with `count` on
 the bare output — 2 occurrences against a floor of 4 is 0.5 either
 way — and a list and a dict with the same size agree with each
 other — both consistency checks are pinned in the tests.
+
+The `json_path_exists` scorer is the existence counterpart of
+`json_path`: where that scorer checks that the value at a path
+equals an expected value, `json_path_exists` checks only that the
+path resolves — an agent that has to return a `result.id` at all,
+a response that must carry an `error` field whether or not it is
+set, a payload that must include a `metadata` object. Any value
+counts as existing, including a falsy one: `0`, `false`, `""`, an
+empty list, and `null` all pass, because presence is not
+truthiness. It uses the same path language, so `$.result.id` and
+`items[0].name` both work, and the same failure modes: an output
+that is not valid JSON fails with a score of 0.0, and a missing
+key or index fails the same way. An optional `"non_null": true`
+requires the value not be null, so a field that is present but
+explicitly null fails when it is set. The score is all-or-nothing,
+like `exact`: 1.0 on a pass, 0.0 on a fail — existence is binary,
+so there is no partial credit to give. A missing `path`, a
+malformed path, or a non-boolean `non_null` is a scorer error.
+Existence passes exactly when `json_path`, given the value
+actually at the path as its expected value, passes — the
+consistency check is pinned in the tests.
 
 The JSON-subset scorer checks several fields at once where
 `json_path` checks one: `expected` is an object, and every field it
@@ -2429,3 +2452,17 @@ make demo    # run both example suites through the CLI
   `count`, and a list and a dict with the same size agree with each
   other — both consistency checks pinned in tests.~~ (done in
   v0.71.0)
+- ~~`json_path_exists` scorer: the existence counterpart of
+  `json_path` — it checks only that the value at a path exists,
+  e.g. an agent that has to return a `result.id` at all, with any
+  value counting as existing including falsy ones (`0`, `false`,
+  `""`, an empty list, and `null`, because presence is not
+  truthiness), using the same path language (`$.result.id`,
+  `items[0].name`), with an optional `"non_null": true` that
+  requires the value not be null, invalid JSON or a missing key
+  failing with 0.0, a missing or malformed path or a non-boolean
+  `non_null` rejected as a scorer error, and an all-or-nothing
+  score like `exact`. Existence passes exactly when `json_path`,
+  given the value actually at the path as its expected value,
+  passes — the consistency check pinned in tests.~~ (done in
+  v0.72.0)

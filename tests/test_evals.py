@@ -4295,6 +4295,175 @@ class TestJsonPathCountScorer(unittest.TestCase):
             self.assertEqual(score, 1.0)
 
 
+class TestJsonPathExistsScorer(unittest.TestCase):
+    def test_present_key_passes(self):
+        ok, detail, score = score_case(
+            _case({"type": "json_path_exists", "path": "$.result.id"}),
+            '{"result": {"id": 42}}',
+        )
+        self.assertTrue(ok)
+        self.assertIn("$.result.id", detail)
+        self.assertIn("exists", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_falsy_values_still_exist(self):
+        # Presence is not truthiness: 0, false, "", an empty list,
+        # and null all count as existing.
+        for output in (
+            '{"v": 0}',
+            '{"v": false}',
+            '{"v": ""}',
+            '{"v": []}',
+            '{"v": null}',
+        ):
+            ok, _, score = score_case(
+                _case({"type": "json_path_exists", "path": "$.v"}),
+                output,
+            )
+            self.assertTrue(ok, output)
+            self.assertEqual(score, 1.0, output)
+
+    def test_bare_path_and_array_index(self):
+        ok, _, _ = score_case(
+            _case({"type": "json_path_exists", "path": "results[0].name"}),
+            '{"results": [{"name": "ada"}]}',
+        )
+        self.assertTrue(ok)
+
+    def test_root_path_exists(self):
+        # The empty path is the whole document, which always exists.
+        ok, _, _ = score_case(
+            _case({"type": "json_path_exists", "path": "$"}),
+            '{"a": 1}',
+        )
+        self.assertTrue(ok)
+
+    def test_missing_key_fails(self):
+        ok, detail, score = score_case(
+            _case({"type": "json_path_exists", "path": "$.missing"}),
+            '{"items": [1]}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("missing", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_missing_index_fails(self):
+        ok, _, score = score_case(
+            _case({"type": "json_path_exists", "path": "$.items[3]"}),
+            '{"items": [1, 2]}',
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_invalid_json_fails(self):
+        ok, detail, score = score_case(
+            _case({"type": "json_path_exists", "path": "$.v"}),
+            "{not json",
+        )
+        self.assertFalse(ok)
+        self.assertIn("not valid JSON", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_non_null_rejects_null(self):
+        ok, detail, score = score_case(
+            _case(
+                {
+                    "type": "json_path_exists",
+                    "path": "$.v",
+                    "non_null": True,
+                }
+            ),
+            '{"v": null}',
+        )
+        self.assertFalse(ok)
+        self.assertIn("null", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_non_null_accepts_present_values(self):
+        # With non_null set, every present non-null value passes —
+        # including falsy ones like 0 and false.
+        for output in ('{"v": 0}', '{"v": false}', '{"v": ""}'):
+            ok, _, _ = score_case(
+                _case(
+                    {
+                        "type": "json_path_exists",
+                        "path": "$.v",
+                        "non_null": True,
+                    }
+                ),
+                output,
+            )
+            self.assertTrue(ok, output)
+
+    def test_non_null_still_fails_when_missing(self):
+        ok, _, score = score_case(
+            _case(
+                {
+                    "type": "json_path_exists",
+                    "path": "$.missing",
+                    "non_null": True,
+                }
+            ),
+            '{"v": 1}',
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_malformed_path_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "json_path_exists", "path": "$.a..b"}),
+                '{"a": {}}',
+            )
+
+    def test_missing_path_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "json_path_exists"}),
+                '{"a": 1}',
+            )
+
+    def test_non_boolean_non_null_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case(
+                    {
+                        "type": "json_path_exists",
+                        "path": "$.v",
+                        "non_null": "yes",
+                    }
+                ),
+                '{"v": 1}',
+            )
+
+    def test_agrees_with_json_path_on_presence(self):
+        # Existence passes exactly when json_path, given the value
+        # actually at the path as its expected value, passes — the
+        # two scorers share the same path language and the same
+        # notion of "found".
+        for output, path, expected in (
+            ('{"result": {"id": 42}}', "$.result.id", 42),
+            ('{"result": {"id": null}}', "$.result.id", None),
+            ('{"items": ["a", "b"]}', "$.items[1]", "b"),
+        ):
+            exists = score_case(
+                _case({"type": "json_path_exists", "path": path}),
+                output,
+            )
+            equals = score_case(
+                _case(
+                    {
+                        "type": "json_path",
+                        "path": path,
+                        "expected": expected,
+                    }
+                ),
+                output,
+            )
+            self.assertEqual(exists[0], equals[0], output)
+            self.assertEqual(exists[2], equals[2], output)
+
+
 class TestJsonSubsetScorer(unittest.TestCase):
     def test_extra_keys_ignored(self):
         ok, _, _ = score_case(
