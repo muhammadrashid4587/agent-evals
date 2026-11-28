@@ -15,8 +15,8 @@ Cases may also carry `tags`, so `--tag smoke` runs only the smoke cases.
 ## What it is
 
 - A small runner for evaluating an agent callable against a suite of cases.
-- Thirty-nine scorers: exact match, substring, contains-all,
-  contains-any, keyword order, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, sentence length variance, average word length, word length variance, readability, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
+- Forty scorers: exact match, substring, contains-all,
+  contains-any, keyword order, not-contains, count, word count, unique words, sentence count, keyword density, average sentence length, sentence length variance, average word length, word length variance, readability, syllable count, type-token ratio, hapax ratio, stopword ratio, content word ratio, regex, regex-count,
   contains-regex, JSON-schema shape, JSON-path value, JSON-path
   numeric range, JSON-path count, JSON-path existence, JSON
   subset, JSON equality, fuzzy similarity, levenshtein similarity, starts with, ends with, one of,
@@ -114,6 +114,7 @@ detail; the run continues with the remaining cases.
 | `avg_word_length` | `{"min": 4, "max": 8}` | the output's average word length in characters falls in a bounded range (at least one of `min`/`max` required) |
 | `word_length_variance` | `{"min": 1, "max": 9}` | the output's word-length variance (population variance of characters per word) falls in a bounded range (at least one of `min`/`max` required) |
 | `readability` | `{"min": 60, "max": 90}` | the output's Flesch reading ease falls in a bounded range (at least one of `min`/`max` required) |
+| `syllable_count` | `{"min": 5, "max": 20}` | the output has a bounded number of syllables (at least one of `min`/`max` required) |
 | `type_token_ratio` | `{"min": 0.5, "max": 0.9}` | the output's type-token ratio (distinct words / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `hapax_ratio` | `{"min": 0.5, "max": 0.9}` | the output's hapax ratio (words used exactly once / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
 | `stopword_ratio` | `{"min": 0.1, "max": 0.4}` | the output's stopword ratio (words in the built-in English stopword list / total words) falls in a bounded range (at least one of `min`/`max` required; optional `"ignore_case": true`) |
@@ -137,12 +138,12 @@ detail; the run continues with the remaining cases.
 | `judge` | `{"judge": "stub", "rubric": {"criteria": [...]}}` | a judge scores the output against the rubric (see below) |
 
 To see every scorer without opening this file, `--list-scorers`
-prints all thirty-nine with an example spec and a one-line
+prints all forty with an example spec and a one-line
 description, and exits without a suite or an agent:
 
 ```bash
 python -m agent_evals.cli --list-scorers
-# Scorers (39):
+# Scorers (40):
 #   exact                     {"type": "exact", "expected": "19"}  output equals the expected string
 #   avg_word_length           {"type": "avg_word_length", "min": 4, "max": 8}  average word length in characters falls in a bounded range
 #   word_length_variance      {"type": "word_length_variance", "min": 1, "max": 9}  word-length variance falls in a bounded range
@@ -687,6 +688,41 @@ otherwise. Case is irrelevant to counting words, sentences, and
 syllables, so there is no `"ignore_case"` option. A non-numeric,
 non-finite, or boolean bound, `min` above `max`, or neither bound
 given is a scorer error.
+
+The `syllable_count` scorer is the syllable-count counterpart of
+`word_count`: it passes when the output has a bounded number of
+syllables — an answer that has to be at least a paragraph of
+spoken length, a summary that has to fit in a breath, a reply
+that must not drone on in long words. Syllables are counted with
+the same naive heuristic `readability` uses: a syllable is a run
+of vowel letters (`a`, `e`, `i`, `o`, `u`, `y`), a silent
+trailing `e` does not count unless it is the word's only vowel,
+and a trailing `le` after a consonant is its own syllable — so
+`"cake"` is one syllable, `"table"` is two, and `"beautiful"` is
+three. Words are the whitespace-separated tokens of the stripped
+output, counted the same way `word_count` counts words, and a
+token with no letters at all (`"42"`) has no syllables, so a
+number-heavy output can have fewer syllables than words. It
+passes when the count falls in `[min, max]`; at least one bound
+is required, and a missing bound is unbounded on that side, so
+`{"min": 5}` only sets a floor and `{"max": 20}` only sets a
+ceiling. It gives partial credit like `count`: below the minimum
+the score is `n / min` (0 when the output has no syllables),
+above the maximum it falls linearly to 0 at twice the maximum, so
+an output just outside the range still earns most of its weight
+and one wildly outside earns nothing; a maximum of 0 gives no
+partial credit above it, so any syllable scores 0.0. An output
+with no words has no syllables to count: it scores 0.0 unless the
+minimum is 0 (or there is no minimum), in which case a count of 0
+is in range and it passes. Case is irrelevant to counting
+syllables, so there is no `"ignore_case"` option. A non-integer,
+negative, or boolean bound, `min` above `max`, or neither bound
+given is a scorer error. The same output scored the same way
+agrees with `readability` on the syllable total — the two scorers
+share the heuristic — and it can disagree with `word_count`:
+`"hello world"` is 2 words but 3 syllables, so a case that pins
+the syllable count catches long words where a word-count case
+would pass it — both consistency checks are pinned in the tests.
 
 The `type_token_ratio` scorer is the lexical-diversity counterpart
 of `unique_words`: it passes when the output's type-token ratio
@@ -2503,3 +2539,19 @@ make demo    # run both example suites through the CLI
   passes `contains_all` and fails `keyword_order` — both
   consistency checks pinned in tests.~~ (done in
   v0.73.0)
+- ~~`syllable_count` scorer: the syllable-count counterpart of
+  `word_count` — it checks that the output has a bounded number of
+  syllables, e.g. `"hello world"` is 3 syllables, using the same
+  naive syllable heuristic `readability` uses (a vowel run is a
+  syllable, a silent trailing `e` does not count, a trailing `le`
+  after a consonant is its own syllable), with at least one of
+  `min`/`max` required, non-negative integer bounds, partial credit
+  like `count` (below the minimum the score is `n / min`, above
+  the maximum it falls linearly to 0 at twice the maximum), a
+  maximum of 0 forbidding any syllable, an output with no words
+  scoring 0.0 unless the minimum is 0, a token with no letters
+  (`"42"`) counting no syllables, and a non-integer, negative, or
+  boolean bound, `min` above `max`, or neither bound given rejected
+  as a scorer error. The same output agrees with `readability` on
+  the syllable total, and it can disagree with `word_count` — both
+  consistency checks pinned in tests.~~ (done in v0.74.0)

@@ -2452,6 +2452,190 @@ class TestReadabilityScorer(unittest.TestCase):
             )
 
 
+class TestSyllableCountScorer(unittest.TestCase):
+    def test_within_bounds_passes(self):
+        # "The cat sat. The dog ran." — 6 words, 6 syllables: every
+        # word is one syllable.
+        ok, detail, score = score_case(
+            _case({"type": "syllable_count", "min": 5, "max": 10}),
+            "The cat sat. The dog ran.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("syllable count 6", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_multi_syllable_words(self):
+        # "Reading is beautiful and easy." — 9 syllables: reading 2,
+        # is 1, beautiful 3, and 1, easy 2.
+        ok, detail, score = score_case(
+            _case({"type": "syllable_count", "min": 9, "max": 9}),
+            "Reading is beautiful and easy.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("syllable count 9", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_silent_e_and_le(self):
+        # "The table is stable." — 6 syllables: table and stable are
+        # 2 each (consonant + "le"), the and is 1 each.
+        ok, detail, score = score_case(
+            _case({"type": "syllable_count", "min": 6, "max": 6}),
+            "The table is stable.",
+        )
+        self.assertTrue(ok)
+        self.assertIn("syllable count 6", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_below_minimum_partial_credit(self):
+        # "hello world" is 3 syllables of a 6 minimum: 3 / 6 = 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "syllable_count", "min": 6}),
+            "hello world",
+        )
+        self.assertFalse(ok)
+        self.assertIn("below minimum 6", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_above_maximum_partial_credit(self):
+        # 9 syllables of a 6 maximum: (2*6 - 9) / 6 = 0.5.
+        ok, detail, score = score_case(
+            _case({"type": "syllable_count", "max": 6}),
+            "Reading is beautiful and easy.",
+        )
+        self.assertFalse(ok)
+        self.assertIn("above maximum 6", detail)
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_twice_maximum_scores_zero(self):
+        ok, _, score = score_case(
+            _case({"type": "syllable_count", "max": 4}),
+            "Reading is beautiful and easy.",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_max_zero_forbids_any_syllable(self):
+        ok, _, score = score_case(
+            _case({"type": "syllable_count", "max": 0}),
+            "hello",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+        ok, _, score = score_case(
+            _case({"type": "syllable_count", "max": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_empty_output_scores_zero(self):
+        ok, detail, score = score_case(
+            _case({"type": "syllable_count", "min": 5}),
+            "   ",
+        )
+        self.assertFalse(ok)
+        self.assertIn("syllable count 0", detail)
+        self.assertEqual(score, 0.0)
+
+    def test_empty_output_passes_when_min_zero(self):
+        # No syllables: a count of 0 is in range when the minimum
+        # is 0, and when there is no minimum at all.
+        ok, _, score = score_case(
+            _case({"type": "syllable_count", "min": 0}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "syllable_count", "max": 5}),
+            "   ",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(score, 1.0)
+
+    def test_number_tokens_have_no_syllables(self):
+        # "answer 42" is 2 syllables: "answer" is 2, "42" has no
+        # letters and none.
+        ok, detail, score = score_case(
+            _case({"type": "syllable_count", "min": 2, "max": 2}),
+            "answer 42",
+        )
+        self.assertTrue(ok)
+        self.assertIn("syllable count 2", detail)
+        self.assertEqual(score, 1.0)
+        ok, _, score = score_case(
+            _case({"type": "syllable_count", "min": 1}),
+            "42",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(score, 0.0)
+
+    def test_agrees_with_readability_on_the_syllable_total(self):
+        # The same text scored by readability carries the same
+        # syllable total in its detail: the two scorers share the
+        # heuristic, so they cannot drift apart.
+        text = "The cat sat. The dog ran."
+        _, readable_detail, _ = score_case(
+            _case({"type": "readability", "min": 60, "max": 120}),
+            text,
+        )
+        self.assertIn("6 syllable(s)", readable_detail)
+        ok, detail, score = score_case(
+            _case({"type": "syllable_count", "min": 6, "max": 6}),
+            text,
+        )
+        self.assertTrue(ok)
+        self.assertIn("syllable count 6", detail)
+        self.assertEqual(score, 1.0)
+
+    def test_can_disagree_with_word_count(self):
+        # "hello world" is 2 words but 3 syllables: a case that
+        # pins the syllable count catches long words where a
+        # word-count case would pass it.
+        words = score_case(
+            _case({"type": "word_count", "min": 3}),
+            "hello world",
+        )
+        syllables = score_case(
+            _case({"type": "syllable_count", "min": 3, "max": 3}),
+            "hello world",
+        )
+        self.assertFalse(words[0])
+        self.assertTrue(syllables[0])
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(_case({"type": "syllable_count"}), "One two.")
+
+    def test_min_above_max_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "syllable_count", "min": 10, "max": 5}),
+                "One two.",
+            )
+
+    def test_non_integer_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "syllable_count", "min": 2.5}),
+                "One two.",
+            )
+
+    def test_bool_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "syllable_count", "min": True}),
+                "One.",
+            )
+
+    def test_negative_bound_raises(self):
+        with self.assertRaises(ValueError):
+            score_case(
+                _case({"type": "syllable_count", "min": -1}),
+                "One.",
+            )
+
+
 class TestTypeTokenRatioScorer(unittest.TestCase):
     def test_within_bounds_passes(self):
         # "one two three one" — 3 distinct of 4 words: 0.75.

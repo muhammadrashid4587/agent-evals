@@ -1677,6 +1677,60 @@ def score_readability(
     return True, detail, 1.0
 
 
+def score_syllable_count(
+    output: str,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> tuple:
+    """Pass when the output has a bounded number of syllables.
+
+    The syllable-count counterpart of ``score_word_count``: an
+    answer that has to be at least a paragraph of spoken length, a
+    summary that has to fit in a breath, a reply that must not
+    drone on in long words. Syllables are counted with the same
+    naive heuristic ``readability`` uses (:func:`_count_syllables`):
+    a syllable is a run of vowel letters, a silent trailing ``e``
+    does not count unless it is the word's only vowel, and a
+    trailing ``le`` after a consonant is its own syllable — so
+    ``"cake"`` is one syllable, ``"table"`` is two, and
+    ``"beautiful"`` is three. Words are the whitespace-separated
+    tokens of the stripped output, counted the same way
+    ``word_count`` counts words, and a token with no letters at
+    all (``"42"``) has no syllables, so a number-heavy output can
+    have fewer syllables than words. At least one bound is
+    required, and a missing bound is unbounded on that side, so
+    ``{"min": 5}`` only sets a floor and ``{"max": 20}`` only sets
+    a ceiling. Partial credit mirrors ``count``: below the minimum
+    the score is ``n / min`` (0 when the output has no syllables),
+    above the maximum it falls linearly to 0 at twice the maximum,
+    so an output just outside the range still earns most of its
+    weight and one wildly outside earns nothing. A maximum of 0
+    gives no partial credit above it: any syllable scores 0.0.
+    Case is irrelevant to counting syllables, so there is no
+    ``ignore_case`` option — the count is the same whatever the
+    casing.
+    """
+    n = sum(_count_syllables(word) for word in output.strip().split())
+    if minimum is not None and n < minimum:
+        score = n / minimum if minimum else 0.0
+        return (
+            False,
+            f"syllable count {n}, below minimum {minimum}",
+            score,
+        )
+    if maximum is not None and n > maximum:
+        if maximum == 0:
+            score = 0.0
+        else:
+            score = max(0.0, (2 * maximum - n) / maximum)
+        return (
+            False,
+            f"syllable count {n}, above maximum {maximum}",
+            score,
+        )
+    return True, f"syllable count {n}", 1.0
+
+
 def score_type_token_ratio(
     output: str,
     minimum: Optional[float] = None,
@@ -3034,6 +3088,8 @@ SCORER_TYPES = (
      "word-length variance falls in a bounded range"),
     ("readability", {"min": 60, "max": 90},
      "Flesch reading ease falls in a bounded range"),
+    ("syllable_count", {"min": 5, "max": 20},
+     "the output has a bounded number of syllables"),
     ("type_token_ratio", {"min": 0.5, "max": 0.9},
      "type-token ratio falls in a bounded range"),
     ("hapax_ratio", {"min": 0.5, "max": 0.9},
@@ -3105,6 +3161,7 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
     ``score_sentence_count``, ``score_avg_sentence_length``,
     ``score_sentence_length_variance``, ``score_avg_word_length``,
     ``score_word_length_variance``, ``score_readability``,
+    ``score_syllable_count``,
     ``score_keyword_density``, ``score_type_token_ratio``,
     ``score_hapax_ratio``, ``score_stopword_ratio``,
     ``score_content_word_ratio``, ``score_fuzzy``, ``score_levenshtein``, ``score_starts_with``, ``score_ends_with``, ``score_length``, ``score_range``, ``score_json_path_numeric``, ``score_json_path_count``, and ``score_judge``). ``judges`` is the registry of judge callables
@@ -3342,6 +3399,19 @@ def score_case(case: Case, output: str, judges: Optional[dict] = None) -> tuple:
                 f"got {minimum} > {maximum}"
             )
         return score_readability(output, minimum, maximum)
+    if kind == "syllable_count":
+        minimum = _as_length_bound(spec, "min", kind)
+        maximum = _as_length_bound(spec, "max", kind)
+        if minimum is None and maximum is None:
+            raise ValueError(
+                "syllable_count scorer requires at least one of 'min' or 'max'"
+            )
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(
+                "syllable_count scorer requires 'min' <= 'max', "
+                f"got {minimum} > {maximum}"
+            )
+        return score_syllable_count(output, minimum, maximum)
     if kind == "keyword_density":
         keywords = _as_keyword_list(spec, kind)
         minimum = _as_density_bound(spec, "min", kind)
